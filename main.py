@@ -22,6 +22,7 @@ from schedule_bot.scheduler import (
     build_scheduler,
     reschedule_daily_job,
     reschedule_hourly_job,
+    resolve_sync_settings,
 )
 from schedule_bot.sync import check_and_apply_diff
 from schedule_bot.weektype import WeekFormula, fetch_week_formula, load_week_formula, save_week_formula
@@ -67,8 +68,7 @@ def build_application(config: Config, conn) -> Application:
     application.bot_data["active_pdf_path_getter"] = lambda: _load_active_pdf_path(conn)
 
     async def sync_fn():
-        pdf_source = storage.get_setting(conn, "pdf_source")
-        group_name = storage.get_setting(conn, "group_name")
+        pdf_source, group_name = resolve_sync_settings(conn, config)
 
         async def notify(chat_id, text):
             await application.bot.send_message(chat_id=chat_id, text=text)

@@ -11,6 +11,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from schedule_bot import storage
 from schedule_bot.formatting import format_day_schedule
 from schedule_bot.pdf_parser import DAY_ORDER, schedule_from_dict
+from schedule_bot.screenshot import render_day_image
 from schedule_bot.sync import check_and_apply_diff
 from schedule_bot.weektype import WeekFormula, fetch_week_formula, save_week_formula
 
@@ -24,9 +25,18 @@ async def _notify(bot, chat_id: int, text: str) -> None:
     await bot.send_message(chat_id=chat_id, text=text)
 
 
-async def _run_sync(conn, config, bot) -> "SyncResult":
+def resolve_sync_settings(conn, config) -> tuple[str, str]:
+    """Resolve (pdf_source, group_name) from stored settings, falling back
+    to config defaults if a setting is missing (should not normally
+    happen since ensure_default_settings seeds them, but is a real risk
+    if a setting is ever deleted or the DB is manually edited)."""
     pdf_source = storage.get_setting(conn, "pdf_source") or config.default_pdf_source
     group_name = storage.get_setting(conn, "group_name") or config.default_group_name
+    return pdf_source, group_name
+
+
+async def _run_sync(conn, config, bot) -> "SyncResult":
+    pdf_source, group_name = resolve_sync_settings(conn, config)
     return await check_and_apply_diff(
         conn, pdf_source, group_name, config.pdf_cache_dir, lambda chat_id, text: _notify(bot, chat_id, text)
     )
@@ -37,7 +47,12 @@ async def hourly_check_job(conn, config, bot) -> None:
 
 
 async def daily_send_job(conn, config, bot, week_formula_holder: WeekFormulaHolder) -> None:
-    await _run_sync(conn, config, bot)
+    # I1: sync failure must not prevent the daily send — subscribers should
+    # get today's schedule "в любом случае" even if the sync check errors.
+    try:
+        await _run_sync(conn, config, bot)
+    except Exception as error:
+        print(f"scheduler: daily_send_job sync failed, sending with last known schedule: {error}", file=sys.stderr)
 
     group_name = storage.get_setting(conn, "group_name") or config.default_group_name
     active = storage.get_active_version(conn, group_name)
@@ -53,8 +68,23 @@ async def daily_send_job(conn, config, bot, week_formula_holder: WeekFormulaHold
     week_type = week_formula_holder.formula.compute(today)
     text = format_day_schedule(day_name, today, week_type, schedule)
 
+    # I3: render the day's screenshot once and reuse the bytes for every
+    # subscriber; I4: a missing/stale cached PDF must not crash the job.
+    image_bytes = None
+    try:
+        image_bytes = render_day_image(active.pdf_cache_path, schedule, day_name)
+    except Exception as error:
+        print(f"scheduler: failed to render day image for {active.pdf_cache_path!r}: {error}", file=sys.stderr)
+
+    # I2: isolate per-subscriber failures so one blocked chat doesn't kill
+    # the daily send for everyone after it.
     for chat_id in storage.list_subscribers(conn, group_name):
-        await bot.send_message(chat_id=chat_id, text=text)
+        try:
+            await bot.send_message(chat_id=chat_id, text=text)
+            if image_bytes is not None:
+                await bot.send_photo(chat_id=chat_id, photo=image_bytes)
+        except Exception as error:
+            print(f"scheduler: failed to send daily schedule to chat_id={chat_id}: {error}", file=sys.stderr)
 
 
 async def weekly_weektype_refresh_job(conn, week_formula_holder: WeekFormulaHolder) -> None:
