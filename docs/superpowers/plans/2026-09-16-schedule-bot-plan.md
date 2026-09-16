@@ -1242,10 +1242,10 @@ def compute_diff(old: Schedule | None, new: Schedule) -> list[str]:
     old_days = old.days if old is not None else {}
 
     for day in DAY_ORDER:
+        old_day = old_days.get(day)
         old_lessons = {
-            lesson.time: (lesson.upper, lesson.lower)
-            for lesson in old_days.get(day, type("_", (), {"lessons": []})()).lessons
-        } if day in old_days else {}
+            lesson.time: (lesson.upper, lesson.lower) for lesson in (old_day.lessons if old_day else [])
+        }
         new_day = new.days.get(day)
         new_lessons = {
             lesson.time: (lesson.upper, lesson.lower) for lesson in (new_day.lessons if new_day else [])
