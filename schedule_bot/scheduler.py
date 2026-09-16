@@ -12,7 +12,7 @@ from schedule_bot import storage
 from schedule_bot.formatting import format_day_schedule
 from schedule_bot.pdf_parser import DAY_ORDER, schedule_from_dict
 from schedule_bot.sync import check_and_apply_diff
-from schedule_bot.weektype import WeekFormula, fetch_week_formula
+from schedule_bot.weektype import WeekFormula, fetch_week_formula, save_week_formula
 
 
 @dataclass
@@ -62,9 +62,16 @@ async def weekly_weektype_refresh_job(conn, week_formula_holder: WeekFormulaHold
     if not url:
         return
     try:
-        week_formula_holder.formula = fetch_week_formula(url)
-    except Exception:
-        pass  # keep using the last known-good formula; caller may log this
+        new_formula = fetch_week_formula(url)
+    except Exception as error:
+        print(
+            f"scheduler: weekly week-type refresh failed for {url!r} ({error}); "
+            "keeping last known-good formula",
+            file=sys.stderr,
+        )
+        return
+    week_formula_holder.formula = new_formula
+    save_week_formula(conn, new_formula)
 
 
 def _parse_hh_mm(value: str) -> tuple[int, int]:

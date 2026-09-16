@@ -42,3 +42,35 @@ def fetch_week_formula(url: str) -> WeekFormula:
     response = requests.get(url, timeout=15)
     response.raise_for_status()
     return parse_week_formula(response.text)
+
+
+_SETTING_BASE_MONTH = "weekformula_base_month"
+_SETTING_BASE_DAY = "weekformula_base_day"
+_SETTING_EVEN_UPPER = "weekformula_even_upper"
+
+
+def save_week_formula(conn, formula: WeekFormula) -> None:
+    """Persist a WeekFormula to settings so it survives process restarts
+    even if the next scheduled/startup fetch of the institute's page fails."""
+    from schedule_bot import storage
+
+    storage.set_setting(conn, _SETTING_BASE_MONTH, str(formula.base_month))
+    storage.set_setting(conn, _SETTING_BASE_DAY, str(formula.base_day))
+    storage.set_setting(conn, _SETTING_EVEN_UPPER, "1" if formula.even_index_is_upper else "0")
+
+
+def load_week_formula(conn) -> WeekFormula | None:
+    """Load a previously-persisted WeekFormula from settings, or None if
+    any of the three keys is missing (never successfully persisted)."""
+    from schedule_bot import storage
+
+    base_month = storage.get_setting(conn, _SETTING_BASE_MONTH)
+    base_day = storage.get_setting(conn, _SETTING_BASE_DAY)
+    even_upper = storage.get_setting(conn, _SETTING_EVEN_UPPER)
+    if base_month is None or base_day is None or even_upper is None:
+        return None
+    return WeekFormula(
+        base_month=int(base_month),
+        base_day=int(base_day),
+        even_index_is_upper=(even_upper == "1"),
+    )

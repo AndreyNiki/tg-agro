@@ -9,8 +9,9 @@ from schedule_bot.scheduler import (
     build_scheduler,
     reschedule_daily_job,
     reschedule_hourly_job,
+    weekly_weektype_refresh_job,
 )
-from schedule_bot.weektype import WeekFormula
+from schedule_bot.weektype import WeekFormula, load_week_formula
 
 
 @pytest.fixture
@@ -114,3 +115,37 @@ def test_reschedule_hourly_job_updates_interval(conn):
 
     job = scheduler.get_job("hourly_check")
     assert job.trigger.interval.total_seconds() == 15 * 60
+
+
+@pytest.mark.asyncio
+async def test_weekly_weektype_refresh_job_persists_successful_fetch(conn, monkeypatch):
+    """C3: a successful weekly refresh should persist the new formula so restarts
+    use the freshest known-good formula rather than a stale initial-deploy one."""
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+    new_formula = WeekFormula(base_month=9, base_day=1, even_index_is_upper=False)
+
+    import schedule_bot.scheduler as scheduler_module
+
+    monkeypatch.setattr(scheduler_module, "fetch_week_formula", lambda url: new_formula)
+
+    await weekly_weektype_refresh_job(conn, holder)
+
+    assert holder.formula == new_formula
+    assert load_week_formula(conn) == new_formula
+
+
+@pytest.mark.asyncio
+async def test_weekly_weektype_refresh_job_keeps_old_formula_on_failure(conn, monkeypatch):
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+
+    import schedule_bot.scheduler as scheduler_module
+
+    def raise_error(url):
+        raise ConnectionError("network unreachable")
+
+    monkeypatch.setattr(scheduler_module, "fetch_week_formula", raise_error)
+
+    await weekly_weektype_refresh_job(conn, holder)
+
+    assert holder.formula == WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
+    assert load_week_formula(conn) is None

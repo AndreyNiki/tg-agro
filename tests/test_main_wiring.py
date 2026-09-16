@@ -92,3 +92,51 @@ def test_build_application_week_formula_reflects_later_holder_updates(conn, conf
 
     second_result = week_formula.compute(on_date)
     assert first_result != second_result
+
+
+def test_build_application_persists_successfully_fetched_week_formula(conn, config, monkeypatch):
+    """C3: a successful fetch is persisted to settings so a later failure can fall back to it."""
+    from schedule_bot.weektype import load_week_formula
+
+    fetched = WeekFormula(base_month=3, base_day=17, even_index_is_upper=False)
+    monkeypatch.setattr("main.fetch_week_formula", lambda url: fetched)
+
+    build_application(config, conn)
+
+    persisted = load_week_formula(conn)
+    assert persisted == fetched
+
+
+def test_build_application_falls_back_to_persisted_formula_on_fetch_failure(conn, config, monkeypatch):
+    """C3 regression: build_application must not crash when fetch_week_formula raises,
+    and should use the previously persisted formula if one exists."""
+    from schedule_bot.weektype import save_week_formula
+
+    persisted_formula = WeekFormula(base_month=2, base_day=1, even_index_is_upper=False)
+    save_week_formula(conn, persisted_formula)
+
+    def raise_error(url):
+        raise ValueError("Week type formula pattern not found in page HTML")
+
+    monkeypatch.setattr("main.fetch_week_formula", raise_error)
+
+    application = build_application(config, conn)
+
+    holder = application.bot_data["_week_formula_holder"]
+    assert holder.formula == persisted_formula
+
+
+def test_build_application_falls_back_to_hardcoded_default_when_nothing_persisted(conn, config, monkeypatch):
+    """C3 regression: with no persisted formula and a failing fetch, build_application
+    must still succeed, using the hardcoded last-resort default."""
+    import main as main_module
+
+    def raise_error(url):
+        raise ConnectionError("network unreachable")
+
+    monkeypatch.setattr("main.fetch_week_formula", raise_error)
+
+    application = build_application(config, conn)
+
+    holder = application.bot_data["_week_formula_holder"]
+    assert holder.formula == main_module._FALLBACK_WEEK_FORMULA

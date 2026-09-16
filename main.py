@@ -1,4 +1,5 @@
 import os
+import sys
 
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
@@ -23,7 +24,9 @@ from schedule_bot.scheduler import (
     reschedule_hourly_job,
 )
 from schedule_bot.sync import check_and_apply_diff
-from schedule_bot.weektype import fetch_week_formula
+from schedule_bot.weektype import WeekFormula, fetch_week_formula, load_week_formula, save_week_formula
+
+_FALLBACK_WEEK_FORMULA = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
 
 
 class _LiveWeekFormula:
@@ -51,7 +54,7 @@ def build_application(config: Config, conn) -> Application:
         },
     )
 
-    week_formula = fetch_week_formula(storage.get_setting(conn, "weektype_url"))
+    week_formula = _fetch_week_formula_or_fallback(conn, storage.get_setting(conn, "weektype_url"))
     week_formula_holder = WeekFormulaHolder(formula=week_formula)
 
     application = Application.builder().token(config.telegram_token).build()
@@ -113,6 +116,33 @@ def _load_active_schedule(conn):
     if active is None:
         return None
     return schedule_from_dict(json.loads(active.payload_json))
+
+
+def _fetch_week_formula_or_fallback(conn, url):
+    """Fetch the week-type formula from the institute's site. On any
+    failure (network error, or the expected pattern not found in the
+    page), fall back to the last persisted formula, and if that's not
+    available either, to a hardcoded last-resort default — never let the
+    exception propagate and crash application startup."""
+    try:
+        formula = fetch_week_formula(url)
+        save_week_formula(conn, formula)
+        return formula
+    except Exception as error:
+        persisted = load_week_formula(conn)
+        if persisted is not None:
+            print(
+                f"main: failed to fetch week formula from {url!r} ({error}); "
+                "falling back to last persisted formula",
+                file=sys.stderr,
+            )
+            return persisted
+        print(
+            f"main: failed to fetch week formula from {url!r} ({error}); "
+            "no persisted formula available, falling back to hardcoded default",
+            file=sys.stderr,
+        )
+        return _FALLBACK_WEEK_FORMULA
 
 
 def _load_active_pdf_path(conn):

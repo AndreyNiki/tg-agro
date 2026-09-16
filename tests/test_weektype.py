@@ -1,7 +1,16 @@
+import sqlite3
 from datetime import date
 from pathlib import Path
 import pytest
-from schedule_bot.weektype import WEEK_UPPER, WEEK_LOWER, WeekFormula, parse_week_formula
+from schedule_bot import storage
+from schedule_bot.weektype import (
+    WEEK_UPPER,
+    WEEK_LOWER,
+    WeekFormula,
+    load_week_formula,
+    parse_week_formula,
+    save_week_formula,
+)
 
 FIXTURE_HTML = (Path(__file__).parent / "fixtures" / "weektype_page.html").read_text(encoding="utf-8")
 
@@ -30,3 +39,20 @@ def test_parse_week_formula_raises_when_pattern_missing():
 def test_week_formula_compute(on_date, expected):
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
     assert formula.compute(on_date) == expected
+
+
+@pytest.fixture
+def conn():
+    connection = sqlite3.connect(":memory:")
+    storage.init_db(connection)
+    return connection
+
+
+def test_load_week_formula_returns_none_when_nothing_persisted(conn):
+    assert load_week_formula(conn) is None
+
+
+def test_save_and_load_week_formula_round_trips(conn):
+    formula = WeekFormula(base_month=3, base_day=17, even_index_is_upper=False)
+    save_week_formula(conn, formula)
+    assert load_week_formula(conn) == formula
