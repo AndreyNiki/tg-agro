@@ -1,0 +1,47 @@
+<html>
+<body>
+<table>
+<tr><td width="150">
+<div id="calendar"></div>
+
+<script>
+const today = new Date();
+const year = today.getFullYear();
+
+// 5 января — НИЖНЯЯ неделя
+const baseDate = new Date(year, 0, 5);
+
+// разница в днях
+const diffDays = Math.floor(
+  (today - baseDate) / (1000 * 60 * 60 * 24)
+);
+
+// номер недели от опорной даты
+const weekIndex = Math.floor(diffDays / 7);
+
+// тип недели
+//const weekType = weekIndex % 2 === 0 ? 'Нижняя' : 'Верхняя';
+const weekType = weekIndex % 2 === 0 ? 'Верхняя' : 'Нижняя';
+
+// названия
+const days = ['Воскресенье','Понедельник','Вторник','Среда','Четверг','Пятница','Суббота'];
+const months = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+
+document.getElementById('calendar').innerHTML = `
+  <table width="150" height="250" border="2">
+    <tr><td align="center">${days[today.getDay()]}</td></tr>
+    <tr><td align="center">${months[today.getMonth()]}</td></tr>
+    <tr>
+      <td align="center">
+        <div style="font-size:32px">${today.getDate()}</div>
+        <div style="color:blue">${weekType} неделя</div>
+      </td>
+    </tr>
+    <tr><td align="center">${year}</td></tr>
+  </table>
+`;
+</script>
+</td></tr>
+</table>
+</body>
+</html>
