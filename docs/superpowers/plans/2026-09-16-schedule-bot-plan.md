@@ -2323,6 +2323,8 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'schedule_bot.schedule
 - [ ] **Step 3: Implement `schedule_bot/scheduler.py`**
 
 ```python
+import asyncio
+import json
 from dataclasses import dataclass
 from datetime import date
 
@@ -2335,7 +2337,6 @@ from schedule_bot.formatting import format_day_schedule
 from schedule_bot.pdf_parser import DAY_ORDER, schedule_from_dict
 from schedule_bot.sync import check_and_apply_diff
 from schedule_bot.weektype import WeekFormula, fetch_week_formula
-import json
 
 
 @dataclass
@@ -2386,7 +2387,7 @@ async def weekly_weektype_refresh_job(conn, week_formula_holder: WeekFormulaHold
         return
     try:
         week_formula_holder.formula = fetch_week_formula(url)
-    except (ValueError, Exception):
+    except Exception:
         pass  # keep using the last known-good formula; caller may log this
 
 
@@ -2425,6 +2426,10 @@ def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder) -
         replace_existing=True,
     )
 
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     scheduler.start()
     return scheduler
 
