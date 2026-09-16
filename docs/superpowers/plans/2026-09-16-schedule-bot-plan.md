@@ -2108,8 +2108,6 @@ async def test_alert_command_rejects_non_admin(conn):
     context.bot.send_message.assert_not_awaited()
 ```
 
-Remove the stray `</br>` line above before running — fix it to a blank line.
-
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_bot_admin_commands.py -v`
@@ -2119,7 +2117,7 @@ Expected: FAIL with `ImportError: cannot import name 'is_admin'`
 
 ```python
 # append to schedule_bot/bot.py
-from schedule_bot.sync import check_and_apply_diff
+import sys
 
 
 def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -2198,9 +2196,13 @@ async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     text = " ".join(context.args)
     conn = context.bot_data["conn"]
     group_name = context.bot_data["group_name"]
-    for chat_id in storage.list_subscribers(conn, group_name):
-        await context.bot.send_message(chat_id=chat_id, text=text)
-    await update.message.reply_text(f"Сообщение разослано {len(storage.list_subscribers(conn, group_name))} подписчикам.")
+    subscribers = storage.list_subscribers(conn, group_name)
+    for chat_id in subscribers:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+        except Exception as error:
+            print(f"bot: failed to alert chat_id={chat_id}: {error}", file=sys.stderr)
+    await update.message.reply_text(f"Сообщение разослано {len(subscribers)} подписчикам.")
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
