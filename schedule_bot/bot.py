@@ -51,6 +51,17 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+def _next_occurrence_of(day_index: int, today: date) -> date:
+    """Nearest date matching the given weekday (0=Понедельник..5=Суббота).
+
+    Python's date.weekday() returns 0=Monday..6=Sunday, which already
+    aligns with day_index for Mon-Sat, so this simple formula works.
+    """
+    from datetime import timedelta
+
+    return today + timedelta(days=(day_index - today.weekday()) % 7)
+
+
 async def day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -59,14 +70,29 @@ async def day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     day_name = DAY_ORDER[day_index]
 
     schedule = context.bot_data["active_schedule_getter"]()
-    week_formula: object = context.bot_data["week_formula"]
-    week_type = week_formula.compute(date.today())
+    if schedule is None:
+        await query.message.reply_text(
+            "Расписание ещё не загружено, попробуйте позже."
+        )
+        return
 
-    text = format_day_schedule(day_name, date.today(), week_type, schedule)
+    on_date = _next_occurrence_of(day_index, date.today())
+    week_formula: object = context.bot_data["week_formula"]
+    week_type = week_formula.compute(on_date)
+
+    text = format_day_schedule(day_name, on_date, week_type, schedule)
     await query.message.reply_text(text)
 
     pdf_path = context.bot_data["active_pdf_path_getter"]()
-    image_bytes = render_day_image(pdf_path, schedule, day_name)
+    if pdf_path is None:
+        return
+
+    try:
+        image_bytes = render_day_image(pdf_path, schedule, day_name)
+    except Exception as error:
+        print(f"bot: failed to render day image for {pdf_path!r}: {error}", file=sys.stderr)
+        image_bytes = None
+
     if image_bytes is not None:
         await query.message.reply_photo(photo=image_bytes)
 

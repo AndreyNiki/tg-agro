@@ -7,6 +7,7 @@ import pytest
 from schedule_bot import storage
 from schedule_bot.bot import (
     DAY_LABELS,
+    _next_occurrence_of,
     build_day_keyboard,
     day_index_from_callback,
     start_command,
@@ -121,3 +122,131 @@ async def test_day_callback_skips_image_when_no_lessons(conn, sample_schedule, m
 
     update.callback_query.message.reply_text.assert_awaited_once()
     update.callback_query.message.reply_photo.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_day_callback_replies_gracefully_when_no_active_schedule(conn):
+    """C1 regression: fresh deploy with no schedule version must not crash."""
+    formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
+    wednesday_index = DAY_ORDER.index("Среда")
+
+    update = MagicMock()
+    update.callback_query.data = f"day:{wednesday_index}"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    update.callback_query.message.reply_photo = AsyncMock()
+    context = make_context(conn, formula, active_schedule=None, pdf_cache_path=None)
+
+    await day_callback(update, context)
+
+    update.callback_query.answer.assert_awaited_once()
+    update.callback_query.message.reply_text.assert_awaited_once()
+    update.callback_query.message.reply_photo.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_day_callback_skips_image_when_pdf_path_is_none(conn, sample_schedule):
+    formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
+    wednesday_index = DAY_ORDER.index("Среда")
+
+    update = MagicMock()
+    update.callback_query.data = f"day:{wednesday_index}"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    update.callback_query.message.reply_photo = AsyncMock()
+    context = make_context(conn, formula, sample_schedule, pdf_cache_path=None)
+
+    await day_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+    update.callback_query.message.reply_photo.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_day_callback_swallows_render_error_and_sends_text_only(conn, sample_schedule, monkeypatch):
+    """I4 regression: a missing/stale cached PDF must not crash the response."""
+    formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
+    wednesday_index = DAY_ORDER.index("Среда")
+
+    update = MagicMock()
+    update.callback_query.data = f"day:{wednesday_index}"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    update.callback_query.message.reply_photo = AsyncMock()
+    context = make_context(conn, formula, sample_schedule, pdf_cache_path="/does/not/exist.pdf")
+
+    import schedule_bot.bot as bot_module
+
+    def raise_error(*args, **kwargs):
+        raise RuntimeError("file not found")
+
+    monkeypatch.setattr(bot_module, "render_day_image", raise_error)
+
+    await day_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+    update.callback_query.message.reply_photo.assert_not_awaited()
+
+
+def test_next_occurrence_of_returns_today_when_matching():
+    today = date(2026, 9, 16)  # Wednesday
+    assert _next_occurrence_of(2, today) == today  # index 2 == Среда
+
+
+def test_next_occurrence_of_returns_upcoming_day_when_today_is_sunday():
+    today = date(2026, 9, 20)  # Sunday
+    monday_index = 0
+    assert _next_occurrence_of(monday_index, today) == date(2026, 9, 21)
+
+
+@pytest.mark.asyncio
+async def test_day_callback_uses_upcoming_date_not_today_for_non_today_day(conn, monkeypatch):
+    """I6 regression: picking a day other than today must use that day's nearest
+    upcoming date for both the week-type computation and the message header."""
+    schedule = Schedule(
+        table_x0=0.0,
+        table_x1=500.0,
+        days={
+            "Понедельник": DaySchedule(
+                y0=0.0, y1=10.0, lessons=[Lesson(time="8.30-10.00", upper="Лекция", lower="Семинар")]
+            )
+        },
+    )
+
+    class RecordingFormula:
+        def __init__(self):
+            self.calls = []
+
+        def compute(self, on_date):
+            self.calls.append(on_date)
+            return WEEK_UPPER
+
+    import schedule_bot.bot as bot_module
+
+    monkeypatch.setattr(bot_module, "date", date)  # ensure real date module used
+
+    fixed_today = date(2026, 9, 20)  # Sunday
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return fixed_today
+
+    monkeypatch.setattr(bot_module, "date", FixedDate)
+
+    monday_index = DAY_ORDER.index("Понедельник")
+    update = MagicMock()
+    update.callback_query.data = f"day:{monday_index}"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    update.callback_query.message.reply_photo = AsyncMock()
+
+    formula = RecordingFormula()
+    context = make_context(conn, formula, schedule, pdf_cache_path=None)
+
+    await day_callback(update, context)
+
+    expected_date = date(2026, 9, 21)  # next Monday after Sunday 2026-09-20
+    assert formula.calls == [expected_date]
+    sent_text = update.callback_query.message.reply_text.call_args[0][0]
+    assert expected_date.strftime("%d.%m.%Y") in sent_text

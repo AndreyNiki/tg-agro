@@ -61,9 +61,7 @@ def build_application(config: Config, conn) -> Application:
     application.bot_data["_week_formula_holder"] = week_formula_holder
     application.bot_data["week_formula"] = _LiveWeekFormula(week_formula_holder)
     application.bot_data["active_schedule_getter"] = lambda: _load_active_schedule(conn)
-    application.bot_data["active_pdf_path_getter"] = lambda: storage.get_active_version(
-        conn, storage.get_setting(conn, "group_name")
-    ).pdf_cache_path
+    application.bot_data["active_pdf_path_getter"] = lambda: _load_active_pdf_path(conn)
 
     async def sync_fn():
         pdf_source = storage.get_setting(conn, "pdf_source")
@@ -113,6 +111,14 @@ def _load_active_schedule(conn):
     if active is None:
         return None
     return schedule_from_dict(json.loads(active.payload_json))
+
+
+def _load_active_pdf_path(conn):
+    group_name = storage.get_setting(conn, "group_name")
+    active = storage.get_active_version(conn, group_name)
+    if active is None:
+        return None
+    return active.pdf_cache_path
 
 
 if __name__ == "__main__":
