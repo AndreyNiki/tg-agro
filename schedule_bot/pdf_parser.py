@@ -68,15 +68,6 @@ def find_group_column_index(rows: list[RawRow], group_name: str) -> tuple[int, i
 
 DAY_ORDER = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"]
 
-_DAY_ABBREVIATIONS = {
-    "Пн": "Понедельник",
-    "Вт": "Вторник",
-    "Ср": "Среда",
-    "Чт": "Четверг",
-    "Пт": "Пятница",
-    "Сб": "Суббота",
-}
-
 
 @dataclass
 class Lesson:
@@ -121,16 +112,6 @@ class _DayAccumulator:
         return DaySchedule(y0=self.y0 or 0.0, y1=self.y1 or 0.0, lessons=lessons)
 
 
-def _resolve_target_index(row: RawRow, group_column_index: int, canonical_length: int) -> int:
-    # Some continuation rows gain an extra leading/interior cell boundary
-    # (e.g. an adjacent group's merged cell splitting off from the shared
-    # cell it used to share with a neighboring column). The target group's
-    # column shifts by exactly that length difference relative to the
-    # canonical row (the row that carried the time label for this slot).
-    offset = len(row.cells) - canonical_length
-    return group_column_index + offset
-
-
 def build_schedule(
     rows: list[RawRow],
     group_column_index: int,
@@ -140,25 +121,15 @@ def build_schedule(
     day_names = iter(DAY_ORDER)
     current_day: str | None = None
     current_time: str | None = None
-    canonical_length: int | None = None
     accumulators: dict[str, _DayAccumulator] = {}
 
     for row in rows:
         if row.day_marker:
-            marker_text = None
-            for cell in row.cells:
-                if cell is not None and cell.text:
-                    marker_text = cell.text
-                    break
-            resolved_day = _DAY_ABBREVIATIONS.get(marker_text) if marker_text else None
-            if resolved_day is None:
-                try:
-                    resolved_day = next(day_names)
-                except StopIteration:
-                    resolved_day = None
-            current_day = resolved_day
+            try:
+                current_day = next(day_names)
+            except StopIteration:
+                current_day = None
             current_time = None
-            canonical_length = None
             if current_day is not None and current_day not in accumulators:
                 accumulators[current_day] = _DayAccumulator()
 
@@ -169,21 +140,18 @@ def build_schedule(
 
         if row.time_label is not None:
             current_time = row.time_label
-            canonical_length = len(row.cells)
 
-        if current_time is None or canonical_length is None:
+        if current_time is None:
             continue
 
-        target_index = _resolve_target_index(row, group_column_index, canonical_length)
-        target_cell = row.cells[target_index] if 0 <= target_index < len(row.cells) else None
+        cell = row.cells[group_column_index] if group_column_index < len(row.cells) else None
 
-        if target_cell is not None:
-            text = target_cell.text or None
+        if cell is not None:
+            text = cell.text or None
         else:
             text = None
             found = False
-            search_upper_bound = max(target_index, 0)
-            for other in row.cells[:search_upper_bound]:
+            for other in row.cells[:group_column_index]:
                 if other is not None and other.text and other.x1 >= table_x1 - epsilon:
                     text = other.text
                     found = True

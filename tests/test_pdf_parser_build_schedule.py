@@ -32,41 +32,38 @@ def test_split_slot_upper_is_first_row_lower_is_second():
 
 def test_empty_upper_with_content_in_lower_preserves_position():
     rows = [
-        day_row(None, [Cell("Чт", 0, 30), None, None], day_marker=True, y0=0, y1=20),
+        day_row(None, [Cell("Пн", 0, 30), None, None], day_marker=True, y0=0, y1=20),
         day_row("10.10-11.40", [None, Cell("10.10-11.40", 30, 60), Cell("", 300, 500)], y0=0, y1=10),
         day_row(None, [None, None, Cell("Математика", 300, 500)], y0=10, y1=20),
     ]
     schedule = build_schedule(rows, GROUP_COL, TABLE_X1)
-    lesson = schedule["Четверг"].lessons[0]
+    lesson = schedule["Понедельник"].lessons[0]
     assert lesson.upper is None
     assert lesson.lower == "Математика"
 
 
 def test_merged_cell_spanning_to_table_edge_applies_to_target_group():
-    # Target group's own cell is missing (None) for this row, but an earlier
-    # column's cell reaches the table's right edge -> shared/merged lesson.
+    group_col = 3  # 4-column layout: day, time, other-group, target
     rows = [
-        day_row(None, [Cell("Сб", 0, 30), None, None], day_marker=True, y0=0, y1=20),
-        day_row("12.00-13.30", [None, Cell("12.00-13.30", 30, 60), Cell("", 300, 500)], y0=0, y1=10),
+        day_row(None, [Cell("Пн", 0, 30), None, None, None], day_marker=True, y0=0, y1=20),
+        day_row("12.00-13.30", [None, Cell("12.00-13.30", 30, 60), None, Cell("", 300, 500)], y0=0, y1=10),
         day_row(None, [None, None, Cell("Общая пара для всех групп", 60, 500), None], y0=10, y1=20),
     ]
-    schedule = build_schedule(rows, GROUP_COL, TABLE_X1)
-    lesson = schedule["Суббота"].lessons[0]
+    schedule = build_schedule(rows, group_col, TABLE_X1)
+    lesson = schedule["Понедельник"].lessons[0]
     assert lesson.upper is None
     assert lesson.lower == "Общая пара для всех групп"
 
 
 def test_non_merged_empty_continuation_row_is_ignored_not_recorded():
-    # The earlier column's cell in the continuation row does NOT reach the
-    # table's right edge, and the target group has no cell at all here ->
-    # this row is irrelevant to the target group; the slot stays unsplit.
+    group_col = 3  # 4-column layout: day, time, other-group, target
     rows = [
-        day_row(None, [Cell("Сб", 0, 30), None, None], day_marker=True, y0=0, y1=20),
-        day_row("8.30-10.00", [None, Cell("8.30-10.00", 30, 60), Cell("Основы права", 300, 500)], y0=0, y1=10),
+        day_row(None, [Cell("Пн", 0, 30), None, None, None], day_marker=True, y0=0, y1=20),
+        day_row("8.30-10.00", [None, Cell("8.30-10.00", 30, 60), None, Cell("Основы права", 300, 500)], y0=0, y1=10),
         day_row(None, [None, None, Cell("Другая группа занята", 60, 250), None], y0=10, y1=20),
     ]
-    schedule = build_schedule(rows, GROUP_COL, TABLE_X1)
-    lessons = schedule["Суббота"].lessons
+    schedule = build_schedule(rows, group_col, TABLE_X1)
+    lessons = schedule["Понедельник"].lessons
     assert len(lessons) == 1
     assert lessons[0].upper == "Основы права"
     assert lessons[0].lower == "Основы права"
