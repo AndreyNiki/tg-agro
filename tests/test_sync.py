@@ -84,3 +84,40 @@ def test_sync_caches_pdf_file_on_disk(conn, tmp_path):
     asyncio.run(check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier))
     active = storage.get_active_version(conn, "Б-Мв-101")
     assert Path(active.pdf_cache_path).exists()
+
+
+class PartiallyFailingNotifier:
+    def __init__(self, failing_chat_id):
+        self.failing_chat_id = failing_chat_id
+        self.sent = []
+
+    async def __call__(self, chat_id, text):
+        if chat_id == self.failing_chat_id:
+            raise RuntimeError("bot blocked by user")
+        self.sent.append((chat_id, text))
+
+
+def test_sync_notifies_remaining_subscribers_when_one_notify_fails(conn, tmp_path, monkeypatch):
+    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
+    storage.add_subscriber(conn, 222, "Б-Мв-101", "2026-09-16T00:00:00")
+    seed_notifier = RecordingNotifier()
+    asyncio.run(check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), seed_notifier))
+
+    import schedule_bot.sync as sync_module
+    from schedule_bot.pdf_parser import parse_schedule as real_parse_schedule
+
+    def fake_parse_schedule(source, group_name):
+        schedule = real_parse_schedule(source, group_name)
+        wednesday = schedule.days["Среда"]
+        wednesday.lessons[0].upper = "ИЗМЕНЁННЫЙ ПРЕДМЕТ"
+        return schedule
+
+    monkeypatch.setattr(sync_module, "parse_schedule", fake_parse_schedule)
+
+    notifier = PartiallyFailingNotifier(failing_chat_id=111)
+    result = asyncio.run(
+        check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier)
+    )
+
+    assert result.status == "applied"
+    assert {chat_id for chat_id, _ in notifier.sent} == {222}

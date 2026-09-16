@@ -1,5 +1,6 @@
 import json
 import shutil
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +57,12 @@ async def check_and_apply_diff(
 
     message = "Расписание изменилось:\n" + "\n".join(changes)
     for chat_id in storage.list_subscribers(conn, group_name):
-        await notify(chat_id, message)
+        try:
+            await notify(chat_id, message)
+        except Exception as exc:
+            print(
+                f"sync: failed to notify chat_id={chat_id} for group {group_name!r}: {exc}",
+                file=sys.stderr,
+            )
 
     return SyncResult(status="applied", changes=changes)
