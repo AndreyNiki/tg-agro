@@ -1,3 +1,4 @@
+import sys
 from datetime import date, datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -68,3 +69,88 @@ async def day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     image_bytes = render_day_image(pdf_path, schedule, day_name)
     if image_bytes is not None:
         await query.message.reply_photo(photo=image_bytes)
+
+
+def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    return update.effective_chat.id == context.bot_data["admin_chat_id"]
+
+
+async def set_pdf_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update, context):
+        await update.message.reply_text("Недостаточно прав.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /set_pdf_source <url_или_путь>")
+        return
+    storage.set_setting(context.bot_data["conn"], "pdf_source", context.args[0])
+    await update.message.reply_text(f"Источник PDF обновлён: {context.args[0]}")
+
+
+async def set_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update, context):
+        await update.message.reply_text("Недостаточно прав.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /set_group <название>")
+        return
+    storage.set_setting(context.bot_data["conn"], "group_name", context.args[0])
+    await update.message.reply_text(f"Группа обновлена: {context.args[0]}")
+
+
+async def set_send_time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update, context):
+        await update.message.reply_text("Недостаточно прав.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /set_send_time <HH:MM>")
+        return
+    storage.set_setting(context.bot_data["conn"], "daily_send_time", context.args[0])
+    context.bot_data["reschedule_daily_job"]()
+    await update.message.reply_text(f"Время ежедневной рассылки обновлено: {context.args[0]}")
+
+
+async def set_check_interval_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update, context):
+        await update.message.reply_text("Недостаточно прав.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /set_check_interval <минуты>")
+        return
+    storage.set_setting(context.bot_data["conn"], "check_interval_minutes", context.args[0])
+    context.bot_data["reschedule_hourly_job"]()
+    await update.message.reply_text(f"Интервал проверки обновлён: {context.args[0]} мин.")
+
+
+async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update, context):
+        await update.message.reply_text("Недостаточно прав.")
+        return
+    sync_fn = context.bot_data["sync_fn"]
+    result = await sync_fn()
+    if result.status == "no_changes":
+        await update.message.reply_text("Изменений нет.")
+    elif result.status == "initial":
+        await update.message.reply_text("Расписание загружено впервые.")
+    else:
+        await update.message.reply_text(
+            "Расписание обновлено и разослано:\n" + "\n".join(result.changes)
+        )
+
+
+async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update, context):
+        await update.message.reply_text("Недостаточно прав.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /alert <текст>")
+        return
+    text = " ".join(context.args)
+    conn = context.bot_data["conn"]
+    group_name = context.bot_data["group_name"]
+    subscribers = storage.list_subscribers(conn, group_name)
+    for chat_id in subscribers:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+        except Exception as error:
+            print(f"bot: failed to alert chat_id={chat_id}: {error}", file=sys.stderr)
+    await update.message.reply_text(f"Сообщение разослано {len(subscribers)} подписчикам.")
