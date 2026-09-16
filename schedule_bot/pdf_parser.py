@@ -1,5 +1,5 @@
 import io
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import pdfplumber
 
@@ -162,3 +162,45 @@ def build_schedule(
         accumulators[current_day].add_value(current_time, text)
 
     return {day: acc.finalize() for day, acc in accumulators.items()}
+
+
+@dataclass
+class Schedule:
+    table_x0: float
+    table_x1: float
+    days: dict[str, DaySchedule]
+
+
+def parse_schedule(source: str, group_name: str) -> Schedule:
+    rows, table_bbox = extract_raw_rows(source)
+    header_idx, col_idx = find_group_column_index(rows, group_name)
+    body_rows = rows[header_idx + 1 :]
+    days = build_schedule(body_rows, col_idx, table_bbox[2])
+    return Schedule(table_x0=table_bbox[0], table_x1=table_bbox[2], days=days)
+
+
+def schedule_to_dict(schedule: Schedule) -> dict:
+    return {
+        "table_x0": schedule.table_x0,
+        "table_x1": schedule.table_x1,
+        "days": {
+            day: {
+                "y0": day_schedule.y0,
+                "y1": day_schedule.y1,
+                "lessons": [asdict(lesson) for lesson in day_schedule.lessons],
+            }
+            for day, day_schedule in schedule.days.items()
+        },
+    }
+
+
+def schedule_from_dict(data: dict) -> Schedule:
+    days = {
+        day: DaySchedule(
+            y0=value["y0"],
+            y1=value["y1"],
+            lessons=[Lesson(**lesson) for lesson in value["lessons"]],
+        )
+        for day, value in data["days"].items()
+    }
+    return Schedule(table_x0=data["table_x0"], table_x1=data["table_x1"], days=days)
