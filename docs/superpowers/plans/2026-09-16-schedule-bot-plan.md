@@ -2547,6 +2547,28 @@ def test_build_application_seeds_default_settings_from_config(conn, config, monk
     assert storage.get_setting(conn, "pdf_source") == "/tmp/does-not-matter.pdf"
     assert storage.get_setting(conn, "group_name") == "Б-Мв-101"
     assert storage.get_setting(conn, "daily_send_time") == "09:00"
+
+
+def test_build_application_week_formula_reflects_later_holder_updates(conn, config, monkeypatch):
+    from datetime import date
+
+    monkeypatch.setattr(
+        "main.fetch_week_formula",
+        lambda url: WeekFormula(base_month=1, base_day=5, even_index_is_upper=True),
+    )
+
+    application = build_application(config, conn)
+    week_formula = application.bot_data["week_formula"]
+    on_date = date(2026, 9, 16)
+    first_result = week_formula.compute(on_date)
+
+    # Simulate what scheduler.weekly_weektype_refresh_job does: mutate the
+    # holder's formula field in place with a flipped parity rule.
+    holder = application.bot_data["_week_formula_holder"]
+    holder.formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=False)
+
+    second_result = week_formula.compute(on_date)
+    assert first_result != second_result
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2585,6 +2607,18 @@ from schedule_bot.sync import check_and_apply_diff
 from schedule_bot.weektype import fetch_week_formula
 
 
+class _LiveWeekFormula:
+    """Delegates to a WeekFormulaHolder so bot_data always sees the latest
+    formula after the weekly refresh job mutates the holder in place —
+    storing `holder.formula` directly would freeze a stale snapshot."""
+
+    def __init__(self, holder: WeekFormulaHolder) -> None:
+        self._holder = holder
+
+    def compute(self, on_date):
+        return self._holder.formula.compute(on_date)
+
+
 def build_application(config: Config, conn) -> Application:
     storage.ensure_default_settings(
         conn,
@@ -2605,7 +2639,8 @@ def build_application(config: Config, conn) -> Application:
     application.bot_data["conn"] = conn
     application.bot_data["admin_chat_id"] = config.admin_chat_id
     application.bot_data["group_name"] = storage.get_setting(conn, "group_name")
-    application.bot_data["week_formula"] = week_formula_holder.formula
+    application.bot_data["_week_formula_holder"] = week_formula_holder
+    application.bot_data["week_formula"] = _LiveWeekFormula(week_formula_holder)
     application.bot_data["active_schedule_getter"] = lambda: _load_active_schedule(conn)
     application.bot_data["active_pdf_path_getter"] = lambda: storage.get_active_version(
         conn, storage.get_setting(conn, "group_name")
