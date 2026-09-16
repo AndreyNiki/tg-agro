@@ -60,6 +60,49 @@ def test_reschedule_daily_job_updates_trigger_time(conn):
     ].expressions[0].first == 15
 
 
+def test_build_scheduler_falls_back_to_config_default_on_corrupted_daily_send_time(conn):
+    """C2 regression: a corrupted daily_send_time setting must not crash build_scheduler."""
+    storage.set_setting(conn, "daily_send_time", "9h30")
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+    config = MagicMock(
+        pdf_cache_dir="/tmp/cache",
+        default_daily_send_time="09:00",
+        default_check_interval_minutes=60,
+        default_timezone="Europe/Moscow",
+    )
+
+    scheduler = build_scheduler(conn, config, bot, holder)
+
+    job = scheduler.get_job("daily_send")
+    assert job.trigger.fields[
+        [f.name for f in job.trigger.fields].index("hour")
+    ].expressions[0].first == 9
+    assert job.trigger.fields[
+        [f.name for f in job.trigger.fields].index("minute")
+    ].expressions[0].first == 0
+
+
+def test_build_scheduler_falls_back_to_config_default_on_corrupted_check_interval(conn):
+    """C2 regression: a corrupted check_interval_minutes setting must not crash build_scheduler."""
+    storage.set_setting(conn, "check_interval_minutes", "abc")
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+    config = MagicMock(
+        pdf_cache_dir="/tmp/cache",
+        default_daily_send_time="09:00",
+        default_check_interval_minutes=60,
+        default_timezone="Europe/Moscow",
+    )
+
+    scheduler = build_scheduler(conn, config, bot, holder)
+
+    job = scheduler.get_job("hourly_check")
+    assert job.trigger.interval.total_seconds() == 60 * 60
+
+
 def test_reschedule_hourly_job_updates_interval(conn):
     bot = MagicMock()
     bot.send_message = AsyncMock()

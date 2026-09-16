@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from dataclasses import dataclass
 from datetime import date
 
@@ -71,11 +72,44 @@ def _parse_hh_mm(value: str) -> tuple[int, int]:
     return int(hour_str), int(minute_str)
 
 
+def _safe_hh_mm(value: str, default: str) -> tuple[int, int]:
+    """Parse an HH:MM setting, falling back to `default` (and logging a
+    warning) if the stored value is somehow malformed. Defense in depth
+    for values written to the DB before admin-input validation existed,
+    or edited directly in the SQLite file."""
+    try:
+        return _parse_hh_mm(value)
+    except (ValueError, AttributeError) as error:
+        print(
+            f"scheduler: invalid daily_send_time setting {value!r} ({error}); "
+            f"falling back to default {default!r}",
+            file=sys.stderr,
+        )
+        return _parse_hh_mm(default)
+
+
+def _safe_interval_minutes(value: str, default: int) -> int:
+    """Parse a check-interval setting, falling back to `default` (and
+    logging a warning) if the stored value is somehow malformed."""
+    try:
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError("interval must be positive")
+        return parsed
+    except (ValueError, TypeError) as error:
+        print(
+            f"scheduler: invalid check_interval_minutes setting {value!r} ({error}); "
+            f"falling back to default {default!r}",
+            file=sys.stderr,
+        )
+        return int(default)
+
+
 def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=storage.get_setting(conn, "timezone") or config.default_timezone)
 
     send_time = storage.get_setting(conn, "daily_send_time") or config.default_daily_send_time
-    hour, minute = _parse_hh_mm(send_time)
+    hour, minute = _safe_hh_mm(send_time, config.default_daily_send_time)
     scheduler.add_job(
         daily_send_job,
         CronTrigger(hour=hour, minute=minute),
@@ -84,7 +118,10 @@ def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder) -
         replace_existing=True,
     )
 
-    interval_minutes = int(storage.get_setting(conn, "check_interval_minutes") or config.default_check_interval_minutes)
+    interval_minutes = _safe_interval_minutes(
+        storage.get_setting(conn, "check_interval_minutes") or config.default_check_interval_minutes,
+        config.default_check_interval_minutes,
+    )
     scheduler.add_job(
         hourly_check_job,
         IntervalTrigger(minutes=interval_minutes),
@@ -109,12 +146,15 @@ def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder) -
     return scheduler
 
 
-def reschedule_daily_job(scheduler: AsyncIOScheduler, conn, timezone_name: str) -> None:
+def reschedule_daily_job(scheduler: AsyncIOScheduler, conn, timezone_name: str, config=None) -> None:
     send_time = storage.get_setting(conn, "daily_send_time")
-    hour, minute = _parse_hh_mm(send_time)
+    default = config.default_daily_send_time if config is not None else "09:00"
+    hour, minute = _safe_hh_mm(send_time, default)
     scheduler.reschedule_job("daily_send", trigger=CronTrigger(hour=hour, minute=minute, timezone=timezone_name))
 
 
-def reschedule_hourly_job(scheduler: AsyncIOScheduler, conn) -> None:
-    interval_minutes = int(storage.get_setting(conn, "check_interval_minutes"))
+def reschedule_hourly_job(scheduler: AsyncIOScheduler, conn, config=None) -> None:
+    interval_minutes_setting = storage.get_setting(conn, "check_interval_minutes")
+    default = config.default_check_interval_minutes if config is not None else 60
+    interval_minutes = _safe_interval_minutes(interval_minutes_setting, default)
     scheduler.reschedule_job("hourly_check", trigger=IntervalTrigger(minutes=interval_minutes))

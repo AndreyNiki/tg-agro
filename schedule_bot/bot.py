@@ -1,3 +1,4 @@
+import re
 import sys
 from datetime import date, datetime, timezone
 
@@ -123,6 +124,20 @@ async def set_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(f"Группа обновлена: {context.args[0]}")
 
 
+_HH_MM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]?\d)$")
+
+
+def _is_valid_hh_mm(value: str) -> bool:
+    return bool(_HH_MM_RE.match(value))
+
+
+def _is_valid_positive_int(value: str) -> bool:
+    try:
+        return int(value) > 0
+    except ValueError:
+        return False
+
+
 async def set_send_time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update, context):
         await update.message.reply_text("Недостаточно прав.")
@@ -130,9 +145,13 @@ async def set_send_time_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not context.args:
         await update.message.reply_text("Использование: /set_send_time <HH:MM>")
         return
-    storage.set_setting(context.bot_data["conn"], "daily_send_time", context.args[0])
+    value = context.args[0]
+    if not _is_valid_hh_mm(value):
+        await update.message.reply_text("Неверный формат времени, используйте HH:MM.")
+        return
+    storage.set_setting(context.bot_data["conn"], "daily_send_time", value)
     context.bot_data["reschedule_daily_job"]()
-    await update.message.reply_text(f"Время ежедневной рассылки обновлено: {context.args[0]}")
+    await update.message.reply_text(f"Время ежедневной рассылки обновлено: {value}")
 
 
 async def set_check_interval_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -142,9 +161,13 @@ async def set_check_interval_command(update: Update, context: ContextTypes.DEFAU
     if not context.args:
         await update.message.reply_text("Использование: /set_check_interval <минуты>")
         return
-    storage.set_setting(context.bot_data["conn"], "check_interval_minutes", context.args[0])
+    value = context.args[0]
+    if not _is_valid_positive_int(value):
+        await update.message.reply_text("Неверное значение интервала, укажите положительное целое число минут.")
+        return
+    storage.set_setting(context.bot_data["conn"], "check_interval_minutes", value)
     context.bot_data["reschedule_hourly_job"]()
-    await update.message.reply_text(f"Интервал проверки обновлён: {context.args[0]} мин.")
+    await update.message.reply_text(f"Интервал проверки обновлён: {value} мин.")
 
 
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

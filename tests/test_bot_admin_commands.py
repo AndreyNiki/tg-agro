@@ -105,6 +105,56 @@ async def test_set_check_interval_reschedules_hourly_job(conn):
 
 
 @pytest.mark.asyncio
+async def test_set_send_time_rejects_malformed_value_without_writing(conn):
+    """C2 regression: malformed /set_send_time input must not be persisted."""
+    update = make_update(ADMIN_CHAT_ID, "9h30")
+    context = make_context(conn)
+    context.args = ["9h30"]
+
+    await set_send_time_command(update, context)
+
+    assert storage.get_setting(conn, "daily_send_time") is None
+    context.bot_data["reschedule_daily_job"].assert_not_called()
+    update.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_send_time_rejects_out_of_range_value(conn):
+    update = make_update(ADMIN_CHAT_ID, "25:00")
+    context = make_context(conn)
+    context.args = ["25:00"]
+
+    await set_send_time_command(update, context)
+
+    assert storage.get_setting(conn, "daily_send_time") is None
+
+
+@pytest.mark.asyncio
+async def test_set_check_interval_rejects_non_numeric_value_without_writing(conn):
+    """C2 regression: malformed /set_check_interval input must not be persisted."""
+    update = make_update(ADMIN_CHAT_ID, "abc")
+    context = make_context(conn)
+    context.args = ["abc"]
+
+    await set_check_interval_command(update, context)
+
+    assert storage.get_setting(conn, "check_interval_minutes") is None
+    context.bot_data["reschedule_hourly_job"].assert_not_called()
+    update.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_check_interval_rejects_non_positive_value(conn):
+    update = make_update(ADMIN_CHAT_ID, "0")
+    context = make_context(conn)
+    context.args = ["0"]
+
+    await set_check_interval_command(update, context)
+
+    assert storage.get_setting(conn, "check_interval_minutes") is None
+
+
+@pytest.mark.asyncio
 async def test_refresh_command_reports_result(conn):
     async def fake_sync(*args, **kwargs):
         from schedule_bot.sync import SyncResult

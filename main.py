@@ -77,10 +77,12 @@ def build_application(config: Config, conn) -> Application:
     scheduler_holder: dict = {}
 
     def reschedule_daily():
-        reschedule_daily_job(scheduler_holder["scheduler"], conn, storage.get_setting(conn, "timezone"))
+        reschedule_daily_job(
+            scheduler_holder["scheduler"], conn, storage.get_setting(conn, "timezone"), config
+        )
 
     def reschedule_hourly():
-        reschedule_hourly_job(scheduler_holder["scheduler"], conn)
+        reschedule_hourly_job(scheduler_holder["scheduler"], conn, config)
 
     application.bot_data["reschedule_daily_job"] = reschedule_daily
     application.bot_data["reschedule_hourly_job"] = reschedule_hourly
