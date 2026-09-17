@@ -5,6 +5,9 @@ import pytest
 
 from schedule_bot import storage
 from schedule_bot.bot import (
+    ADMIN_COMMANDS,
+    USER_COMMANDS,
+    help_command,
     is_admin,
     set_pdf_source_command,
     set_group_command,
@@ -55,6 +58,32 @@ def test_is_admin_false_for_other_chat_id(conn):
     update = make_update(12345)
     context = make_context(conn)
     assert is_admin(update, context) is False
+
+
+@pytest.mark.asyncio
+async def test_help_command_shows_only_user_commands_for_non_admin(conn):
+    update = make_update(12345)
+    context = make_context(conn)
+
+    await help_command(update, context)
+
+    text = update.message.reply_text.call_args[0][0]
+    for name, _ in USER_COMMANDS:
+        assert f"/{name}" in text
+    for name, _ in ADMIN_COMMANDS:
+        assert f"/{name}" not in text
+
+
+@pytest.mark.asyncio
+async def test_help_command_shows_admin_commands_for_admin(conn):
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn)
+
+    await help_command(update, context)
+
+    text = update.message.reply_text.call_args[0][0]
+    for name, _ in USER_COMMANDS + ADMIN_COMMANDS:
+        assert f"/{name}" in text
 
 
 @pytest.mark.asyncio
@@ -168,6 +197,20 @@ async def test_refresh_command_reports_result(conn):
 
     update.message.reply_text.assert_awaited_once()
     assert "Изменений нет" in update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_refresh_command_reports_sync_error_without_crashing(conn):
+    async def failing_sync(*args, **kwargs):
+        raise ConnectionError("network unreachable")
+
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn, sync_fn=failing_sync)
+
+    await refresh_command(update, context)
+
+    update.message.reply_text.assert_awaited_once()
+    assert "не удал" in update.message.reply_text.call_args[0][0]
 
 
 @pytest.mark.asyncio

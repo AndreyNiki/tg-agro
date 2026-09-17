@@ -1,10 +1,11 @@
 import sqlite3
+from datetime import date
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from schedule_bot import storage
-from schedule_bot.bot import DAY_ORDER, day_callback
+from schedule_bot.bot import day_callback
 from schedule_bot.config import Config
 from schedule_bot.weektype import WeekFormula
 from main import build_application
@@ -76,6 +77,7 @@ def test_build_application_registers_all_expected_handlers(conn, config, monkeyp
         "start",
         "stop",
         "schedule",
+        "help",
         "set_pdf_source",
         "set_group",
         "set_send_time",
@@ -184,7 +186,7 @@ async def test_day_callback_through_real_bot_data_replies_gracefully_without_act
     application = build_application(config, conn)
 
     update = MagicMock()
-    update.callback_query.data = f"day:{DAY_ORDER.index('Среда')}"
+    update.callback_query.data = f"day:{date(2026, 9, 16).isoformat()}"  # a Wednesday
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
@@ -229,7 +231,7 @@ async def test_day_callback_through_real_bot_data_replies_with_schedule_when_act
     assert result.status == "initial"
 
     update = MagicMock()
-    update.callback_query.data = f"day:{DAY_ORDER.index('Среда')}"
+    update.callback_query.data = f"day:{date(2026, 9, 16).isoformat()}"  # a Wednesday
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()

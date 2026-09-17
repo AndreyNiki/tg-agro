@@ -12,6 +12,7 @@ from schedule_bot.scheduler import (
     WeekFormulaHolder,
     build_scheduler,
     daily_send_job,
+    hourly_check_job,
     reschedule_daily_job,
     reschedule_hourly_job,
     resolve_sync_settings,
@@ -181,6 +182,33 @@ async def test_daily_send_job_swallows_render_error_and_still_sends_text(conn, m
     bot.send_photo.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_daily_send_job_warns_when_last_sync_failed(conn, monkeypatch):
+    import schedule_bot.scheduler as scheduler_module
+
+    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
+    _seed_active_version(conn, "Б-Мв-101")
+    storage.set_setting(conn, "last_sync_failed_at", "2026-09-17T08:00:00+00:00")
+
+    async def noop_run_sync(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(scheduler_module, "_run_sync", noop_run_sync)
+    monkeypatch.setattr(scheduler_module, "date", FixedMonday)
+    monkeypatch.setattr(scheduler_module, "render_day_image", lambda *a, **k: None)
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    bot.send_photo = AsyncMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+    config = MagicMock(default_group_name="Б-Мв-101")
+
+    await daily_send_job(conn, config, bot, holder)
+
+    sent_text = bot.send_message.await_args_list[0].kwargs["text"]
+    assert "могли устареть" in sent_text
+
+
 def test_resolve_sync_settings_uses_stored_values_when_present(conn):
     config = MagicMock(default_pdf_source="/default.pdf", default_group_name="Default-Group")
 
@@ -209,7 +237,25 @@ def test_build_scheduler_registers_daily_hourly_and_weekly_jobs(conn):
     scheduler = build_scheduler(conn, MagicMock(pdf_cache_dir="/tmp/cache"), bot, holder)
 
     job_ids = {job.id for job in scheduler.get_jobs()}
-    assert job_ids == {"daily_send", "hourly_check", "weekly_weektype_refresh"}
+    assert job_ids == {"daily_send", "hourly_check", "weekly_weektype_refresh", "startup_sync"}
+
+
+def test_build_scheduler_schedules_startup_sync_to_run_immediately(conn):
+    """A fresh install has no active schedule yet — build_scheduler must
+    kick off a one-off sync right away instead of waiting for the first
+    hourly interval to elapse."""
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+
+    before = datetime.now()
+    scheduler = build_scheduler(conn, MagicMock(pdf_cache_dir="/tmp/cache"), bot, holder)
+    after = datetime.now()
+
+    job = scheduler.get_job("startup_sync")
+    assert job.func is hourly_check_job
+    run_date = job.trigger.run_date.replace(tzinfo=None)
+    assert before <= run_date <= after
 
 
 def test_reschedule_daily_job_updates_trigger_time(conn):

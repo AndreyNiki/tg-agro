@@ -1,12 +1,18 @@
+import logging
 import os
-import sys
 
+from telegram import BotCommand, BotCommandScopeChat
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 from schedule_bot import storage
 from schedule_bot.bot import (
+    ADMIN_COMMANDS,
+    NOOP_CALLBACK_DATA,
+    USER_COMMANDS,
     alert_command,
     day_callback,
+    help_command,
+    noop_callback,
     refresh_command,
     schedule_command,
     set_check_interval_command,
@@ -26,6 +32,8 @@ from schedule_bot.scheduler import (
 )
 from schedule_bot.sync import check_and_apply_diff
 from schedule_bot.weektype import WeekFormula, fetch_week_formula, load_week_formula, save_week_formula
+
+logger = logging.getLogger(__name__)
 
 _FALLBACK_WEEK_FORMULA = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
 
@@ -58,7 +66,14 @@ def build_application(config: Config, conn) -> Application:
     week_formula = _fetch_week_formula_or_fallback(conn, storage.get_setting(conn, "weektype_url"))
     week_formula_holder = WeekFormulaHolder(formula=week_formula)
 
-    application = Application.builder().token(config.telegram_token).build()
+    async def _post_init(app: Application) -> None:
+        await app.bot.set_my_commands([BotCommand(name, description) for name, description in USER_COMMANDS])
+        await app.bot.set_my_commands(
+            [BotCommand(name, description) for name, description in USER_COMMANDS + ADMIN_COMMANDS],
+            scope=BotCommandScopeChat(chat_id=config.admin_chat_id),
+        )
+
+    application = Application.builder().token(config.telegram_token).post_init(_post_init).build()
     application.bot_data["conn"] = conn
     application.bot_data["admin_chat_id"] = config.admin_chat_id
     application.bot_data["group_name"] = storage.get_setting(conn, "group_name")
@@ -93,7 +108,9 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("schedule", schedule_command))
-    application.add_handler(CallbackQueryHandler(day_callback, pattern=r"^day:\d+$"))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CallbackQueryHandler(day_callback, pattern=r"^day:\d{4}-\d{2}-\d{2}$"))
+    application.add_handler(CallbackQueryHandler(noop_callback, pattern=f"^{NOOP_CALLBACK_DATA}$"))
     application.add_handler(CommandHandler("set_pdf_source", set_pdf_source_command))
     application.add_handler(CommandHandler("set_group", set_group_command))
     application.add_handler(CommandHandler("set_send_time", set_send_time_command))
@@ -132,16 +149,17 @@ def _fetch_week_formula_or_fallback(conn, url):
     except Exception as error:
         persisted = load_week_formula(conn)
         if persisted is not None:
-            print(
-                f"main: failed to fetch week formula from {url!r} ({error}); "
-                "falling back to last persisted formula",
-                file=sys.stderr,
+            logger.warning(
+                "main: failed to fetch week formula from %r (%s); falling back to last persisted formula",
+                url,
+                error,
             )
             return persisted
-        print(
-            f"main: failed to fetch week formula from {url!r} ({error}); "
+        logger.warning(
+            "main: failed to fetch week formula from %r (%s); "
             "no persisted formula available, falling back to hardcoded default",
-            file=sys.stderr,
+            url,
+            error,
         )
         return _FALLBACK_WEEK_FORMULA
 
@@ -156,6 +174,14 @@ def _load_active_pdf_path(conn):
 
 if __name__ == "__main__":
     import sqlite3
+
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        level=logging.INFO,
+    )
+    # httpx (used by python-telegram-bot's HTTP layer) logs every single
+    # request at INFO level, which drowns out our own sync/command logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     config = load_config(os.environ)
     connection = sqlite3.connect(config.db_path)

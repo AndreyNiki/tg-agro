@@ -7,32 +7,58 @@ import pytest
 from schedule_bot import storage
 from schedule_bot.bot import (
     DAY_LABELS,
-    _next_occurrence_of,
     build_day_keyboard,
-    day_index_from_callback,
+    day_date_from_callback,
     start_command,
     stop_command,
     schedule_command,
     day_callback,
 )
-from schedule_bot.pdf_parser import DAY_ORDER, Schedule, DaySchedule, Lesson, schedule_to_dict
+from schedule_bot.pdf_parser import Schedule, DaySchedule, Lesson, schedule_to_dict
 from schedule_bot.weektype import WeekFormula, WEEK_UPPER
 
 
-def test_build_day_keyboard_has_one_button_per_day():
-    keyboard = build_day_keyboard()
-    buttons = [button for row in keyboard.inline_keyboard for button in row]
-    assert len(buttons) == len(DAY_ORDER) == len(DAY_LABELS)
-    assert [button.callback_data for button in buttons] == [f"day:{i}" for i in range(len(DAY_ORDER))]
+def test_build_day_keyboard_shows_remaining_and_next_week_with_dates():
+    today = date(2026, 9, 16)  # Wednesday
+    keyboard = build_day_keyboard(today)
+    day_buttons = [
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("day:")
+    ]
+    # 4 remaining days this week (Ср..Сб) + 6 days next week
+    assert len(day_buttons) == 4 + len(DAY_LABELS)
+    dates = [date.fromisoformat(button.callback_data.split(":", 1)[1]) for button in day_buttons]
+    assert dates[0] == today
+    assert dates[3] == date(2026, 9, 19)  # Saturday, end of this week
+    assert dates[4] == date(2026, 9, 21)  # Monday, start of next week
+    assert day_buttons[0].text.endswith(today.strftime("%d.%m"))
 
 
-def test_day_index_from_callback_parses_valid_data():
-    assert day_index_from_callback("day:3") == 3
+def test_build_day_keyboard_on_sunday_shows_only_next_week():
+    today = date(2026, 9, 20)  # Sunday
+    keyboard = build_day_keyboard(today)
+    day_buttons = [
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("day:")
+    ]
+    assert len(day_buttons) == len(DAY_LABELS)
+    header_texts = [
+        button.text for row in keyboard.inline_keyboard for button in row if button.callback_data == "noop"
+    ]
+    assert header_texts == ["— Следующая неделя —"]
 
 
-def test_day_index_from_callback_rejects_bad_data():
+def test_day_date_from_callback_parses_valid_data():
+    assert day_date_from_callback("day:2026-09-16") == date(2026, 9, 16)
+
+
+def test_day_date_from_callback_rejects_bad_data():
     with pytest.raises(ValueError):
-        day_index_from_callback("nope")
+        day_date_from_callback("nope")
 
 
 def make_context(conn, week_formula, active_schedule, pdf_cache_path="/tmp/does-not-matter.pdf"):
@@ -82,12 +108,39 @@ async def test_schedule_command_sends_day_keyboard(conn, sample_schedule):
 
 
 @pytest.mark.asyncio
+async def test_schedule_command_warns_when_last_sync_failed(conn, sample_schedule):
+    storage.set_setting(conn, "last_sync_failed_at", "2026-09-17T08:00:00+00:00")
+    formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn, formula, sample_schedule)
+
+    await schedule_command(update, context)
+
+    sent_text = update.message.reply_text.call_args[0][0]
+    assert "могли устареть" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_schedule_command_no_warning_when_last_sync_ok(conn, sample_schedule):
+    formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn, formula, sample_schedule)
+
+    await schedule_command(update, context)
+
+    sent_text = update.message.reply_text.call_args[0][0]
+    assert "могли устареть" not in sent_text
+
+
+@pytest.mark.asyncio
 async def test_day_callback_sends_text_and_image_when_lessons_exist(conn, sample_schedule, monkeypatch):
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
-    wednesday_index = DAY_ORDER.index("Среда")
+    wednesday = date(2026, 9, 16)
 
     update = MagicMock()
-    update.callback_query.data = f"day:{wednesday_index}"
+    update.callback_query.data = f"day:{wednesday.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
@@ -106,10 +159,10 @@ async def test_day_callback_sends_text_and_image_when_lessons_exist(conn, sample
 @pytest.mark.asyncio
 async def test_day_callback_skips_image_when_no_lessons(conn, sample_schedule, monkeypatch):
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
-    monday_index = DAY_ORDER.index("Понедельник")  # not present in sample_schedule.days
+    monday = date(2026, 9, 14)  # not present in sample_schedule.days
 
     update = MagicMock()
-    update.callback_query.data = f"day:{monday_index}"
+    update.callback_query.data = f"day:{monday.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
@@ -128,10 +181,10 @@ async def test_day_callback_skips_image_when_no_lessons(conn, sample_schedule, m
 async def test_day_callback_replies_gracefully_when_no_active_schedule(conn):
     """C1 regression: fresh deploy with no schedule version must not crash."""
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
-    wednesday_index = DAY_ORDER.index("Среда")
+    wednesday = date(2026, 9, 16)
 
     update = MagicMock()
-    update.callback_query.data = f"day:{wednesday_index}"
+    update.callback_query.data = f"day:{wednesday.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
@@ -147,10 +200,10 @@ async def test_day_callback_replies_gracefully_when_no_active_schedule(conn):
 @pytest.mark.asyncio
 async def test_day_callback_skips_image_when_pdf_path_is_none(conn, sample_schedule):
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
-    wednesday_index = DAY_ORDER.index("Среда")
+    wednesday = date(2026, 9, 16)
 
     update = MagicMock()
-    update.callback_query.data = f"day:{wednesday_index}"
+    update.callback_query.data = f"day:{wednesday.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
@@ -166,10 +219,10 @@ async def test_day_callback_skips_image_when_pdf_path_is_none(conn, sample_sched
 async def test_day_callback_swallows_render_error_and_sends_text_only(conn, sample_schedule, monkeypatch):
     """I4 regression: a missing/stale cached PDF must not crash the response."""
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
-    wednesday_index = DAY_ORDER.index("Среда")
+    wednesday = date(2026, 9, 16)
 
     update = MagicMock()
-    update.callback_query.data = f"day:{wednesday_index}"
+    update.callback_query.data = f"day:{wednesday.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
@@ -188,21 +241,11 @@ async def test_day_callback_swallows_render_error_and_sends_text_only(conn, samp
     update.callback_query.message.reply_photo.assert_not_awaited()
 
 
-def test_next_occurrence_of_returns_today_when_matching():
-    today = date(2026, 9, 16)  # Wednesday
-    assert _next_occurrence_of(2, today) == today  # index 2 == Среда
-
-
-def test_next_occurrence_of_returns_upcoming_day_when_today_is_sunday():
-    today = date(2026, 9, 20)  # Sunday
-    monday_index = 0
-    assert _next_occurrence_of(monday_index, today) == date(2026, 9, 21)
-
-
 @pytest.mark.asyncio
-async def test_day_callback_uses_upcoming_date_not_today_for_non_today_day(conn, monkeypatch):
-    """I6 regression: picking a day other than today must use that day's nearest
-    upcoming date for both the week-type computation and the message header."""
+async def test_day_callback_uses_exact_picked_date_not_today(conn):
+    """Regression: the callback now carries an explicit date, so picking a
+    day from the next-week section must use that exact date for both the
+    week-type computation and the message header — not date.today()."""
     schedule = Schedule(
         table_x0=0.0,
         table_x1=500.0,
@@ -221,22 +264,10 @@ async def test_day_callback_uses_upcoming_date_not_today_for_non_today_day(conn,
             self.calls.append(on_date)
             return WEEK_UPPER
 
-    import schedule_bot.bot as bot_module
+    picked_date = date(2026, 9, 21)  # a Monday picked from the "next week" section
 
-    monkeypatch.setattr(bot_module, "date", date)  # ensure real date module used
-
-    fixed_today = date(2026, 9, 20)  # Sunday
-
-    class FixedDate(date):
-        @classmethod
-        def today(cls):
-            return fixed_today
-
-    monkeypatch.setattr(bot_module, "date", FixedDate)
-
-    monday_index = DAY_ORDER.index("Понедельник")
     update = MagicMock()
-    update.callback_query.data = f"day:{monday_index}"
+    update.callback_query.data = f"day:{picked_date.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
@@ -246,7 +277,6 @@ async def test_day_callback_uses_upcoming_date_not_today_for_non_today_day(conn,
 
     await day_callback(update, context)
 
-    expected_date = date(2026, 9, 21)  # next Monday after Sunday 2026-09-20
-    assert formula.calls == [expected_date]
+    assert formula.calls == [picked_date]
     sent_text = update.callback_query.message.reply_text.call_args[0][0]
-    assert expected_date.strftime("%d.%m.%Y") in sent_text
+    assert picked_date.strftime("%d.%m.%Y") in sent_text

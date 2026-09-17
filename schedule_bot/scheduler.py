@@ -1,19 +1,23 @@
 import asyncio
 import json
-import sys
+import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from schedule_bot import storage
+from schedule_bot.bot import STALE_SCHEDULE_WARNING
 from schedule_bot.formatting import format_day_schedule
 from schedule_bot.pdf_parser import DAY_ORDER, schedule_from_dict
 from schedule_bot.screenshot import render_day_image
 from schedule_bot.sync import check_and_apply_diff
 from schedule_bot.weektype import WeekFormula, fetch_week_formula, save_week_formula
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,16 +47,21 @@ async def _run_sync(conn, config, bot) -> "SyncResult":
 
 
 async def hourly_check_job(conn, config, bot) -> None:
-    await _run_sync(conn, config, bot)
+    logger.info("scheduler: hourly_check_job starting")
+    result = await _run_sync(conn, config, bot)
+    logger.info("scheduler: hourly_check_job finished with status=%s", result.status)
 
 
 async def daily_send_job(conn, config, bot, week_formula_holder: WeekFormulaHolder) -> None:
+    logger.info("scheduler: daily_send_job starting")
     # I1: sync failure must not prevent the daily send — subscribers should
     # get today's schedule "в любом случае" even if the sync check errors.
     try:
         await _run_sync(conn, config, bot)
     except Exception as error:
-        print(f"scheduler: daily_send_job sync failed, sending with last known schedule: {error}", file=sys.stderr)
+        logger.warning(
+            "scheduler: daily_send_job sync failed, sending with last known schedule: %s", error
+        )
 
     group_name = storage.get_setting(conn, "group_name") or config.default_group_name
     active = storage.get_active_version(conn, group_name)
@@ -67,6 +76,8 @@ async def daily_send_job(conn, config, bot, week_formula_holder: WeekFormulaHold
 
     week_type = week_formula_holder.formula.compute(today)
     text = format_day_schedule(day_name, today, week_type, schedule)
+    if storage.get_setting(conn, "last_sync_failed_at"):
+        text = STALE_SCHEDULE_WARNING + text
 
     # I3: render the day's screenshot once and reuse the bytes for every
     # subscriber; I4: a missing/stale cached PDF must not crash the job.
@@ -74,34 +85,46 @@ async def daily_send_job(conn, config, bot, week_formula_holder: WeekFormulaHold
     try:
         image_bytes = render_day_image(active.pdf_cache_path, schedule, day_name)
     except Exception as error:
-        print(f"scheduler: failed to render day image for {active.pdf_cache_path!r}: {error}", file=sys.stderr)
+        logger.warning(
+            "scheduler: failed to render day image for %r: %s", active.pdf_cache_path, error
+        )
 
     # I2: isolate per-subscriber failures so one blocked chat doesn't kill
     # the daily send for everyone after it.
-    for chat_id in storage.list_subscribers(conn, group_name):
+    subscribers = storage.list_subscribers(conn, group_name)
+    sent = 0
+    for chat_id in subscribers:
         try:
             await bot.send_message(chat_id=chat_id, text=text)
             if image_bytes is not None:
                 await bot.send_photo(chat_id=chat_id, photo=image_bytes)
+            sent += 1
         except Exception as error:
-            print(f"scheduler: failed to send daily schedule to chat_id={chat_id}: {error}", file=sys.stderr)
+            logger.warning(
+                "scheduler: failed to send daily schedule to chat_id=%s: %s", chat_id, error
+            )
+    logger.info("scheduler: daily_send_job sent to %d/%d subscribers", sent, len(subscribers))
 
 
 async def weekly_weektype_refresh_job(conn, week_formula_holder: WeekFormulaHolder) -> None:
+    logger.info("scheduler: weekly_weektype_refresh_job starting")
     url = storage.get_setting(conn, "weektype_url")
     if not url:
         return
     try:
-        new_formula = fetch_week_formula(url)
+        # fetch_week_formula does a blocking requests.get; run it off the
+        # event loop so it doesn't stall the bot's own polling/HTTP traffic.
+        new_formula = await asyncio.to_thread(fetch_week_formula, url)
     except Exception as error:
-        print(
-            f"scheduler: weekly week-type refresh failed for {url!r} ({error}); "
-            "keeping last known-good formula",
-            file=sys.stderr,
+        logger.warning(
+            "scheduler: weekly week-type refresh failed for %r (%s); keeping last known-good formula",
+            url,
+            error,
         )
         return
     week_formula_holder.formula = new_formula
     save_week_formula(conn, new_formula)
+    logger.info("scheduler: weekly_weektype_refresh_job updated formula from %r", url)
 
 
 def _parse_hh_mm(value: str) -> tuple[int, int]:
@@ -117,10 +140,11 @@ def _safe_hh_mm(value: str, default: str) -> tuple[int, int]:
     try:
         return _parse_hh_mm(value)
     except (ValueError, AttributeError) as error:
-        print(
-            f"scheduler: invalid daily_send_time setting {value!r} ({error}); "
-            f"falling back to default {default!r}",
-            file=sys.stderr,
+        logger.warning(
+            "scheduler: invalid daily_send_time setting %r (%s); falling back to default %r",
+            value,
+            error,
+            default,
         )
         return _parse_hh_mm(default)
 
@@ -134,10 +158,11 @@ def _safe_interval_minutes(value: str, default: int) -> int:
             raise ValueError("interval must be positive")
         return parsed
     except (ValueError, TypeError) as error:
-        print(
-            f"scheduler: invalid check_interval_minutes setting {value!r} ({error}); "
-            f"falling back to default {default!r}",
-            file=sys.stderr,
+        logger.warning(
+            "scheduler: invalid check_interval_minutes setting %r (%s); falling back to default %r",
+            value,
+            error,
+            default,
         )
         return int(default)
 
@@ -172,6 +197,19 @@ def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder) -
         CronTrigger(day_of_week="mon", hour=6, minute=0),
         args=[conn, week_formula_holder],
         id="weekly_weektype_refresh",
+        replace_existing=True,
+    )
+
+    # A fresh install (or a DB wiped between restarts) has no active
+    # schedule until the first hourly_check_job fires — which, with
+    # IntervalTrigger, is `interval_minutes` after startup, not on
+    # startup. Run the same sync once immediately so /schedule works
+    # right after the bot comes up.
+    scheduler.add_job(
+        hourly_check_job,
+        DateTrigger(run_date=datetime.now()),
+        args=[conn, config, bot],
+        id="startup_sync",
         replace_existing=True,
     )
 
