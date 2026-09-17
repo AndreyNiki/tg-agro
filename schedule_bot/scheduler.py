@@ -63,7 +63,18 @@ async def _run_sync(conn, config, bot, lock: asyncio.Lock | None = None) -> "Syn
 
 async def hourly_check_job(conn, config, bot, lock: asyncio.Lock | None = None) -> None:
     logger.info("scheduler: hourly_check_job starting")
-    result = await _run_sync(conn, config, bot, lock)
+    # A fetch/parse failure (network blip, site down/slow) is expected and
+    # self-healing — the next interval retries automatically, and
+    # check_and_apply_diff has already logged the details and recorded
+    # last_sync_failed_at. Catch it here (like daily_send_job does) so
+    # APScheduler doesn't treat it as the job crashing and dump a full
+    # traceback at ERROR level for what is a routine, already-handled
+    # condition.
+    try:
+        result = await _run_sync(conn, config, bot, lock)
+    except Exception as error:
+        logger.warning("scheduler: hourly_check_job sync failed: %s", error)
+        return
     logger.info("scheduler: hourly_check_job finished with status=%s", result.status)
 
 

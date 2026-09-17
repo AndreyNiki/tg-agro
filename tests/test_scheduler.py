@@ -68,6 +68,26 @@ class FixedMonday(date):
 
 
 @pytest.mark.asyncio
+async def test_hourly_check_job_swallows_sync_failure_instead_of_crashing(conn, monkeypatch):
+    """Regression: a fetch/parse failure (network blip, site down) is
+    expected and self-healing — the next interval retries automatically.
+    hourly_check_job must catch it (like daily_send_job does) instead of
+    letting it propagate, which made APScheduler log a full traceback at
+    ERROR level for what is a routine, already-handled condition."""
+    import schedule_bot.scheduler as scheduler_module
+
+    async def failing_run_sync(*args, **kwargs):
+        raise ConnectionError("network unreachable")
+
+    monkeypatch.setattr(scheduler_module, "_run_sync", failing_run_sync)
+
+    bot = MagicMock()
+    config = MagicMock(default_pdf_source="/tmp/x.pdf", default_group_name="Б-Мв-101")
+
+    await hourly_check_job(conn, config, bot)  # must not raise
+
+
+@pytest.mark.asyncio
 async def test_daily_send_job_sends_even_when_sync_fails(conn, monkeypatch):
     """I1 regression: a sync failure must not prevent the daily send."""
     import schedule_bot.scheduler as scheduler_module
