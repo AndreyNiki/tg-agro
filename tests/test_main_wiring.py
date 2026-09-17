@@ -1,9 +1,10 @@
 import sqlite3
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from schedule_bot import storage
+from schedule_bot.bot import DAY_ORDER, day_callback
 from schedule_bot.config import Config
 from schedule_bot.weektype import WeekFormula
 from main import build_application
@@ -14,6 +15,31 @@ def conn():
     connection = sqlite3.connect(":memory:")
     storage.init_db(connection)
     return connection
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_schedulers_after_test(monkeypatch):
+    """I9: build_application starts a real, live AsyncIOScheduler on every
+    call. Nothing in this module ever shut them down, leaking background
+    schedulers across the test run. Track every scheduler instance created
+    via build_scheduler during a test and shut it down in teardown."""
+    import main as main_module
+
+    original_build_scheduler = main_module.build_scheduler
+    schedulers = []
+
+    def tracking_build_scheduler(*args, **kwargs):
+        scheduler = original_build_scheduler(*args, **kwargs)
+        schedulers.append(scheduler)
+        return scheduler
+
+    monkeypatch.setattr(main_module, "build_scheduler", tracking_build_scheduler)
+
+    yield
+
+    for scheduler in schedulers:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
 
 
 @pytest.fixture
@@ -140,3 +166,82 @@ def test_build_application_falls_back_to_hardcoded_default_when_nothing_persiste
 
     holder = application.bot_data["_week_formula_holder"]
     assert holder.formula == main_module._FALLBACK_WEEK_FORMULA
+
+
+@pytest.mark.asyncio
+async def test_day_callback_through_real_bot_data_replies_gracefully_without_active_version(
+    conn, config, monkeypatch
+):
+    """I9: exercise day_callback through the REAL bot_data dict produced by
+    build_application (not a hand-built fake one), with a fresh DB that has
+    no active schedule version yet. This is the same code path the C1 fix
+    guarded against, now verified through real wiring."""
+    monkeypatch.setattr(
+        "main.fetch_week_formula",
+        lambda url: WeekFormula(base_month=1, base_day=5, even_index_is_upper=True),
+    )
+
+    application = build_application(config, conn)
+
+    update = MagicMock()
+    update.callback_query.data = f"day:{DAY_ORDER.index('Среда')}"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    update.callback_query.message.reply_photo = AsyncMock()
+
+    context = MagicMock()
+    context.bot_data = application.bot_data
+
+    await day_callback(update, context)
+
+    update.callback_query.answer.assert_awaited_once()
+    update.callback_query.message.reply_text.assert_awaited_once()
+    update.callback_query.message.reply_photo.assert_not_awaited()
+
+    application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_day_callback_through_real_bot_data_replies_with_schedule_when_active_version_exists(
+    conn, config, monkeypatch, tmp_path
+):
+    """I9: same real-wiring path as above, but with an active schedule
+    version seeded via the real sync pipeline against the fixture PDF, so
+    day_callback should reply with real schedule content instead of the
+    "not loaded yet" fallback message."""
+    from pathlib import Path
+
+    monkeypatch.setattr(
+        "main.fetch_week_formula",
+        lambda url: WeekFormula(base_month=1, base_day=5, even_index_is_upper=True),
+    )
+
+    fixture_pdf = str(Path(__file__).parent / "fixtures" / "schedule_sample.pdf")
+    config.default_pdf_source = fixture_pdf
+    config.pdf_cache_dir = str(tmp_path)
+
+    application = build_application(config, conn)
+
+    # Seed an active version through the real sync pipeline (not a hand-built
+    # fake bot_data), exercising the same path production uses on first sync.
+    sync_fn = application.bot_data["sync_fn"]
+    result = await sync_fn()
+    assert result.status == "initial"
+
+    update = MagicMock()
+    update.callback_query.data = f"day:{DAY_ORDER.index('Среда')}"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    update.callback_query.message.reply_photo = AsyncMock()
+
+    context = MagicMock()
+    context.bot_data = application.bot_data
+
+    await day_callback(update, context)
+
+    update.callback_query.answer.assert_awaited_once()
+    update.callback_query.message.reply_text.assert_awaited_once()
+    reply_text = update.callback_query.message.reply_text.call_args[0][0]
+    assert "ещё не загружено" not in reply_text
+
+    application.bot_data["_scheduler"].shutdown(wait=False)

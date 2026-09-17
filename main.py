@@ -102,6 +102,7 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CommandHandler("alert", alert_command))
 
     scheduler_holder["scheduler"] = build_scheduler(conn, config, application.bot, week_formula_holder)
+    application.bot_data["_scheduler"] = scheduler_holder["scheduler"]
 
     return application
 
