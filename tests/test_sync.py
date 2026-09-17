@@ -97,6 +97,70 @@ class PartiallyFailingNotifier:
         self.sent.append((chat_id, text))
 
 
+def test_sync_reads_pdf_source_exactly_once_and_cache_matches_parsed_bytes(conn, tmp_path, monkeypatch):
+    """I5: pdf_source must be read exactly once per sync call, and the bytes
+    written to the cache file must be identical to the bytes that were parsed."""
+    import schedule_bot.pdf_parser as pdf_parser_module
+    import schedule_bot.sync as sync_module
+
+    real_load_pdf_bytes = pdf_parser_module._load_pdf_bytes
+    call_count = 0
+
+    def counting_load_pdf_bytes(source):
+        nonlocal call_count
+        call_count += 1
+        return real_load_pdf_bytes(source)
+
+    monkeypatch.setattr(sync_module, "_load_pdf_bytes", counting_load_pdf_bytes)
+
+    notifier = RecordingNotifier()
+    result = asyncio.run(
+        check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier)
+    )
+
+    assert result.status == "initial"
+    assert call_count == 1
+
+    active = storage.get_active_version(conn, "Б-Мв-101")
+    cached_bytes = Path(active.pdf_cache_path).read_bytes()
+    original_bytes = Path(FIXTURE_PATH).read_bytes()
+    assert cached_bytes == original_bytes
+
+
+def test_sync_deletes_superseded_cache_file_on_change(conn, tmp_path, monkeypatch):
+    """I7: when a sync applies a change, the previous (now superseded)
+    version's cache file must be deleted from disk, while the new version's
+    cache file must remain."""
+    notifier = RecordingNotifier()
+    asyncio.run(check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier))
+    first_active = storage.get_active_version(conn, "Б-Мв-101")
+    first_cache_path = Path(first_active.pdf_cache_path)
+    assert first_cache_path.exists()
+
+    import schedule_bot.sync as sync_module
+    from schedule_bot.pdf_parser import parse_schedule as real_parse_schedule
+
+    def fake_parse_schedule(source, group_name):
+        schedule = real_parse_schedule(source, group_name)
+        wednesday = schedule.days["Среда"]
+        wednesday.lessons[0].upper = "ИЗМЕНЁННЫЙ ПРЕДМЕТ"
+        return schedule
+
+    monkeypatch.setattr(sync_module, "parse_schedule", fake_parse_schedule)
+
+    result = asyncio.run(
+        check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier)
+    )
+
+    assert result.status == "applied"
+    second_active = storage.get_active_version(conn, "Б-Мв-101")
+    second_cache_path = Path(second_active.pdf_cache_path)
+
+    assert not first_cache_path.exists()
+    assert second_cache_path.exists()
+    assert second_cache_path != first_cache_path
+
+
 def test_sync_notifies_remaining_subscribers_when_one_notify_fails(conn, tmp_path, monkeypatch):
     storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
     storage.add_subscriber(conn, 222, "Б-Мв-101", "2026-09-16T00:00:00")
