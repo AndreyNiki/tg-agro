@@ -82,7 +82,50 @@ async def test_hourly_check_job_swallows_sync_failure_instead_of_crashing(conn, 
     monkeypatch.setattr(scheduler_module, "_run_sync", failing_run_sync)
 
     bot = MagicMock()
-    config = MagicMock(default_pdf_source="/tmp/x.pdf", default_group_name="Б-Мв-101")
+    bot.send_message = AsyncMock()
+    config = MagicMock(default_pdf_source="/tmp/x.pdf", default_group_name="Б-Мв-101", admin_chat_id=999)
+
+    await hourly_check_job(conn, config, bot)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_hourly_check_job_notifies_admin_on_sync_failure(conn, monkeypatch):
+    """Unlike a manual /refresh (which replies directly to the admin), a
+    failed hourly check previously only logged a warning — the admin had
+    no way to learn the schedule might be stale short of reading server
+    logs. It must notify admin_chat_id, the same way /refresh does."""
+    import schedule_bot.scheduler as scheduler_module
+
+    async def failing_run_sync(*args, **kwargs):
+        raise ConnectionError("network unreachable")
+
+    monkeypatch.setattr(scheduler_module, "_run_sync", failing_run_sync)
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    config = MagicMock(default_pdf_source="/tmp/x.pdf", default_group_name="Б-Мв-101", admin_chat_id=999)
+
+    await hourly_check_job(conn, config, bot)
+
+    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_args.kwargs["chat_id"] == 999
+
+
+@pytest.mark.asyncio
+async def test_hourly_check_job_survives_admin_notify_failure(conn, monkeypatch):
+    """The admin-notify call itself must not be able to crash the job
+    (e.g. admin blocked the bot) — same isolation principle as every
+    other per-recipient send in this codebase."""
+    import schedule_bot.scheduler as scheduler_module
+
+    async def failing_run_sync(*args, **kwargs):
+        raise ConnectionError("network unreachable")
+
+    monkeypatch.setattr(scheduler_module, "_run_sync", failing_run_sync)
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=RuntimeError("bot blocked by admin"))
+    config = MagicMock(default_pdf_source="/tmp/x.pdf", default_group_name="Б-Мв-101", admin_chat_id=999)
 
     await hourly_check_job(conn, config, bot)  # must not raise
 

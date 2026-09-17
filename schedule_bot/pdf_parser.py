@@ -22,9 +22,9 @@ class RawRow:
 
 def _load_pdf_bytes(source: str) -> bytes:
     if source.startswith("http://") or source.startswith("https://"):
-        import requests
+        from schedule_bot.browser_client import fetch_url, site_root
 
-        response = requests.get(source, timeout=30)
+        response = fetch_url(source, timeout=30, referer=site_root(source))
         response.raise_for_status()
         return response.content
     with open(source, "rb") as handle:

@@ -37,9 +37,9 @@ def parse_week_formula(html: str) -> WeekFormula:
 
 
 def fetch_week_formula(url: str) -> WeekFormula:
-    import requests
+    from schedule_bot.browser_client import fetch_url
 
-    response = requests.get(url, timeout=15)
+    response = fetch_url(url, timeout=15)
     response.raise_for_status()
     return parse_week_formula(response.text)
 

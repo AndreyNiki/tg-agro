@@ -74,6 +74,20 @@ async def hourly_check_job(conn, config, bot, lock: asyncio.Lock | None = None) 
         result = await _run_sync(conn, config, bot, lock)
     except Exception as error:
         logger.warning("scheduler: hourly_check_job sync failed: %s", error)
+        # Unlike a manual /refresh, which replies to whoever ran it, a
+        # failed hourly check previously left the admin unaware the
+        # schedule could be stale unless they checked server logs.
+        try:
+            await send_with_retry(
+                lambda: bot.send_message(
+                    chat_id=config.admin_chat_id,
+                    text=f"Ежечасная проверка расписания не удалась: {error}",
+                )
+            )
+        except Exception as notify_error:
+            logger.warning(
+                "scheduler: hourly_check_job failed to notify admin: %s", notify_error
+            )
         return
     logger.info("scheduler: hourly_check_job finished with status=%s", result.status)
 
