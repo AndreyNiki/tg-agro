@@ -22,11 +22,7 @@ def format_day_schedule(day: str, on_date: date, week_type: str, schedule: Sched
         if text is None:
             if other_text is not None:
                 other_week = WEEK_LOWER if is_upper_week else WEEK_UPPER
-                # State when the class happens, not just that it's absent
-                # today — "нет пары (Нижняя неделя)" read as if it were
-                # describing the current week, not the week the class is
-                # actually held in.
-                text = f"{other_text} (проводится в {_WEEK_ACCUSATIVE[other_week]} неделю)"
+                text = f"нет пары ({other_text}, {_WEEK_ACCUSATIVE[other_week]} неделю)"
             else:
                 text = "нет пары"
         lines.append("")

@@ -27,9 +27,8 @@ def test_format_shows_upper_variant_on_upper_week():
     assert "Лекция" in text
     assert "Семинар" not in text
     # 10.10-11.40 has no upper-week lesson, but does have a lower-week one —
-    # show what it is and when, not just "нет пары", since that phrasing
-    # reads as if the parenthesised week were the current one.
-    assert "Математика (проводится в Нижнюю неделю)" in text
+    # lead with "нет пары" and clarify in parentheses what it is and when.
+    assert "нет пары (Математика, Нижнюю неделю)" in text
 
 
 def test_format_shows_no_lesson_when_neither_week_has_one():
