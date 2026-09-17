@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from schedule_bot.pdf_parser import (
     schedule_from_dict,
     schedule_to_dict,
 )
+from schedule_bot.telegram_utils import SEND_PACING_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +32,15 @@ class SyncResult:
     changes: list[str] = field(default_factory=list)
 
 
+_UNSAFE_PATH_CHARS = re.compile(r"[^\w.-]")
+
+
 def _write_cache(pdf_bytes: bytes, pdf_cache_dir: str, group_name: str) -> str:
-    cache_dir = Path(pdf_cache_dir) / group_name
+    # group_name ultimately comes from admin-set config, not untrusted user
+    # input, but it's used as a path segment — sanitize it so a stray "/"
+    # or ".." can't be interpreted as a path separator/traversal.
+    safe_group_name = _UNSAFE_PATH_CHARS.sub("_", group_name)
+    cache_dir = Path(pdf_cache_dir) / safe_group_name
     cache_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     destination = cache_dir / f"{timestamp}.pdf"
@@ -146,5 +155,6 @@ async def check_and_apply_diff(
             logger.warning(
                 "sync: failed to notify chat_id=%s for group %r: %s", chat_id, group_name, exc
             )
+        await asyncio.sleep(SEND_PACING_SECONDS)
 
     return SyncResult(status="applied", changes=changes)

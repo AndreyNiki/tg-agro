@@ -71,6 +71,21 @@ def list_subscribers(conn: sqlite3.Connection, group_name: str) -> list[int]:
     return [row[0] for row in rows]
 
 
+def update_subscribers_group(conn: sqlite3.Connection, old_group_name: str, new_group_name: str) -> int:
+    """Re-point every subscriber tracking `old_group_name` at
+    `new_group_name`. Without this, changing the tracked group (via
+    /set_group) orphans every existing subscriber: their row still
+    carries the group name that was current at /start time, so every
+    broadcast loop's `list_subscribers(conn, new_group_name)` call
+    silently returns an empty list."""
+    cursor = conn.execute(
+        "UPDATE subscribers SET group_name = ? WHERE group_name = ?",
+        (new_group_name, old_group_name),
+    )
+    conn.commit()
+    return cursor.rowcount
+
+
 @dataclass
 class ScheduleVersionRow:
     id: int

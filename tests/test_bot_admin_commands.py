@@ -16,6 +16,7 @@ from schedule_bot.bot import (
     refresh_command,
     alert_command,
 )
+from schedule_bot.storage import list_subscribers
 
 ADMIN_CHAT_ID = 999
 
@@ -107,6 +108,62 @@ async def test_set_pdf_source_updates_setting_for_admin(conn):
     await set_pdf_source_command(update, context)
 
     assert storage.get_setting(conn, "pdf_source") == "https://example.com/new.pdf"
+
+
+@pytest.mark.asyncio
+async def test_set_pdf_source_rejects_disallowed_scheme(conn):
+    """SSRF hardening: only http(s) URLs or bare local paths are accepted."""
+    update = make_update(ADMIN_CHAT_ID, "file:///etc/passwd")
+    context = make_context(conn)
+    context.args = ["file:///etc/passwd"]
+
+    await set_pdf_source_command(update, context)
+
+    assert storage.get_setting(conn, "pdf_source") is None
+
+
+@pytest.mark.asyncio
+async def test_set_pdf_source_accepts_local_path(conn):
+    update = make_update(ADMIN_CHAT_ID, "/data/schedule.pdf")
+    context = make_context(conn)
+    context.args = ["/data/schedule.pdf"]
+
+    await set_pdf_source_command(update, context)
+
+    assert storage.get_setting(conn, "pdf_source") == "/data/schedule.pdf"
+
+
+@pytest.mark.asyncio
+async def test_set_group_migrates_existing_subscribers(conn):
+    """Regression: changing the tracked group must not orphan existing
+    subscribers — every broadcast loop filters by the *current*
+    group_name setting, so their rows must move with it."""
+    storage.set_setting(conn, "group_name", "Б-Мв-101")
+    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
+    storage.add_subscriber(conn, 222, "Б-Мв-101", "2026-09-16T00:00:00")
+
+    update = make_update(ADMIN_CHAT_ID, "Б-Мв-102")
+    context = make_context(conn)
+    context.args = ["Б-Мв-102"]
+
+    await set_group_command(update, context)
+
+    assert storage.get_setting(conn, "group_name") == "Б-Мв-102"
+    assert sorted(list_subscribers(conn, "Б-Мв-102")) == [111, 222]
+    assert list_subscribers(conn, "Б-Мв-101") == []
+
+
+@pytest.mark.asyncio
+async def test_set_group_rejects_non_admin(conn):
+    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
+    update = make_update(12345, "Б-Мв-102")
+    context = make_context(conn)
+    context.args = ["Б-Мв-102"]
+
+    await set_group_command(update, context)
+
+    assert storage.get_setting(conn, "group_name") is None
+    assert list_subscribers(conn, "Б-Мв-101") == [111]
 
 
 @pytest.mark.asyncio

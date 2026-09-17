@@ -79,6 +79,18 @@ def test_sync_with_changed_pdf_notifies_all_subscribers(conn, tmp_path, monkeypa
     assert {chat_id for chat_id, _ in notifier.sent} == {111, 222}
 
 
+def test_write_cache_sanitizes_group_name_used_as_path_segment(tmp_path):
+    """group_name ends up as a path segment under pdf_cache_dir; a stray
+    "/" or ".." must not be interpreted as a path separator/traversal."""
+    from schedule_bot.sync import _write_cache
+
+    cache_path = Path(_write_cache(b"%PDF-fake", str(tmp_path), "Б-Мв/../101"))
+
+    assert cache_path.exists()
+    assert tmp_path in cache_path.resolve().parents
+    assert ".." not in cache_path.parts
+
+
 def test_sync_caches_pdf_file_on_disk(conn, tmp_path):
     notifier = RecordingNotifier()
     asyncio.run(check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier))

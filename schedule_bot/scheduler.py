@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -15,6 +15,8 @@ from schedule_bot.formatting import format_day_schedule
 from schedule_bot.pdf_parser import DAY_ORDER, schedule_from_dict
 from schedule_bot.screenshot import render_day_image
 from schedule_bot.sync import check_and_apply_diff
+from schedule_bot.telegram_utils import SEND_PACING_SECONDS, send_with_retry
+from schedule_bot.timeutil import today_in_configured_timezone
 from schedule_bot.weektype import WeekFormula, fetch_week_formula, save_week_formula
 
 logger = logging.getLogger(__name__)
@@ -26,7 +28,7 @@ class WeekFormulaHolder:
 
 
 async def _notify(bot, chat_id: int, text: str) -> None:
-    await bot.send_message(chat_id=chat_id, text=text)
+    await send_with_retry(lambda: bot.send_message(chat_id=chat_id, text=text))
 
 
 def resolve_sync_settings(conn, config) -> tuple[str, str]:
@@ -39,37 +41,54 @@ def resolve_sync_settings(conn, config) -> tuple[str, str]:
     return pdf_source, group_name
 
 
-async def _run_sync(conn, config, bot) -> "SyncResult":
+async def _run_sync(conn, config, bot, lock: asyncio.Lock | None = None) -> "SyncResult":
     pdf_source, group_name = resolve_sync_settings(conn, config)
-    return await check_and_apply_diff(
-        conn, pdf_source, group_name, config.pdf_cache_dir, lambda chat_id, text: _notify(bot, chat_id, text)
-    )
+
+    async def _do_sync():
+        return await check_and_apply_diff(
+            conn, pdf_source, group_name, config.pdf_cache_dir, lambda chat_id, text: _notify(bot, chat_id, text)
+        )
+
+    # Guard against hourly_check_job, daily_send_job and a manual /refresh
+    # overlapping: without this, two concurrent syncs can both diff against
+    # the same "active" row, both apply, double-broadcast the change, and
+    # both try to delete the same superseded cache file — orphaning the
+    # second sync's PDF on disk permanently (the only GC mechanism for
+    # pdf_cache_dir is the one in sync.py that assumes a single writer).
+    if lock is None:
+        return await _do_sync()
+    async with lock:
+        return await _do_sync()
 
 
-async def hourly_check_job(conn, config, bot) -> None:
+async def hourly_check_job(conn, config, bot, lock: asyncio.Lock | None = None) -> None:
     logger.info("scheduler: hourly_check_job starting")
-    result = await _run_sync(conn, config, bot)
+    result = await _run_sync(conn, config, bot, lock)
     logger.info("scheduler: hourly_check_job finished with status=%s", result.status)
 
 
-async def daily_send_job(conn, config, bot, week_formula_holder: WeekFormulaHolder) -> None:
+async def daily_send_job(
+    conn, config, bot, week_formula_holder: WeekFormulaHolder, lock: asyncio.Lock | None = None
+) -> None:
     logger.info("scheduler: daily_send_job starting")
     # I1: sync failure must not prevent the daily send — subscribers should
     # get today's schedule "в любом случае" even if the sync check errors.
     try:
-        await _run_sync(conn, config, bot)
+        await _run_sync(conn, config, bot, lock)
     except Exception as error:
         logger.warning(
             "scheduler: daily_send_job sync failed, sending with last known schedule: %s", error
         )
 
-    group_name = storage.get_setting(conn, "group_name") or config.default_group_name
+    # I8/consistency: resolve group_name the same way every sync entry
+    # point does, instead of duplicating the fallback logic here.
+    _, group_name = resolve_sync_settings(conn, config)
     active = storage.get_active_version(conn, group_name)
     if active is None:
         return
     schedule = schedule_from_dict(json.loads(active.payload_json))
 
-    today = date.today()
+    today = today_in_configured_timezone(conn)
     day_name = DAY_ORDER[today.weekday()] if today.weekday() < len(DAY_ORDER) else None
     if day_name is None:
         return  # Sunday: no classes in this schedule
@@ -95,14 +114,17 @@ async def daily_send_job(conn, config, bot, week_formula_holder: WeekFormulaHold
     sent = 0
     for chat_id in subscribers:
         try:
-            await bot.send_message(chat_id=chat_id, text=text)
+            await send_with_retry(lambda chat_id=chat_id: bot.send_message(chat_id=chat_id, text=text))
             if image_bytes is not None:
-                await bot.send_photo(chat_id=chat_id, photo=image_bytes)
+                await send_with_retry(
+                    lambda chat_id=chat_id: bot.send_photo(chat_id=chat_id, photo=image_bytes)
+                )
             sent += 1
         except Exception as error:
             logger.warning(
                 "scheduler: failed to send daily schedule to chat_id=%s: %s", chat_id, error
             )
+        await asyncio.sleep(SEND_PACING_SECONDS)
     logger.info("scheduler: daily_send_job sent to %d/%d subscribers", sent, len(subscribers))
 
 
@@ -167,15 +189,27 @@ def _safe_interval_minutes(value: str, default: int) -> int:
         return int(default)
 
 
-def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder) -> AsyncIOScheduler:
-    scheduler = AsyncIOScheduler(timezone=storage.get_setting(conn, "timezone") or config.default_timezone)
+def build_scheduler(
+    conn, config, bot, week_formula_holder: WeekFormulaHolder, lock: asyncio.Lock | None = None
+) -> AsyncIOScheduler:
+    if lock is None:
+        lock = asyncio.Lock()
+
+    tz_name = storage.get_setting(conn, "timezone") or config.default_timezone
+    scheduler = AsyncIOScheduler(timezone=tz_name)
 
     send_time = storage.get_setting(conn, "daily_send_time") or config.default_daily_send_time
     hour, minute = _safe_hh_mm(send_time, config.default_daily_send_time)
     scheduler.add_job(
         daily_send_job,
-        CronTrigger(hour=hour, minute=minute),
-        args=[conn, config, bot, week_formula_holder],
+        # A CronTrigger built without timezone= binds to the local system
+        # timezone at construction time, NOT the scheduler's own timezone —
+        # AsyncIOScheduler(timezone=...) only applies to triggers that don't
+        # specify their own. Passing tz_name explicitly here is what makes
+        # the daily send actually fire at TIMEZONE-local hour:minute rather
+        # than the container's (usually UTC) local time.
+        CronTrigger(hour=hour, minute=minute, timezone=tz_name),
+        args=[conn, config, bot, week_formula_holder, lock],
         id="daily_send",
         replace_existing=True,
     )
@@ -187,14 +221,14 @@ def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder) -
     scheduler.add_job(
         hourly_check_job,
         IntervalTrigger(minutes=interval_minutes),
-        args=[conn, config, bot],
+        args=[conn, config, bot, lock],
         id="hourly_check",
         replace_existing=True,
     )
 
     scheduler.add_job(
         weekly_weektype_refresh_job,
-        CronTrigger(day_of_week="mon", hour=6, minute=0),
+        CronTrigger(day_of_week="mon", hour=6, minute=0, timezone=tz_name),
         args=[conn, week_formula_holder],
         id="weekly_weektype_refresh",
         replace_existing=True,
@@ -208,7 +242,7 @@ def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder) -
     scheduler.add_job(
         hourly_check_job,
         DateTrigger(run_date=datetime.now()),
-        args=[conn, config, bot],
+        args=[conn, config, bot, lock],
         id="startup_sync",
         replace_existing=True,
     )

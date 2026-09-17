@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -9,6 +11,8 @@ from schedule_bot import storage
 from schedule_bot.formatting import format_day_schedule
 from schedule_bot.pdf_parser import DAY_ORDER
 from schedule_bot.screenshot import render_day_image
+from schedule_bot.telegram_utils import SEND_PACING_SECONDS, send_with_retry
+from schedule_bot.timeutil import today_in_configured_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +113,7 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     conn = context.bot_data["conn"]
     logger.info("bot: /schedule from chat_id=%s", update.effective_chat.id)
     text = _stale_warning_prefix(conn) + "Выберите день недели:"
-    await update.message.reply_text(text, reply_markup=build_day_keyboard(date.today()))
+    await update.message.reply_text(text, reply_markup=build_day_keyboard(today_in_configured_timezone(conn)))
 
 
 async def day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -163,6 +167,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("\n".join(lines))
 
 
+_ALLOWED_PDF_SOURCE_SCHEMES = {"http", "https", ""}  # "" covers a bare local path
+
+
+def _is_valid_pdf_source(value: str) -> bool:
+    return urlparse(value).scheme in _ALLOWED_PDF_SOURCE_SCHEMES
+
+
 async def set_pdf_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("bot: /set_pdf_source from chat_id=%s args=%s", update.effective_chat.id, context.args)
     if not is_admin(update, context):
@@ -171,8 +182,12 @@ async def set_pdf_source_command(update: Update, context: ContextTypes.DEFAULT_T
     if not context.args:
         await update.message.reply_text("Использование: /set_pdf_source <url_или_путь>")
         return
-    storage.set_setting(context.bot_data["conn"], "pdf_source", context.args[0])
-    await update.message.reply_text(f"Источник PDF обновлён: {context.args[0]}")
+    value = context.args[0]
+    if not _is_valid_pdf_source(value):
+        await update.message.reply_text("Неверный источник: разрешены только http(s)-адреса или локальный путь.")
+        return
+    storage.set_setting(context.bot_data["conn"], "pdf_source", value)
+    await update.message.reply_text(f"Источник PDF обновлён: {value}")
 
 
 async def set_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -183,8 +198,20 @@ async def set_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not context.args:
         await update.message.reply_text("Использование: /set_group <название>")
         return
-    storage.set_setting(context.bot_data["conn"], "group_name", context.args[0])
-    await update.message.reply_text(f"Группа обновлена: {context.args[0]}")
+    conn = context.bot_data["conn"]
+    new_group_name = context.args[0]
+    # Re-point every existing subscriber at the new group; otherwise they'd
+    # be silently dropped from every future broadcast (daily send, change
+    # notifications, /alert), since those all filter subscribers by the
+    # *current* group_name setting.
+    old_group_name = storage.get_setting(conn, "group_name")
+    migrated = 0
+    if old_group_name and old_group_name != new_group_name:
+        migrated = storage.update_subscribers_group(conn, old_group_name, new_group_name)
+    storage.set_setting(conn, "group_name", new_group_name)
+    await update.message.reply_text(
+        f"Группа обновлена: {new_group_name}. Подписчиков перенесено: {migrated}."
+    )
 
 
 _HH_MM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]?\d)$")
@@ -271,7 +298,8 @@ async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     subscribers = storage.list_subscribers(conn, group_name)
     for chat_id in subscribers:
         try:
-            await context.bot.send_message(chat_id=chat_id, text=text)
+            await send_with_retry(lambda chat_id=chat_id: context.bot.send_message(chat_id=chat_id, text=text))
         except Exception as error:
             logger.warning("bot: failed to alert chat_id=%s: %s", chat_id, error)
+        await asyncio.sleep(SEND_PACING_SECONDS)
     await update.message.reply_text(f"Сообщение разослано {len(subscribers)} подписчикам.")

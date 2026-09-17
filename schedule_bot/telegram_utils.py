@@ -1,0 +1,31 @@
+import asyncio
+import logging
+from typing import Awaitable, Callable, TypeVar
+
+from telegram.error import RetryAfter, TimedOut
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+# Telegram's bulk-broadcast ceiling is ~30 messages/sec; pacing sends below
+# that keeps loops with many subscribers from tripping RetryAfter at all.
+SEND_PACING_SECONDS = 0.05
+
+
+async def send_with_retry(send: Callable[[], Awaitable[T]]) -> T:
+    """Call `send` (a zero-arg callable returning an awaitable) and retry
+    once if Telegram rate-limits or times out the request. A single retry
+    is enough for the transient cases (RetryAfter, TimedOut); anything
+    else propagates so the caller's existing per-subscriber isolation
+    still applies."""
+    try:
+        return await send()
+    except RetryAfter as error:
+        logger.warning("telegram: rate limited, retrying after %.1fs", error.retry_after)
+        await asyncio.sleep(error.retry_after)
+        return await send()
+    except TimedOut:
+        logger.warning("telegram: request timed out, retrying once")
+        await asyncio.sleep(1)
+        return await send()

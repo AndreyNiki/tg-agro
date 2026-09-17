@@ -43,6 +43,19 @@ def test_add_subscriber_is_idempotent(conn):
     assert storage.list_subscribers(conn, "Б-Мв-101") == [111]
 
 
+def test_update_subscribers_group_migrates_matching_rows(conn):
+    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
+    storage.add_subscriber(conn, 222, "Б-Мв-101", "2026-09-16T00:00:00")
+    storage.add_subscriber(conn, 333, "OTHER-GROUP", "2026-09-16T00:00:00")
+
+    migrated = storage.update_subscribers_group(conn, "Б-Мв-101", "Б-Мв-102")
+
+    assert migrated == 2
+    assert sorted(storage.list_subscribers(conn, "Б-Мв-102")) == [111, 222]
+    assert storage.list_subscribers(conn, "Б-Мв-101") == []
+    assert storage.list_subscribers(conn, "OTHER-GROUP") == [333]
+
+
 def test_get_active_version_returns_none_when_empty(conn):
     assert storage.get_active_version(conn, "Б-Мв-101") is None
 

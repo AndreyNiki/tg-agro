@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 
@@ -31,6 +32,7 @@ from schedule_bot.scheduler import (
     resolve_sync_settings,
 )
 from schedule_bot.sync import check_and_apply_diff
+from schedule_bot.telegram_utils import send_with_retry
 from schedule_bot.weektype import WeekFormula, fetch_week_formula, load_week_formula, save_week_formula
 
 logger = logging.getLogger(__name__)
@@ -73,7 +75,17 @@ def build_application(config: Config, conn) -> Application:
             scope=BotCommandScopeChat(chat_id=config.admin_chat_id),
         )
 
-    application = Application.builder().token(config.telegram_token).post_init(_post_init).build()
+    application = (
+        Application.builder()
+        .token(config.telegram_token)
+        .post_init(_post_init)
+        # A slow/hung PDF source would otherwise block the entire bot for
+        # the duration of a sync (~90s across 3 retries): PTB processes
+        # updates strictly sequentially by default, so /start, /schedule,
+        # etc. from other chats would queue behind a stuck /refresh.
+        .concurrent_updates(True)
+        .build()
+    )
     application.bot_data["conn"] = conn
     application.bot_data["admin_chat_id"] = config.admin_chat_id
     application.bot_data["group_name"] = storage.get_setting(conn, "group_name")
@@ -82,13 +94,19 @@ def build_application(config: Config, conn) -> Application:
     application.bot_data["active_schedule_getter"] = lambda: _load_active_schedule(conn)
     application.bot_data["active_pdf_path_getter"] = lambda: _load_active_pdf_path(conn)
 
+    # Shared across hourly_check_job, daily_send_job and /refresh so they
+    # can't diff/apply against the same "active" schedule version
+    # concurrently — see the comment on scheduler._run_sync.
+    sync_lock = asyncio.Lock()
+
     async def sync_fn():
         pdf_source, group_name = resolve_sync_settings(conn, config)
 
         async def notify(chat_id, text):
-            await application.bot.send_message(chat_id=chat_id, text=text)
+            await send_with_retry(lambda: application.bot.send_message(chat_id=chat_id, text=text))
 
-        return await check_and_apply_diff(conn, pdf_source, group_name, config.pdf_cache_dir, notify)
+        async with sync_lock:
+            return await check_and_apply_diff(conn, pdf_source, group_name, config.pdf_cache_dir, notify)
 
     application.bot_data["sync_fn"] = sync_fn
 
@@ -118,7 +136,9 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("alert", alert_command))
 
-    scheduler_holder["scheduler"] = build_scheduler(conn, config, application.bot, week_formula_holder)
+    scheduler_holder["scheduler"] = build_scheduler(
+        conn, config, application.bot, week_formula_holder, sync_lock
+    )
     application.bot_data["_scheduler"] = scheduler_holder["scheduler"]
 
     return application
@@ -184,7 +204,14 @@ if __name__ == "__main__":
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     config = load_config(os.environ)
-    connection = sqlite3.connect(config.db_path)
+    # check_same_thread=False + WAL: every DB call today happens on the
+    # single asyncio event loop thread (sync.py/scheduler.py deliberately
+    # keep `conn` off the worker threads used for blocking PDF fetch/parse
+    # calls), so this isn't required yet — but it's one line away from
+    # breaking, and WAL lets concurrent readers/writers coexist without
+    # extra work if that ever changes.
+    connection = sqlite3.connect(config.db_path, check_same_thread=False)
+    connection.execute("PRAGMA journal_mode=WAL")
     storage.init_db(connection)
     app = build_application(config, connection)
     app.run_polling()

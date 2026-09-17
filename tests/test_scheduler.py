@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 from datetime import date, datetime, timezone
@@ -78,7 +79,7 @@ async def test_daily_send_job_sends_even_when_sync_fails(conn, monkeypatch):
         raise RuntimeError("network error")
 
     monkeypatch.setattr(scheduler_module, "_run_sync", failing_run_sync)
-    monkeypatch.setattr(scheduler_module, "date", FixedMonday)
+    monkeypatch.setattr(scheduler_module, "today_in_configured_timezone", lambda conn: FixedMonday.today())
     monkeypatch.setattr(scheduler_module, "render_day_image", lambda *a, **k: None)
 
     bot = MagicMock()
@@ -105,7 +106,7 @@ async def test_daily_send_job_isolates_per_subscriber_failures(conn, monkeypatch
         return None
 
     monkeypatch.setattr(scheduler_module, "_run_sync", noop_run_sync)
-    monkeypatch.setattr(scheduler_module, "date", FixedMonday)
+    monkeypatch.setattr(scheduler_module, "today_in_configured_timezone", lambda conn: FixedMonday.today())
     monkeypatch.setattr(scheduler_module, "render_day_image", lambda *a, **k: None)
 
     bot = MagicMock()
@@ -138,7 +139,7 @@ async def test_daily_send_job_sends_day_screenshot_when_available(conn, monkeypa
         return None
 
     monkeypatch.setattr(scheduler_module, "_run_sync", noop_run_sync)
-    monkeypatch.setattr(scheduler_module, "date", FixedMonday)
+    monkeypatch.setattr(scheduler_module, "today_in_configured_timezone", lambda conn: FixedMonday.today())
     monkeypatch.setattr(scheduler_module, "render_day_image", lambda *a, **k: b"fake-png-bytes")
 
     bot = MagicMock()
@@ -167,7 +168,7 @@ async def test_daily_send_job_swallows_render_error_and_still_sends_text(conn, m
         raise RuntimeError("file not found")
 
     monkeypatch.setattr(scheduler_module, "_run_sync", noop_run_sync)
-    monkeypatch.setattr(scheduler_module, "date", FixedMonday)
+    monkeypatch.setattr(scheduler_module, "today_in_configured_timezone", lambda conn: FixedMonday.today())
     monkeypatch.setattr(scheduler_module, "render_day_image", raise_error)
 
     bot = MagicMock()
@@ -194,7 +195,7 @@ async def test_daily_send_job_warns_when_last_sync_failed(conn, monkeypatch):
         return None
 
     monkeypatch.setattr(scheduler_module, "_run_sync", noop_run_sync)
-    monkeypatch.setattr(scheduler_module, "date", FixedMonday)
+    monkeypatch.setattr(scheduler_module, "today_in_configured_timezone", lambda conn: FixedMonday.today())
     monkeypatch.setattr(scheduler_module, "render_day_image", lambda *a, **k: None)
 
     bot = MagicMock()
@@ -207,6 +208,39 @@ async def test_daily_send_job_warns_when_last_sync_failed(conn, monkeypatch):
 
     sent_text = bot.send_message.await_args_list[0].kwargs["text"]
     assert "могли устареть" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_run_sync_serializes_concurrent_calls_via_shared_lock(conn, monkeypatch):
+    """Regression: hourly_check_job/daily_send_job/refresh must not run
+    check_and_apply_diff concurrently against the same active version — a
+    shared lock passed into _run_sync must serialize them."""
+    import schedule_bot.scheduler as scheduler_module
+
+    order = []
+
+    async def fake_check_and_apply_diff(conn, pdf_source, group_name, pdf_cache_dir, notify):
+        order.append("start")
+        await asyncio.sleep(0.01)
+        order.append("end")
+        from schedule_bot.sync import SyncResult
+
+        return SyncResult(status="no_changes")
+
+    monkeypatch.setattr(scheduler_module, "check_and_apply_diff", fake_check_and_apply_diff)
+
+    bot = MagicMock()
+    config = MagicMock(default_pdf_source="/tmp/x.pdf", default_group_name="Б-Мв-101", pdf_cache_dir="/tmp/cache")
+    lock = asyncio.Lock()
+
+    await asyncio.gather(
+        scheduler_module._run_sync(conn, config, bot, lock),
+        scheduler_module._run_sync(conn, config, bot, lock),
+    )
+
+    # If the calls had overlapped, the interleaving would be
+    # [start, start, end, end]; the lock must force [start, end, start, end].
+    assert order == ["start", "end", "start", "end"]
 
 
 def test_resolve_sync_settings_uses_stored_values_when_present(conn):
@@ -238,6 +272,22 @@ def test_build_scheduler_registers_daily_hourly_and_weekly_jobs(conn):
 
     job_ids = {job.id for job in scheduler.get_jobs()}
     assert job_ids == {"daily_send", "hourly_check", "weekly_weektype_refresh", "startup_sync"}
+
+
+def test_build_scheduler_binds_daily_and_weekly_triggers_to_configured_timezone(conn):
+    """Regression: a CronTrigger built without timezone= binds to the
+    system-local timezone at construction time, NOT the scheduler's own
+    timezone — so build_scheduler must pass the configured TIMEZONE to
+    every CronTrigger explicitly, not rely on AsyncIOScheduler(timezone=...)
+    alone."""
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+
+    scheduler = build_scheduler(conn, MagicMock(pdf_cache_dir="/tmp/cache"), bot, holder)
+
+    assert str(scheduler.get_job("daily_send").trigger.timezone) == "Europe/Moscow"
+    assert str(scheduler.get_job("weekly_weektype_refresh").trigger.timezone) == "Europe/Moscow"
 
 
 def test_build_scheduler_schedules_startup_sync_to_run_immediately(conn):
