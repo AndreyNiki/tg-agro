@@ -26,7 +26,24 @@ def test_format_shows_upper_variant_on_upper_week():
     text = format_day_schedule("Среда", date(2026, 9, 16), WEEK_UPPER, make_schedule())
     assert "Лекция" in text
     assert "Семинар" not in text
-    assert "нет пары" in text  # 10.10-11.40 has no upper-week lesson
+    # 10.10-11.40 has no upper-week lesson, but does have a lower-week one —
+    # show what it is and when, not just "нет пары", since that phrasing
+    # reads as if the parenthesised week were the current one.
+    assert "Математика (проводится в Нижнюю неделю)" in text
+
+
+def test_format_shows_no_lesson_when_neither_week_has_one():
+    schedule = Schedule(
+        table_x0=0.0,
+        table_x1=500.0,
+        days={
+            "Среда": DaySchedule(
+                y0=0.0, y1=10.0, lessons=[Lesson(time="8.30-10.00", upper=None, lower=None)]
+            ),
+        },
+    )
+    text = format_day_schedule("Среда", date(2026, 9, 16), WEEK_UPPER, schedule)
+    assert "нет пары" in text
 
 
 def test_format_shows_lower_variant_on_lower_week():
