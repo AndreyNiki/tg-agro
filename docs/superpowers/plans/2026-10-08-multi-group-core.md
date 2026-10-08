@@ -286,7 +286,7 @@ git commit -m "feat: add groups table and CRUD to storage"
 
 **Interfaces:**
 - Consumes: `storage.create_group` (Task 1), used by tests to get a `group_id` to attach members to.
-- Produces: `storage.MemberRow` (dataclass: `chat_id, group_id, telegram_username, display_name, subscribed, joined_at`), `storage.upsert_member(conn, chat_id, group_id, *, joined_at, subscribed=True)`, `storage.get_member(conn, chat_id) -> MemberRow | None`, `storage.set_member_subscribed(conn, chat_id, subscribed)`, `storage.update_member_profile(conn, chat_id, *, telegram_username, display_name)`, `storage.list_group_members(conn, group_id, *, subscribed_only=True) -> list[int]`, `storage.list_members_missing_profile(conn) -> list[int]`.
+- Produces: `storage.MemberRow` (dataclass: `chat_id, group_id, telegram_username, display_name, subscribed, joined_at`), `storage.upsert_member(conn, chat_id, group_id, *, joined_at, subscribed=True)`, `storage.get_member(conn, chat_id) -> MemberRow | None`, `storage.set_member_subscribed(conn, chat_id, subscribed)`, `storage.update_member_profile(conn, chat_id, *, telegram_username, display_name)`, `storage.list_group_members(conn, group_id, *, subscribed_only=True) -> list[int]`, `storage.list_members_missing_profile(conn) -> list[int]`, `storage.list_all_member_chat_ids(conn) -> list[int]` (every chat_id in `members` across every group — backs the global `/alert`, not a per-group listing).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -355,6 +355,14 @@ def test_list_members_missing_profile_returns_chats_without_username_or_name(con
     storage.upsert_member(conn, 222, group_id, joined_at="t")
     storage.update_member_profile(conn, 222, telegram_username="ivan", display_name="Ivan")
     assert storage.list_members_missing_profile(conn) == [111]
+
+
+def test_list_all_member_chat_ids_spans_every_group(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    storage.upsert_member(conn, 222, group_b, joined_at="t", subscribed=False)
+    assert sorted(storage.list_all_member_chat_ids(conn)) == [111, 222]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -453,6 +461,11 @@ def list_members_missing_profile(conn: sqlite3.Connection) -> list[int]:
     rows = conn.execute(
         "SELECT chat_id FROM members WHERE telegram_username IS NULL AND display_name IS NULL"
     ).fetchall()
+    return [row[0] for row in rows]
+
+
+def list_all_member_chat_ids(conn: sqlite3.Connection) -> list[int]:
+    rows = conn.execute("SELECT chat_id FROM members").fetchall()
     return [row[0] for row in rows]
 ```
 
@@ -2338,7 +2351,7 @@ ADMIN_COMMANDS = [
     ("set_send_time", "Изменить время ежедневной рассылки группы: <group_id> <HH:MM>"),
     ("set_check_interval", "Изменить интервал проверки группы: <group_id> <минуты>"),
     ("refresh", "Принудительно проверить и разослать обновления группы: <group_id>"),
-    ("alert", "Разослать сообщение подписчикам группы: <group_id> <текст>"),
+    ("alert", "Разослать объявление всем пользователям бота: <текст>"),
 ]
 ```
 
@@ -2458,7 +2471,7 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("Расписание обновлено и разослано подписчикам.")
 ```
 
-Replace `alert_command` (lines 287-305):
+Replace `alert_command` (lines 287-305). Unlike every other admin command in this task, `/alert` stays **global** — it's the admin's channel for bot-wide announcements (releases, maintenance), not a per-group tool, so it does NOT gain a `group_id` argument; it switches from `storage.list_subscribers(conn, group_name)` to `storage.list_all_member_chat_ids(conn)` (added in Task 2) to reach every chat_id across every group:
 
 ```python
 async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2466,23 +2479,19 @@ async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not is_admin(update, context):
         await update.message.reply_text("Недостаточно прав.")
         return
-    if len(context.args) < 2:
-        await update.message.reply_text("Использование: /alert <group_id> <текст>")
+    if not context.args:
+        await update.message.reply_text("Использование: /alert <текст>")
         return
     conn = context.bot_data["conn"]
-    group = _resolve_admin_group(conn, context.args[0])
-    if group is None:
-        await update.message.reply_text("Группа с таким id не найдена.")
-        return
-    text = " ".join(context.args[1:])
-    members = storage.list_group_members(conn, group.id)
-    for chat_id in members:
+    text = " ".join(context.args)
+    chat_ids = storage.list_all_member_chat_ids(conn)
+    for chat_id in chat_ids:
         try:
             await send_with_retry(lambda chat_id=chat_id: context.bot.send_message(chat_id=chat_id, text=text))
         except Exception as error:
             logger.warning("bot: failed to alert chat_id=%s: %s", chat_id, error)
         await asyncio.sleep(SEND_PACING_SECONDS)
-    await update.message.reply_text(f"Сообщение разослано {len(members)} подписчикам группы «{group.name}».")
+    await update.message.reply_text(f"Сообщение разослано {len(chat_ids)} пользователям.")
 ```
 
 Add `from schedule_bot.timeutil import today_in_configured_timezone` to the existing import (it's already imported — confirm it stays, only the call site changes).
@@ -2742,26 +2751,31 @@ async def test_refresh_command_reports_sync_error_without_crashing(conn):
 
 
 @pytest.mark.asyncio
-async def test_alert_command_broadcasts_to_group_members(conn):
-    group_id = _make_group(conn)
-    storage.upsert_member(conn, 111, group_id, joined_at="t")
-    storage.upsert_member(conn, 222, group_id, joined_at="t")
+async def test_alert_command_broadcasts_to_every_group_globally(conn):
+    """/alert is deliberately global (bot-update announcements), not
+    per-group — members of two DIFFERENT groups must both receive it."""
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    storage.upsert_member(conn, 222, group_b, joined_at="t")
     update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn)
-    context.args = [str(group_id), "Внимание,", "ошибка", "в", "расписании"]
+    context.args = ["Внимание,", "вышло", "обновление", "бота"]
     context.bot.send_message = AsyncMock()
 
     await alert_command(update, context)
 
     assert context.bot.send_message.await_count == 2
+    sent_chat_ids = {call.kwargs["chat_id"] for call in context.bot.send_message.await_args_list}
+    assert sent_chat_ids == {111, 222}
 
 
 @pytest.mark.asyncio
 async def test_alert_command_rejects_non_admin(conn):
-    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, _make_group(conn), joined_at="t")
     update = make_update(12345)
     context = make_context(conn)
-    context.args = [str(group_id), "test"]
+    context.args = ["test"]
     context.bot.send_message = AsyncMock()
 
     await alert_command(update, context)
