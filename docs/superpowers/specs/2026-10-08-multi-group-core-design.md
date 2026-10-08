@@ -40,7 +40,7 @@ groups(
   send_time TEXT NOT NULL,
   check_interval_minutes INTEGER NOT NULL,
   timezone TEXT NOT NULL,
-  weektype_url TEXT,
+  last_sync_failed_at TEXT,
   created_at TEXT NOT NULL
 )
 ```
@@ -50,10 +50,19 @@ groups(
 - `pdf_source_url` — резолвленная на момент создания/последнего успешного
   синка ссылка на конкретный PDF этой группы; может быть переписана при
   404-реканекте.
-- `send_time`/`check_interval_minutes`/`timezone`/`weektype_url` —
-  бывшие глобальные настройки из `settings`, теперь per-group; новые
-  группы получают значения по умолчанию из `config` (как раньше
-  задавались глобально), меняет их только глобальный админ.
+- `send_time`/`check_interval_minutes`/`timezone` — бывшие глобальные
+  настройки из `settings`, теперь per-group; новые группы получают
+  значения по умолчанию из `config` (как раньше задавались глобально),
+  меняет их только глобальный админ.
+- `last_sync_failed_at` — бывший глобальный `settings.last_sync_failed_at`,
+  теперь per-group (сбой синка одной группы не должен влиять на
+  предупреждение о "устаревшем расписании" у другой).
+- `weektype_url` и формула типа недели **остаются глобальными**
+  (`settings.weektype_url`, `weekly_weektype_refresh_job`,
+  `WeekFormulaHolder` без изменений) — это одна и та же страница
+  института для всех групп, вводить per-group-копию формулы ради
+  гипотетического различия, которого никто не просил, было бы
+  избыточным усложнением (YAGNI).
 
 ### Таблица `members` (заменяет `subscribers`)
 
