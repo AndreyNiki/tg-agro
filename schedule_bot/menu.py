@@ -235,8 +235,11 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
         return
 
 
-async def _handle_group_scoped_pick(update, context, conn, action: str, group_id: int) -> None:
+async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_chat_id: int, action: str, group_id: int) -> None:
     query = update.callback_query
+    if chat_id != admin_chat_id:
+        await query.message.reply_text("Недостаточно прав.")
+        return
     group = storage.get_group(conn, group_id)
     if group is None:
         await query.message.reply_text("Эта группа больше не существует.")
@@ -334,7 +337,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "setpdf", "setsendtime", "setinterval", "setstarosta", "removestarosta",
     }
     if section in group_scoped_actions:
-        await _handle_group_scoped_pick(update, context, conn, section, int(action))
+        await _handle_group_scoped_pick(update, context, conn, chat_id, admin_chat_id, section, int(action))
         return
 
     if section == "root":

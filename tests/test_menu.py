@@ -436,3 +436,47 @@ async def test_pending_action_followup_applies_alert_globally(conn):
 
     context.bot.send_message.assert_awaited_once()
     assert "pending_menu_action" not in context.user_data
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_toggleclosed_rejects_non_admin(conn):
+    group_id = _make_group(conn, "A")
+    update = make_callback_update(111, f"menu:toggleclosed:{group_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+    assert storage.get_group(conn, group_id).is_closed is False
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_removestarosta_rejects_non_admin(conn):
+    group_id = _make_group(conn, "A")
+    storage.update_group_starosta(conn, group_id, 111)
+    update = make_callback_update(222, f"menu:removestarosta:{group_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+    assert storage.get_group(conn, group_id).starosta_chat_id == 111
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_setpdf_rejects_non_admin_without_stashing_pending_action(conn):
+    group_id = _make_group(conn, "A")
+    update = make_callback_update(111, f"menu:setpdf:{group_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+    assert "pending_menu_action" not in context.user_data
