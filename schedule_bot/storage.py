@@ -14,7 +14,7 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS schedule_versions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_name TEXT NOT NULL,
+            group_id INTEGER NOT NULL REFERENCES groups(id),
             payload_json TEXT NOT NULL,
             pdf_cache_path TEXT NOT NULL,
             parsed_at TEXT NOT NULL,
@@ -73,75 +73,40 @@ def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
-def add_subscriber(conn: sqlite3.Connection, chat_id: int, group_name: str, joined_at: str) -> None:
-    conn.execute(
-        "INSERT OR IGNORE INTO subscribers (chat_id, group_name, joined_at) VALUES (?, ?, ?)",
-        (chat_id, group_name, joined_at),
-    )
-    conn.commit()
-
-
-def remove_subscriber(conn: sqlite3.Connection, chat_id: int) -> None:
-    conn.execute("DELETE FROM subscribers WHERE chat_id = ?", (chat_id,))
-    conn.commit()
-
-
-def list_subscribers(conn: sqlite3.Connection, group_name: str) -> list[int]:
-    rows = conn.execute(
-        "SELECT chat_id FROM subscribers WHERE group_name = ?", (group_name,)
-    ).fetchall()
-    return [row[0] for row in rows]
-
-
-def update_subscribers_group(conn: sqlite3.Connection, old_group_name: str, new_group_name: str) -> int:
-    """Re-point every subscriber tracking `old_group_name` at
-    `new_group_name`. Without this, changing the tracked group (via
-    /set_group) orphans every existing subscriber: their row still
-    carries the group name that was current at /start time, so every
-    broadcast loop's `list_subscribers(conn, new_group_name)` call
-    silently returns an empty list."""
-    cursor = conn.execute(
-        "UPDATE subscribers SET group_name = ? WHERE group_name = ?",
-        (new_group_name, old_group_name),
-    )
-    conn.commit()
-    return cursor.rowcount
-
-
 @dataclass
 class ScheduleVersionRow:
     id: int
-    group_name: str
+    group_id: int
     payload_json: str
     pdf_cache_path: str
     parsed_at: str
     status: str
 
 
-def get_active_version(conn: sqlite3.Connection, group_name: str) -> ScheduleVersionRow | None:
+def get_active_version(conn: sqlite3.Connection, group_id: int) -> ScheduleVersionRow | None:
     row = conn.execute(
-        "SELECT id, group_name, payload_json, pdf_cache_path, parsed_at, status "
-        "FROM schedule_versions WHERE group_name = ? AND status = 'active'",
-        (group_name,),
+        "SELECT id, group_id, payload_json, pdf_cache_path, parsed_at, status "
+        "FROM schedule_versions WHERE group_id = ? AND status = 'active'",
+        (group_id,),
     ).fetchone()
     return ScheduleVersionRow(*row) if row else None
 
 
 def insert_new_version(
     conn: sqlite3.Connection,
-    group_name: str,
+    group_id: int,
     payload_json: str,
     pdf_cache_path: str,
     parsed_at: str,
 ) -> int:
     conn.execute(
-        "UPDATE schedule_versions SET status = 'superseded' WHERE group_name = ? AND status = 'active'",
-        (group_name,),
+        "UPDATE schedule_versions SET status = 'superseded' WHERE group_id = ? AND status = 'active'",
+        (group_id,),
     )
     cursor = conn.execute(
-        "INSERT INTO schedule_versions (group_name, payload_json, pdf_cache_path, parsed_at, status) "
+        "INSERT INTO schedule_versions (group_id, payload_json, pdf_cache_path, parsed_at, status) "
         "VALUES (?, ?, ?, ?, 'active')",
-        (group_name, payload_json, pdf_cache_path, parsed_at),
+        (group_id, payload_json, pdf_cache_path, parsed_at),
     )
     conn.commit()
     return cursor.lastrowid
