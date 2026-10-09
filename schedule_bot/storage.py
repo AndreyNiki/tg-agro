@@ -291,3 +291,47 @@ def list_members_missing_profile(conn: sqlite3.Connection) -> list[int]:
 def list_all_member_chat_ids(conn: sqlite3.Connection) -> list[int]:
     rows = conn.execute("SELECT chat_id FROM members").fetchall()
     return [row[0] for row in rows]
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+
+
+def migrate_legacy_single_group(conn: sqlite3.Connection, legacy_source_page_url: str | None) -> int | None:
+    """One-time upgrade from the pre-multi-group schema (a single global
+    group tracked via settings.group_name/pdf_source/...) to the groups/
+    members tables. Returns the new group's id, or None if there was
+    nothing to migrate (fresh install, or already migrated — detected by
+    `groups` already having a row)."""
+    if count_groups(conn) > 0:
+        return None
+
+    legacy_group_name = get_setting(conn, "group_name")
+    if not legacy_group_name:
+        return None  # fresh install, nothing to migrate
+
+    if not legacy_source_page_url:
+        raise ValueError(
+            "Existing legacy group_name setting found but "
+            "LEGACY_GROUP_SOURCE_PAGE_URL is not set — cannot migrate without "
+            "a source page URL for 404 link rediscovery."
+        )
+
+    group_id = create_group(
+        conn,
+        name=legacy_group_name,
+        source_page_url=legacy_source_page_url,
+        pdf_source_url=get_setting(conn, "pdf_source") or "",
+        send_time=get_setting(conn, "daily_send_time") or "09:00",
+        check_interval_minutes=int(get_setting(conn, "check_interval_minutes") or "60"),
+        tz_name=get_setting(conn, "timezone") or "Europe/Moscow",
+    )
+
+    for chat_id, joined_at in conn.execute("SELECT chat_id, joined_at FROM subscribers").fetchall():
+        upsert_member(conn, chat_id, group_id, joined_at=joined_at, subscribed=True)
+
+    if not _column_exists(conn, "schedule_versions", "group_id"):
+        conn.execute("ALTER TABLE schedule_versions ADD COLUMN group_id INTEGER")
+    conn.execute("UPDATE schedule_versions SET group_id = ? WHERE group_id IS NULL", (group_id,))
+    conn.commit()
+    return group_id

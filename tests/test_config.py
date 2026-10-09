@@ -2,12 +2,16 @@ import pytest
 from schedule_bot.config import load_config
 
 
-def test_load_config_reads_required_and_defaults():
-    env = {
+def _base_env():
+    return {
         "TELEGRAM_BOT_TOKEN": "abc123",
         "ADMIN_CHAT_ID": "42",
         "PDF_SOURCE": "https://example.com/schedule.pdf",
     }
+
+
+def test_load_config_reads_required_and_defaults():
+    env = _base_env()
     config = load_config(env)
     assert config.telegram_token == "abc123"
     assert config.admin_chat_id == 42
@@ -24,3 +28,15 @@ def test_load_config_reads_required_and_defaults():
 def test_load_config_raises_on_missing_required_var():
     with pytest.raises(ValueError):
         load_config({"ADMIN_CHAT_ID": "42", "PDF_SOURCE": "x"})
+
+
+def test_load_config_reads_legacy_group_source_page_url_when_present():
+    env = _base_env()
+    env["LEGACY_GROUP_SOURCE_PAGE_URL"] = "https://example.com/schedules"
+    config = load_config(env)
+    assert config.legacy_group_source_page_url == "https://example.com/schedules"
+
+
+def test_load_config_defaults_legacy_group_source_page_url_to_none():
+    config = load_config(_base_env())
+    assert config.legacy_group_source_page_url is None

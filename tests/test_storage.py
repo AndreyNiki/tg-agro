@@ -224,3 +224,84 @@ def test_list_all_member_chat_ids_spans_every_group(conn):
     storage.upsert_member(conn, 111, group_a, joined_at="t")
     storage.upsert_member(conn, 222, group_b, joined_at="t", subscribed=False)
     assert sorted(storage.list_all_member_chat_ids(conn)) == [111, 222]
+
+
+def _seed_legacy_single_group_db(conn, *, with_schedule_version=False):
+    """Recreates the pre-multi-group state this migration must handle:
+    a `settings`-driven single group plus old-shape `subscribers` rows,
+    and optionally an old-shape `schedule_versions` row that predates the
+    group_id column (simulating an un-migrated production database)."""
+    storage.set_setting(conn, "group_name", "Б-Мв-101")
+    storage.set_setting(conn, "pdf_source", "https://example.com/101.pdf")
+    storage.set_setting(conn, "daily_send_time", "09:00")
+    storage.set_setting(conn, "check_interval_minutes", "60")
+    storage.set_setting(conn, "timezone", "Europe/Moscow")
+    conn.execute(
+        "INSERT INTO subscribers (chat_id, group_name, joined_at) VALUES (?, ?, ?)",
+        (111, "Б-Мв-101", "2026-09-16T00:00:00"),
+    )
+    conn.execute(
+        "INSERT INTO subscribers (chat_id, group_name, joined_at) VALUES (?, ?, ?)",
+        (222, "Б-Мв-101", "2026-09-16T00:00:00"),
+    )
+    conn.commit()
+    if with_schedule_version:
+        # Simulate a database created before Task 3's schema change: no
+        # group_id column exists yet on schedule_versions.
+        conn.execute("DROP TABLE schedule_versions")
+        conn.execute(
+            "CREATE TABLE schedule_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "group_name TEXT NOT NULL, payload_json TEXT NOT NULL, pdf_cache_path TEXT NOT NULL, "
+            "parsed_at TEXT NOT NULL, status TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO schedule_versions (group_name, payload_json, pdf_cache_path, parsed_at, status) "
+            "VALUES ('Б-Мв-101', '{\"a\": 1}', '/v1.pdf', '2026-09-16T00:00:00', 'active')"
+        )
+        conn.commit()
+
+
+def test_migrate_legacy_single_group_creates_group_from_settings(conn):
+    _seed_legacy_single_group_db(conn)
+    group_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
+    group = storage.get_group(conn, group_id)
+    assert group.name == "Б-Мв-101"
+    assert group.source_page_url == "https://example.com/schedules"
+    assert group.pdf_source_url == "https://example.com/101.pdf"
+    assert group.send_time == "09:00"
+    assert group.check_interval_minutes == 60
+    assert group.timezone == "Europe/Moscow"
+
+
+def test_migrate_legacy_single_group_moves_subscribers_to_members(conn):
+    _seed_legacy_single_group_db(conn)
+    group_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
+    assert sorted(storage.list_group_members(conn, group_id)) == [111, 222]
+
+
+def test_migrate_legacy_single_group_requires_source_page_url(conn):
+    _seed_legacy_single_group_db(conn)
+    with pytest.raises(ValueError):
+        storage.migrate_legacy_single_group(conn, None)
+
+
+def test_migrate_legacy_single_group_is_noop_on_fresh_install(conn):
+    assert storage.migrate_legacy_single_group(conn, None) is None
+    assert storage.count_groups(conn) == 0
+
+
+def test_migrate_legacy_single_group_is_noop_when_already_migrated(conn):
+    _seed_legacy_single_group_db(conn)
+    first_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
+    second_result = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
+    assert second_result is None
+    assert storage.count_groups(conn) == 1
+    assert first_id is not None
+
+
+def test_migrate_legacy_single_group_backfills_group_id_on_old_schedule_versions(conn):
+    _seed_legacy_single_group_db(conn, with_schedule_version=True)
+    group_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
+    active = storage.get_active_version(conn, group_id)
+    assert active is not None
+    assert active.payload_json == '{"a": 1}'
