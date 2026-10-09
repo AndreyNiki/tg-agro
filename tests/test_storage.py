@@ -448,3 +448,44 @@ def test_count_election_approvals_reaches_two_on_distinct_voters(conn):
     storage.add_election_approval(conn, election_id, 222, "t")
     storage.add_election_approval(conn, election_id, 333, "t")
     assert storage.count_election_approvals(conn, election_id) == 2
+
+
+def test_create_group_change_request_defaults_to_pending(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    request_id = storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+    request = storage.get_group_change_request(conn, request_id)
+    assert request.status == "pending"
+    assert request.from_group_id == group_a
+    assert request.to_group_id == group_b
+
+
+def test_get_pending_request_for_chat_returns_none_when_absent(conn):
+    assert storage.get_pending_request_for_chat(conn, 111) is None
+
+
+def test_get_pending_request_for_chat_ignores_decided_requests(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    request_id = storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+    storage.decide_group_change_request(conn, request_id, "approved", "t2")
+    assert storage.get_pending_request_for_chat(conn, 111) is None
+
+
+def test_decide_group_change_request_updates_status(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    request_id = storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+    storage.decide_group_change_request(conn, request_id, "rejected", "t2")
+    request = storage.get_group_change_request(conn, request_id)
+    assert request.status == "rejected"
+    assert request.decided_at == "t2"
+
+
+def test_list_pending_requests_for_group_scoped_by_target(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.create_group_change_request(conn, 111, group_a, group_b, "t1")
+    storage.create_group_change_request(conn, 222, group_b, group_a, "t2")
+    pending_for_b = storage.list_pending_requests_for_group(conn, group_b)
+    assert [r.chat_id for r in pending_for_b] == [111]

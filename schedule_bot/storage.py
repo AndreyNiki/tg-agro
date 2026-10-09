@@ -68,6 +68,16 @@ def init_db(conn: sqlite3.Connection) -> None:
             approved_at TEXT NOT NULL,
             UNIQUE(election_id, chat_id)
         );
+
+        CREATE TABLE IF NOT EXISTS group_change_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            from_group_id INTEGER NOT NULL REFERENCES groups(id),
+            to_group_id INTEGER NOT NULL REFERENCES groups(id),
+            requested_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            decided_at TEXT
+        );
         """
     )
     conn.commit()
@@ -513,3 +523,61 @@ def count_election_approvals(conn: sqlite3.Connection, election_id: int) -> int:
     return conn.execute(
         "SELECT COUNT(*) FROM election_approvals WHERE election_id = ?", (election_id,)
     ).fetchone()[0]
+
+
+@dataclass
+class GroupChangeRequestRow:
+    id: int
+    chat_id: int
+    from_group_id: int
+    to_group_id: int
+    requested_at: str
+    status: str
+    decided_at: str | None
+
+
+_REQUEST_COLUMNS = "id, chat_id, from_group_id, to_group_id, requested_at, status, decided_at"
+
+
+def create_group_change_request(
+    conn: sqlite3.Connection, chat_id: int, from_group_id: int, to_group_id: int, requested_at: str
+) -> int:
+    cursor = conn.execute(
+        "INSERT INTO group_change_requests (chat_id, from_group_id, to_group_id, requested_at, status) "
+        "VALUES (?, ?, ?, ?, 'pending')",
+        (chat_id, from_group_id, to_group_id, requested_at),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_pending_request_for_chat(conn: sqlite3.Connection, chat_id: int) -> GroupChangeRequestRow | None:
+    row = conn.execute(
+        f"SELECT {_REQUEST_COLUMNS} FROM group_change_requests WHERE chat_id = ? AND status = 'pending'",
+        (chat_id,),
+    ).fetchone()
+    return GroupChangeRequestRow(*row) if row else None
+
+
+def get_group_change_request(conn: sqlite3.Connection, request_id: int) -> GroupChangeRequestRow | None:
+    row = conn.execute(
+        f"SELECT {_REQUEST_COLUMNS} FROM group_change_requests WHERE id = ?", (request_id,)
+    ).fetchone()
+    return GroupChangeRequestRow(*row) if row else None
+
+
+def decide_group_change_request(conn: sqlite3.Connection, request_id: int, status: str, decided_at: str) -> None:
+    conn.execute(
+        "UPDATE group_change_requests SET status = ?, decided_at = ? WHERE id = ?",
+        (status, decided_at, request_id),
+    )
+    conn.commit()
+
+
+def list_pending_requests_for_group(conn: sqlite3.Connection, group_id: int) -> list[GroupChangeRequestRow]:
+    rows = conn.execute(
+        f"SELECT {_REQUEST_COLUMNS} FROM group_change_requests "
+        "WHERE to_group_id = ? AND status = 'pending' ORDER BY requested_at",
+        (group_id,),
+    ).fetchall()
+    return [GroupChangeRequestRow(*row) for row in rows]
