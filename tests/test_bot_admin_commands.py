@@ -353,3 +353,112 @@ async def test_remove_starosta_rejects_non_admin(conn):
     await remove_starosta_command(update, context)
 
     assert storage.get_group(conn, group_id).starosta_chat_id == 111
+
+
+from schedule_bot.bot import close_group_command, notify_command, open_group_command
+
+
+@pytest.mark.asyncio
+async def test_close_group_by_starosta_without_group_id(conn):
+    group_id = _make_group(conn)
+    storage.update_group_starosta(conn, group_id, 111)
+    update = make_update(111)
+    context = make_context(conn)
+    context.args = []
+
+    await close_group_command(update, context)
+
+    assert storage.get_group(conn, group_id).is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_close_group_rejects_plain_member(conn):
+    group_id = _make_group(conn)
+    update = make_update(111)
+    context = make_context(conn)
+    context.args = []
+
+    await close_group_command(update, context)
+
+    assert storage.get_group(conn, group_id).is_closed is False
+    assert "не староста" in update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_open_group_by_admin_with_group_id(conn):
+    group_id = _make_group(conn)
+    storage.update_group_closed(conn, group_id, True)
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn)
+    context.args = [str(group_id)]
+
+    await open_group_command(update, context)
+
+    assert storage.get_group(conn, group_id).is_closed is False
+
+
+@pytest.mark.asyncio
+async def test_open_group_admin_without_group_id_asks_for_usage(conn):
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn)
+    context.args = []
+
+    await open_group_command(update, context)
+
+    assert "Использование" in update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_notify_command_by_starosta_broadcasts_to_whole_group(conn):
+    group_id = _make_group(conn)
+    storage.update_group_starosta(conn, group_id, 111)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.upsert_member(conn, 222, group_id, joined_at="t", subscribed=False)
+    update = make_update(111)
+    context = make_context(conn)
+    context.args = ["Внимание"]
+    context.bot.send_message = AsyncMock()
+
+    await notify_command(update, context)
+
+    assert context.bot.send_message.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_notify_command_rejects_plain_member(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    update = make_update(111)
+    context = make_context(conn)
+    context.args = ["Внимание"]
+    context.bot.send_message = AsyncMock()
+
+    await notify_command(update, context)
+
+    context.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_notify_command_by_admin_requires_group_id(conn):
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn)
+    context.args = ["текст", "без", "group_id"]
+    context.bot.send_message = AsyncMock()
+
+    await notify_command(update, context)
+
+    context.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_notify_command_by_admin_with_group_id_broadcasts(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn)
+    context.args = [str(group_id), "Внимание"]
+    context.bot.send_message = AsyncMock()
+
+    await notify_command(update, context)
+
+    context.bot.send_message.assert_awaited_once()

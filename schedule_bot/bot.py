@@ -40,6 +40,9 @@ ADMIN_COMMANDS = [
     ("alert", "Разослать объявление всем пользователям бота: <текст>"),
     ("set_starosta", "Назначить старосту группы: <group_id> <chat_id>"),
     ("remove_starosta", "Снять старосту группы: <group_id>"),
+    ("close_group", "Закрыть группу на вступление: [group_id] (без аргумента — своя группа)"),
+    ("open_group", "Открыть группу для вступления: [group_id] (без аргумента — своя группа)"),
+    ("notify", "Оповестить всех закреплённых за группой: [group_id] <текст>"),
 ]
 
 STALE_SCHEDULE_WARNING = (
@@ -356,3 +359,70 @@ async def remove_starosta_command(update: Update, context: ContextTypes.DEFAULT_
     storage.update_group_starosta(conn, group.id, None)
     storage.set_group_last_starosta_change_at(conn, group.id, now)
     await update.message.reply_text(f"Староста группы «{group.name}» снят.")
+
+
+async def _toggle_group_closed(update: Update, context: ContextTypes.DEFAULT_TYPE, is_closed: bool) -> None:
+    conn = context.bot_data["conn"]
+    if is_admin(update, context):
+        if not context.args:
+            command_name = "close_group" if is_closed else "open_group"
+            await update.message.reply_text(f"Использование: /{command_name} <group_id>")
+            return
+        group = _resolve_admin_group(conn, context.args[0])
+        if group is None:
+            await update.message.reply_text("Группа с таким id не найдена.")
+            return
+    else:
+        group = storage.get_group_where_starosta(conn, update.effective_chat.id)
+        if group is None:
+            await update.message.reply_text("Вы не староста ни одной группы.")
+            return
+
+    storage.update_group_closed(conn, group.id, is_closed)
+    state = "закрыта" if is_closed else "открыта"
+    await update.message.reply_text(f"Группа «{group.name}» теперь {state}.")
+
+
+async def close_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("bot: /close_group from chat_id=%s args=%s", update.effective_chat.id, context.args)
+    await _toggle_group_closed(update, context, True)
+
+
+async def open_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("bot: /open_group from chat_id=%s args=%s", update.effective_chat.id, context.args)
+    await _toggle_group_closed(update, context, False)
+
+
+async def notify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("bot: /notify from chat_id=%s args=%s", update.effective_chat.id, context.args)
+    conn = context.bot_data["conn"]
+
+    if is_admin(update, context):
+        if len(context.args) < 2:
+            await update.message.reply_text("Использование: /notify <group_id> <текст>")
+            return
+        group = _resolve_admin_group(conn, context.args[0])
+        if group is None:
+            await update.message.reply_text("Группа с таким id не найдена.")
+            return
+        text = " ".join(context.args[1:])
+    else:
+        group = storage.get_group_where_starosta(conn, update.effective_chat.id)
+        if group is None:
+            await update.message.reply_text("Вы не староста ни одной группы.")
+            return
+        if not context.args:
+            await update.message.reply_text("Использование: /notify <текст>")
+            return
+        text = " ".join(context.args)
+
+    members = storage.list_group_members(conn, group.id, subscribed_only=False)
+    for member_chat_id in members:
+        try:
+            await send_with_retry(
+                lambda member_chat_id=member_chat_id: context.bot.send_message(chat_id=member_chat_id, text=text)
+            )
+        except Exception as error:
+            logger.warning("bot: failed to notify chat_id=%s: %s", member_chat_id, error)
+        await asyncio.sleep(SEND_PACING_SECONDS)
+    await update.message.reply_text(f"Оповещение отправлено {len(members)} участникам группы «{group.name}».")
