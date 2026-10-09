@@ -138,3 +138,149 @@ async def test_classmates_command_includes_unsubscribed_members(conn):
     text = update.message.reply_text.call_args[0][0]
     assert "@anna" in text
     assert "@boris" in text
+
+
+from schedule_bot.classmates import exclude_confirm_callback, exclude_select_callback
+
+ADMIN_CHAT_ID = 999
+
+
+def make_callback_update(chat_id, data):
+    update = MagicMock()
+    update.effective_chat.id = chat_id
+    update.callback_query.data = data
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    return update
+
+
+def make_context_with_admin(conn, admin_chat_id=ADMIN_CHAT_ID):
+    context = MagicMock()
+    context.bot_data = {"conn": conn, "admin_chat_id": admin_chat_id}
+    context.bot.send_message = AsyncMock()
+    return context
+
+
+@pytest.mark.asyncio
+async def test_classmates_command_shows_exclude_buttons_for_starosta(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+
+    update = make_update(111)
+    context = make_context_with_admin(conn)
+
+    await classmates_command(update, context)
+
+    _, kwargs = update.message.reply_text.call_args
+    buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any(b.callback_data == "exclude:select:222" for b in buttons)
+    assert not any(b.callback_data == "exclude:select:111" for b in buttons)  # no self-exclude button
+
+
+@pytest.mark.asyncio
+async def test_classmates_command_no_exclude_buttons_for_plain_member(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+
+    update = make_update(222)
+    context = make_context_with_admin(conn)
+
+    await classmates_command(update, context)
+
+    call_kwargs = update.message.reply_text.call_args[1]
+    assert "reply_markup" not in call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_exclude_confirm_callback_removes_member_and_records_exclusion(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+
+    update = make_callback_update(111, "exclude:confirm:222")
+    context = make_context_with_admin(conn)
+
+    await exclude_confirm_callback(update, context)
+
+    assert storage.get_member(conn, 222) is None
+    assert storage.has_group_exclusion(conn, group_id, 222) is True
+    context.bot.send_message.assert_awaited_once()
+    assert context.bot.send_message.await_args.kwargs["chat_id"] == 222
+
+
+@pytest.mark.asyncio
+async def test_exclude_confirm_callback_rejects_self_exclusion_even_if_called_directly(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+
+    update = make_callback_update(111, "exclude:confirm:111")
+    context = make_context_with_admin(conn)
+
+    await exclude_confirm_callback(update, context)
+
+    assert storage.get_member(conn, 111) is not None
+    context.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exclude_confirm_callback_rejects_unauthorized_caller(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+    storage.upsert_member(conn, 333, group_id, joined_at="t")
+
+    update = make_callback_update(333, "exclude:confirm:222")  # 333 is neither starosta nor admin
+    context = make_context_with_admin(conn)
+
+    await exclude_confirm_callback(update, context)
+
+    assert storage.get_member(conn, 222) is not None
+
+
+@pytest.mark.asyncio
+async def test_exclude_select_callback_shows_confirmation(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+    update = make_callback_update(111, "exclude:select:222")
+    context = make_context_with_admin(conn)
+
+    await exclude_select_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+    _, kwargs = update.callback_query.message.reply_text.call_args
+    assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_exclude_select_callback_rejects_self_selection(conn):
+    update = make_callback_update(111, "exclude:select:111")
+    context = make_context_with_admin(conn)
+
+    await exclude_select_callback(update, context)
+
+    text = update.callback_query.message.reply_text.call_args[0][0]
+    assert "самого себя" in text
