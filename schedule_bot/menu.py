@@ -16,6 +16,7 @@ from schedule_bot.bot import (
 from schedule_bot.change_group_commands import _build_requests_messages, change_group_command
 from schedule_bot.classmates import classmates_command
 from schedule_bot.group_commands import subscribe_command, unsubscribe_command
+from schedule_bot.report import _apply_report
 from schedule_bot.starosta_commands import starosta_command, votes_command
 
 ROOT_CALLBACK_DATA = "menu:root:_"
@@ -30,6 +31,7 @@ def build_root_keyboard(conn, chat_id: int, admin_chat_id: int) -> InlineKeyboar
         rows.append([InlineKeyboardButton("👑 Староста", callback_data="menu:starosta:root")])
     if chat_id == admin_chat_id:
         rows.append([InlineKeyboardButton("⚙️ Админ", callback_data="menu:admin:root")])
+    rows.append([InlineKeyboardButton("🆘 Сообщить о проблеме", callback_data="menu:report:start")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -303,6 +305,12 @@ async def pending_action_followup(update, context) -> None:
         await update.message.reply_text(text)
         return
 
+    if action == "report":
+        await update.message.reply_text(
+            await _apply_report(conn, context.bot, context.bot_data["admin_chat_id"], update.effective_chat.id, value)
+        )
+        return
+
     group = storage.get_group(conn, pending["group_id"])
     if group is None:
         await update.message.reply_text("Эта группа больше не существует.")
@@ -354,4 +362,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if section == "admin":
         await _handle_admin_section(update, context, conn, chat_id, admin_chat_id, action)
+        return
+    if section == "report":
+        context.user_data["pending_menu_action"] = {"action": "report"}
+        await query.message.reply_text("Отправьте текст сообщения администратору:")
         return
