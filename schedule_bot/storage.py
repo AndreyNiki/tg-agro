@@ -78,6 +78,13 @@ def init_db(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             decided_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS group_exclusions (
+            group_id INTEGER NOT NULL REFERENCES groups(id),
+            chat_id INTEGER NOT NULL,
+            excluded_at TEXT NOT NULL,
+            excluded_by_chat_id INTEGER NOT NULL
+        );
         """
     )
     conn.commit()
@@ -581,3 +588,25 @@ def list_pending_requests_for_group(conn: sqlite3.Connection, group_id: int) -> 
         (group_id,),
     ).fetchall()
     return [GroupChangeRequestRow(*row) for row in rows]
+
+
+def create_group_exclusion(
+    conn: sqlite3.Connection, group_id: int, chat_id: int, excluded_at: str, excluded_by_chat_id: int
+) -> None:
+    conn.execute(
+        "INSERT INTO group_exclusions (group_id, chat_id, excluded_at, excluded_by_chat_id) VALUES (?, ?, ?, ?)",
+        (group_id, chat_id, excluded_at, excluded_by_chat_id),
+    )
+    conn.commit()
+
+
+def has_group_exclusion(conn: sqlite3.Connection, group_id: int, chat_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM group_exclusions WHERE group_id = ? AND chat_id = ? LIMIT 1", (group_id, chat_id)
+    ).fetchone()
+    return row is not None
+
+
+def remove_member(conn: sqlite3.Connection, chat_id: int) -> None:
+    conn.execute("DELETE FROM members WHERE chat_id = ?", (chat_id,))
+    conn.commit()

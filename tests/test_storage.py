@@ -489,3 +489,28 @@ def test_list_pending_requests_for_group_scoped_by_target(conn):
     storage.create_group_change_request(conn, 222, group_b, group_a, "t2")
     pending_for_b = storage.list_pending_requests_for_group(conn, group_b)
     assert [r.chat_id for r in pending_for_b] == [111]
+
+
+def test_has_group_exclusion_false_when_none_recorded(conn):
+    group_id = _make_group(conn)
+    assert storage.has_group_exclusion(conn, group_id, 111) is False
+
+
+def test_create_group_exclusion_then_has_exclusion_true(conn):
+    group_id = _make_group(conn)
+    storage.create_group_exclusion(conn, group_id, 111, "t", 999)
+    assert storage.has_group_exclusion(conn, group_id, 111) is True
+
+
+def test_group_exclusion_is_scoped_by_group(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.create_group_exclusion(conn, group_a, 111, "t", 999)
+    assert storage.has_group_exclusion(conn, group_b, 111) is False
+
+
+def test_remove_member_deletes_the_row(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.remove_member(conn, 111)
+    assert storage.get_member(conn, 111) is None
