@@ -457,3 +457,29 @@ def test_build_application_registers_privilege_handlers(conn, config, monkeypatc
     assert r"^exclude:abort$" in callback_patterns
 
     application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+def test_build_application_registers_menu_handlers(conn, config, monkeypatch):
+    _patch_week_formula(monkeypatch)
+
+    application = build_application(config, conn)
+
+    command_names = set()
+    for handlers in application.handlers.values():
+        for handler in handlers:
+            if hasattr(handler, "commands"):
+                command_names.update(handler.commands)
+    assert "menu" in command_names
+
+    callback_patterns = set()
+    message_handlers = []
+    for handlers in application.handlers.values():
+        for handler in handlers:
+            if hasattr(handler, "pattern") and handler.pattern is not None:
+                callback_patterns.add(handler.pattern.pattern)
+            if type(handler).__name__ == "MessageHandler":
+                message_handlers.append(handler)
+    assert r"^menu:" in callback_patterns or any(p.startswith("^menu:") for p in callback_patterns)
+    assert len(message_handlers) >= 1
+
+    application.bot_data["_scheduler"].shutdown(wait=False)

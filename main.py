@@ -3,9 +3,10 @@ import logging
 import os
 
 from telegram import BotCommand, BotCommandScopeChat
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from schedule_bot import storage
+from schedule_bot.menu import menu_callback, menu_command, pending_action_followup
 from schedule_bot.bot import (
     ADMIN_COMMANDS,
     NOOP_CALLBACK_DATA,
@@ -216,6 +217,11 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CallbackQueryHandler(exclude_select_callback, pattern=r"^exclude:select:\d+$"))
     application.add_handler(CallbackQueryHandler(exclude_confirm_callback, pattern=r"^exclude:confirm:\d+$"))
     application.add_handler(CallbackQueryHandler(exclude_abort_callback, pattern=r"^exclude:abort$"))
+
+    application.add_handler(CommandHandler("menu", menu_command))
+    application.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
+
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, pending_action_followup))
 
     # Pass the SAME group_locks dict used by sync_fn/reschedule_group_jobs_cb
     # above, so every group that already exists at startup gets its
