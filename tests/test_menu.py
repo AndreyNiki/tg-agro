@@ -480,3 +480,221 @@ async def test_menu_callback_setpdf_rejects_non_admin_without_stashing_pending_a
 
     update.callback_query.message.reply_text.assert_awaited_once()
     assert "pending_menu_action" not in context.user_data
+
+
+# --- Critical: stale pending_menu_action is cleared on navigation ---
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_clears_stale_pending_action_on_unrelated_navigation(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    update = make_callback_update(111, "menu:root:_")
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "alert"}}
+
+    await menu_callback(update, context)
+
+    assert "pending_menu_action" not in context.user_data
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_clears_stale_pending_action_on_schedule_root(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    update = make_callback_update(111, "menu:schedule:root")
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "notify", "group_id": group_id}}
+
+    await menu_callback(update, context)
+
+    assert "pending_menu_action" not in context.user_data
+
+
+# --- Important: admin group-picker pagination ---
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_pickgrouppage_rerenders_second_page(conn):
+    for i in range(9):
+        _make_group(conn, f"Group-{i}")
+    update = make_callback_update(ADMIN_CHAT_ID, "menu:pickgrouppage:1")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    update.callback_query.edit_message_text.assert_awaited_once()
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert "Group-8" in texts
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_toggleclosedpage_rejects_non_admin(conn):
+    for i in range(9):
+        _make_group(conn, f"Group-{i}")
+    update = make_callback_update(111, "menu:toggleclosedpage:1")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+    update.callback_query.edit_message_text.assert_not_awaited()
+
+
+# --- Important: admin dead-end fixes ---
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_toggleclosed_rerenders_picker_with_keyboard(conn):
+    group_id = _make_group(conn, "A")
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:toggleclosed:{group_id}")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    update.callback_query.edit_message_text.assert_awaited_once()
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    assert "reply_markup" in kwargs
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert "A" in texts
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_removestarosta_rerenders_starosta_submenu(conn):
+    group_id = _make_group(conn, "A")
+    storage.update_group_starosta(conn, group_id, 111)
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:removestarosta:{group_id}")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    update.callback_query.edit_message_text.assert_awaited_once()
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    assert "reply_markup" in kwargs
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any("Назначить" in t for t in texts)
+    assert any("Снять" in t for t in texts)
+
+
+# --- Important: notify follow-up re-verifies starosta privilege ---
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_notify_rejects_if_no_longer_starosta(conn):
+    group_id = _make_group(conn, "A")
+    storage.upsert_member(conn, 777, group_id, joined_at="t")
+    # 777 was starosta when the prompt was stashed, but has since been replaced.
+    storage.update_group_starosta(conn, group_id, 999999)
+    update = MagicMock()
+    update.effective_chat.id = 777
+    update.message.text = "Внимание всем"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "notify", "group_id": group_id}}
+    context.bot.send_message = AsyncMock()
+
+    await pending_action_followup(update, context)
+
+    context.bot.send_message.assert_not_awaited()
+    update.message.reply_text.assert_awaited_once()
+    _, args, _kwargs = update.message.reply_text.mock_calls[0]
+    assert "старост" in args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_notify_succeeds_if_still_starosta(conn):
+    group_id = _make_group(conn, "A")
+    storage.upsert_member(conn, 777, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 777)
+    update = MagicMock()
+    update.effective_chat.id = 777
+    update.message.text = "Внимание всем"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "notify", "group_id": group_id}}
+    context.bot.send_message = AsyncMock()
+
+    await pending_action_followup(update, context)
+
+    context.bot.send_message.assert_awaited()
+
+
+# --- Test gaps: report / faq / no-pending-action ---
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_report_start_stashes_pending_and_prompts(conn):
+    update = make_callback_update(111, "menu:report:start")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    assert context.user_data["pending_menu_action"] == {"action": "report"}
+    update.callback_query.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_faq_show_replies_with_faq_text(conn):
+    update = make_callback_update(111, "menu:faq:show")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    update.message = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    assert (
+        update.callback_query.message.reply_text.await_count
+        or update.message.reply_text.await_count
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_report_forwards_to_admin(conn):
+    update = MagicMock()
+    update.effective_chat.id = 111
+    update.message.text = "У меня проблема"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "report"}}
+    context.bot.send_message = AsyncMock()
+
+    await pending_action_followup(update, context)
+
+    context.bot.send_message.assert_awaited_once()
+    call_kwargs = context.bot.send_message.call_args.kwargs
+    assert call_kwargs.get("chat_id") == ADMIN_CHAT_ID
+    update.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_does_nothing_without_pending_action(conn):
+    update = MagicMock()
+    update.effective_chat.id = 111
+    update.message.text = "случайный текст"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await pending_action_followup(update, context)
+
+    update.message.reply_text.assert_not_awaited()
+
+
+# --- Test gap: nested back button returns to immediate parent, not root ---
+
+
+def test_group_settings_submenu_back_button_returns_to_groupsettings_not_root():
+    from schedule_bot.menu import _group_settings_submenu
+
+    keyboard = _group_settings_submenu(42)
+    back_buttons = [b for row in keyboard.inline_keyboard for b in row if "Назад" in b.text]
+    assert len(back_buttons) == 1
+    assert back_buttons[0].callback_data == "menu:admin:groupsettings"

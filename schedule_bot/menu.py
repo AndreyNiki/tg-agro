@@ -261,7 +261,10 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
         return
     if action == "toggleclosed":
         storage.update_group_closed(conn, group.id, not group.is_closed)
-        await query.edit_message_text(f"Группа «{group.name}»: состояние обновлено.")
+        await query.edit_message_text(
+            f"Группа «{group.name}»: состояние обновлено.",
+            reply_markup=_build_admin_group_picker(conn, "toggleclosed"),
+        )
         return
     if action == "pickrequestsgroup":
         entries = _build_requests_messages(conn, group)
@@ -288,7 +291,10 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
         await query.message.reply_text("Отправьте chat_id нового старосты:")
         return
     if action == "removestarosta":
-        await query.edit_message_text(_apply_remove_starosta(conn, group))
+        await query.edit_message_text(
+            _apply_remove_starosta(conn, group),
+            reply_markup=_starosta_pick_submenu(group_id),
+        )
         return
 
 
@@ -331,6 +337,10 @@ async def pending_action_followup(update, context) -> None:
     elif action == "set_starosta":
         await update.message.reply_text(await _apply_set_starosta(conn, context.bot, group, value))
     elif action == "notify":
+        current_group = storage.get_group_where_starosta(conn, update.effective_chat.id)
+        if current_group is None or current_group.id != group.id:
+            await update.message.reply_text("Вы больше не староста этой группы.")
+            return
         await update.message.reply_text(await _apply_notify(conn, context.bot, group, value))
 
 
@@ -342,12 +352,34 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     admin_chat_id = context.bot_data["admin_chat_id"]
     _, section, action = query.data.split(":", 2)
 
+    # Clear any stale pending free-text prompt before dispatching navigation.
+    # Branches that re-issue a prompt (notify/alert/report/set_* etc.) stash a
+    # fresh one right after this point, so this only affects abandoned prompts.
+    context.user_data.pop("pending_menu_action", None)
+
     group_scoped_actions = {
         "pickgroup", "pickstarostagroup", "toggleclosed", "pickrequestsgroup",
         "setpdf", "setsendtime", "setinterval", "setstarosta", "removestarosta",
     }
     if section in group_scoped_actions:
         await _handle_group_scoped_pick(update, context, conn, chat_id, admin_chat_id, section, int(action))
+        return
+
+    admin_picker_prompts = {
+        "pickgrouppage": "Выберите группу:",
+        "pickstarostagrouppage": "Выберите группу:",
+        "toggleclosedpage": "Выберите группу:",
+        "pickrequestsgrouppage": "Выберите группу:",
+    }
+    if section in admin_picker_prompts:
+        if chat_id != admin_chat_id:
+            await query.message.reply_text("Недостаточно прав.")
+            return
+        pick_action = section[: -len("page")]
+        await query.edit_message_text(
+            admin_picker_prompts[section],
+            reply_markup=_build_admin_group_picker(conn, pick_action, page=int(action)),
+        )
         return
 
     if section == "root":
