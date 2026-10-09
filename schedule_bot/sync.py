@@ -111,9 +111,6 @@ async def check_and_apply_diff(conn, group, pdf_cache_dir: str, notify: Notifier
         _fetch_and_parse_with_retries, pdf_source, group_name, group.source_page_url
     )
 
-    if resolved_source != pdf_source:
-        storage.update_group_pdf_source_url(conn, group_id, resolved_source)
-
     if last_error is not None:
         storage.set_group_last_sync_failed_at(conn, group_id, datetime.now(timezone.utc).isoformat())
         logger.error(
@@ -121,6 +118,13 @@ async def check_and_apply_diff(conn, group, pdf_cache_dir: str, notify: Notifier
             MAX_SYNC_ATTEMPTS, pdf_source, group_name, last_error,
         )
         raise last_error
+
+    # Only persist a 404-reconnected link once the sync has actually
+    # succeeded against it — persisting an unproven replacement link on a
+    # failed sync would permanently overwrite a working pdf_source_url
+    # with a link that was never confirmed to work.
+    if resolved_source != pdf_source:
+        storage.update_group_pdf_source_url(conn, group_id, resolved_source)
 
     storage.set_group_last_sync_failed_at(conn, group_id, "")
 

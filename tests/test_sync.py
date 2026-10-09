@@ -319,6 +319,10 @@ def test_sync_reconnect_attempted_only_once_per_sync_call(conn, tmp_path, monkey
         asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
 
     assert len(reconnect_calls) == 1
+    # Regression: the reconnected-but-still-dead link must NOT be persisted
+    # as the group's pdf_source_url — it was never proven to work, so
+    # persisting it would permanently clobber the original (working) link.
+    assert storage.get_group(conn, group_id).pdf_source_url == "https://example.com/dead-link.pdf"
 
 
 def test_sync_reconnect_failure_falls_back_to_original_error(conn, tmp_path, monkeypatch):

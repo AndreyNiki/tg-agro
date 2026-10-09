@@ -8,8 +8,6 @@ class Config:
     admin_chat_id: int
     db_path: str
     pdf_cache_dir: str
-    default_pdf_source: str
-    default_group_name: str
     default_weektype_url: str
     default_daily_send_time: str
     default_check_interval_minutes: int
@@ -29,8 +27,6 @@ def load_config(env: Mapping[str, str]) -> Config:
         admin_chat_id=int(require("ADMIN_CHAT_ID")),
         pdf_cache_dir=env.get("PDF_CACHE_DIR", "./data/pdf_cache"),
         db_path=env.get("DB_PATH", "./data/schedule.db"),
-        default_pdf_source=require("PDF_SOURCE"),
-        default_group_name=env.get("GROUP_NAME", "Б-Мв-101"),
         default_weektype_url=env.get(
             "WEEKTYPE_URL", "https://www.vavilovsar.ru/ucheba/raspisanie-zanyatii"
         ),

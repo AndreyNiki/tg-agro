@@ -45,8 +45,6 @@ def config():
         admin_chat_id=999,
         db_path=":memory:",
         pdf_cache_dir="/tmp/cache",
-        default_pdf_source="/tmp/does-not-matter.pdf",
-        default_group_name="Б-Мв-101",
         default_weektype_url="https://example.com/week",
         default_daily_send_time="09:00",
         default_check_interval_minutes=60,
