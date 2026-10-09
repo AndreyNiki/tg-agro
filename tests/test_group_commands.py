@@ -424,3 +424,65 @@ async def test_unsubscribe_command_keeps_group_attached(conn):
     member = storage.get_member(conn, 111)
     assert member.subscribed is False
     assert member.group_id == group_id
+
+
+@pytest.mark.asyncio
+async def test_group_select_callback_routes_closed_group_through_request(conn):
+    _make_groups(conn, 1)
+    group_id = storage.list_all_groups(conn)[0].id
+    storage.update_group_closed(conn, group_id, True)
+    update = make_callback_update(111, f"grp:select:{group_id}")
+    context = make_context(conn)
+    context.bot_data["admin_chat_id"] = 999
+    context.bot.send_message = AsyncMock()
+
+    await group_select_callback(update, context)
+
+    assert storage.get_member(conn, 111) is None
+    assert storage.get_pending_request_for_chat(conn, 111) is not None
+    context.bot.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_group_select_callback_routes_excluded_chat_through_request_even_if_open(conn):
+    _make_groups(conn, 1)
+    group_id = storage.list_all_groups(conn)[0].id
+    storage.create_group_exclusion(conn, group_id, 111, "t", 999)
+    update = make_callback_update(111, f"grp:select:{group_id}")
+    context = make_context(conn)
+    context.bot_data["admin_chat_id"] = 999
+    context.bot.send_message = AsyncMock()
+
+    await group_select_callback(update, context)
+
+    assert storage.get_member(conn, 111) is None
+    assert storage.get_pending_request_for_chat(conn, 111) is not None
+
+
+@pytest.mark.asyncio
+async def test_group_select_callback_refuses_second_pending_request(conn):
+    _make_groups(conn, 1)
+    group_id = storage.list_all_groups(conn)[0].id
+    storage.update_group_closed(conn, group_id, True)
+    storage.create_group_change_request(conn, 111, None, group_id, "t")
+    update = make_callback_update(111, f"grp:select:{group_id}")
+    context = make_context(conn)
+    context.bot_data["admin_chat_id"] = 999
+    context.bot.send_message = AsyncMock()
+
+    await group_select_callback(update, context)
+
+    context.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_group_select_callback_still_instant_for_open_unrestricted_group(conn):
+    _make_groups(conn, 1)
+    group_id = storage.list_all_groups(conn)[0].id
+    update = make_callback_update(111, f"grp:select:{group_id}")
+    context = make_context(conn)
+    context.bot_data["admin_chat_id"] = 999
+
+    await group_select_callback(update, context)
+
+    assert storage.get_member(conn, 111).group_id == group_id

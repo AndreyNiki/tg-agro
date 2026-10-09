@@ -17,6 +17,7 @@ from telegram.ext import (
 
 from schedule_bot import storage
 from schedule_bot.group_links import GroupLinkNotFoundError, SourcePageUnreachableError, resolve_group_pdf_source
+from schedule_bot.join_requests import create_join_request_and_notify, requires_approval
 from schedule_bot.pdf_parser import _load_pdf_bytes, parse_schedule
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,15 @@ async def group_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     chat_id = update.effective_chat.id
+
+    if requires_approval(conn, group, chat_id):
+        if storage.get_pending_request_for_chat(conn, chat_id) is not None:
+            await query.message.reply_text("У вас уже есть заявка на рассмотрении.")
+            return
+        await create_join_request_and_notify(context.bot, conn, chat_id, None, group, context.bot_data["admin_chat_id"])
+        await query.message.reply_text("Эта группа закрыта или ограничена для вас — заявка отправлена, ожидайте решения.")
+        return
+
     storage.upsert_member(conn, chat_id, group_id, joined_at=datetime.now(timezone.utc).isoformat(), subscribed=True)
     storage.update_member_profile(
         conn, chat_id,
