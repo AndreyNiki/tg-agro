@@ -37,6 +37,15 @@ def init_db(conn: sqlite3.Connection) -> None:
             last_sync_failed_at TEXT,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS members (
+            chat_id INTEGER PRIMARY KEY,
+            group_id INTEGER NOT NULL REFERENCES groups(id),
+            telegram_username TEXT,
+            display_name TEXT,
+            subscribed INTEGER NOT NULL DEFAULT 1,
+            joined_at TEXT NOT NULL
+        );
         """
     )
     conn.commit()
@@ -236,3 +245,84 @@ def update_group_check_interval(conn: sqlite3.Connection, group_id: int, check_i
 def set_group_last_sync_failed_at(conn: sqlite3.Connection, group_id: int, value: str) -> None:
     conn.execute("UPDATE groups SET last_sync_failed_at = ? WHERE id = ?", (value, group_id))
     conn.commit()
+
+
+@dataclass
+class MemberRow:
+    chat_id: int
+    group_id: int
+    telegram_username: str | None
+    display_name: str | None
+    subscribed: bool
+    joined_at: str
+
+
+_MEMBER_COLUMNS = "chat_id, group_id, telegram_username, display_name, subscribed, joined_at"
+
+
+def _member_row_from_tuple(row) -> MemberRow:
+    chat_id, group_id, username, display_name, subscribed, joined_at = row
+    return MemberRow(chat_id, group_id, username, display_name, bool(subscribed), joined_at)
+
+
+def upsert_member(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    group_id: int,
+    *,
+    joined_at: str,
+    subscribed: bool = True,
+) -> None:
+    conn.execute(
+        "INSERT INTO members (chat_id, group_id, telegram_username, display_name, subscribed, joined_at) "
+        "VALUES (?, ?, NULL, NULL, ?, ?) "
+        "ON CONFLICT(chat_id) DO UPDATE SET group_id = excluded.group_id, subscribed = excluded.subscribed",
+        (chat_id, group_id, 1 if subscribed else 0, joined_at),
+    )
+    conn.commit()
+
+
+def get_member(conn: sqlite3.Connection, chat_id: int) -> MemberRow | None:
+    row = conn.execute(
+        f"SELECT {_MEMBER_COLUMNS} FROM members WHERE chat_id = ?", (chat_id,)
+    ).fetchone()
+    return _member_row_from_tuple(row) if row else None
+
+
+def set_member_subscribed(conn: sqlite3.Connection, chat_id: int, subscribed: bool) -> None:
+    conn.execute(
+        "UPDATE members SET subscribed = ? WHERE chat_id = ?", (1 if subscribed else 0, chat_id)
+    )
+    conn.commit()
+
+
+def update_member_profile(
+    conn: sqlite3.Connection, chat_id: int, *, telegram_username: str | None, display_name: str | None
+) -> None:
+    conn.execute(
+        "UPDATE members SET telegram_username = ?, display_name = ? WHERE chat_id = ?",
+        (telegram_username, display_name, chat_id),
+    )
+    conn.commit()
+
+
+def list_group_members(conn: sqlite3.Connection, group_id: int, *, subscribed_only: bool = True) -> list[int]:
+    if subscribed_only:
+        rows = conn.execute(
+            "SELECT chat_id FROM members WHERE group_id = ? AND subscribed = 1", (group_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT chat_id FROM members WHERE group_id = ?", (group_id,)).fetchall()
+    return [row[0] for row in rows]
+
+
+def list_members_missing_profile(conn: sqlite3.Connection) -> list[int]:
+    rows = conn.execute(
+        "SELECT chat_id FROM members WHERE telegram_username IS NULL AND display_name IS NULL"
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def list_all_member_chat_ids(conn: sqlite3.Connection) -> list[int]:
+    rows = conn.execute("SELECT chat_id FROM members").fetchall()
+    return [row[0] for row in rows]

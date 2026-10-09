@@ -11,6 +11,13 @@ def conn():
     connection.close()
 
 
+def _make_group(conn, name="Б-Мв-101"):
+    return storage.create_group(
+        conn, name=name, source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+
+
 def test_ensure_default_settings_only_fills_missing_keys(conn):
     storage.set_setting(conn, "group_name", "Б-Мв-101")
     storage.ensure_default_settings(conn, {"group_name": "SHOULD_NOT_OVERWRITE", "daily_send_time": "09:00"})
@@ -176,3 +183,68 @@ def test_set_group_last_sync_failed_at(conn):
     assert storage.get_group(conn, group_id).last_sync_failed_at == "2026-10-08T00:00:00+00:00"
     storage.set_group_last_sync_failed_at(conn, group_id, "")
     assert storage.get_group(conn, group_id).last_sync_failed_at == ""
+
+
+def test_upsert_member_creates_new_member(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="2026-10-08T00:00:00")
+    member = storage.get_member(conn, 111)
+    assert member.group_id == group_id
+    assert member.subscribed is True
+    assert member.telegram_username is None
+
+
+def test_upsert_member_moves_existing_chat_to_new_group(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 111, group_a, joined_at="2026-10-08T00:00:00")
+    storage.upsert_member(conn, 111, group_b, joined_at="2026-10-08T00:00:01")
+    assert storage.get_member(conn, 111).group_id == group_b
+
+
+def test_get_member_returns_none_when_absent(conn):
+    assert storage.get_member(conn, 111) is None
+
+
+def test_set_member_subscribed_toggles_without_losing_group(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="2026-10-08T00:00:00")
+    storage.set_member_subscribed(conn, 111, False)
+    member = storage.get_member(conn, 111)
+    assert member.subscribed is False
+    assert member.group_id == group_id
+    storage.set_member_subscribed(conn, 111, True)
+    assert storage.get_member(conn, 111).subscribed is True
+
+
+def test_update_member_profile_sets_username_and_display_name(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="2026-10-08T00:00:00")
+    storage.update_member_profile(conn, 111, telegram_username="ivan", display_name="Ivan Ivanov")
+    member = storage.get_member(conn, 111)
+    assert member.telegram_username == "ivan"
+    assert member.display_name == "Ivan Ivanov"
+
+
+def test_list_group_members_defaults_to_subscribed_only(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t", subscribed=True)
+    storage.upsert_member(conn, 222, group_id, joined_at="t", subscribed=False)
+    assert storage.list_group_members(conn, group_id) == [111]
+    assert sorted(storage.list_group_members(conn, group_id, subscribed_only=False)) == [111, 222]
+
+
+def test_list_members_missing_profile_returns_chats_without_username_or_name(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+    storage.update_member_profile(conn, 222, telegram_username="ivan", display_name="Ivan")
+    assert storage.list_members_missing_profile(conn) == [111]
+
+
+def test_list_all_member_chat_ids_spans_every_group(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    storage.upsert_member(conn, 222, group_b, joined_at="t", subscribed=False)
+    assert sorted(storage.list_all_member_chat_ids(conn)) == [111, 222]
