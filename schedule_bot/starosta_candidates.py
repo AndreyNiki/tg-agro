@@ -92,6 +92,13 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.message.reply_text("Голосование уже идёт.")
         return
 
+    member_count = len(storage.list_group_members(conn, group.id, subscribed_only=False))
+    if not elections.has_enough_members(member_count):
+        await query.message.reply_text(
+            "В группе недостаточно участников для голосования, пригласите несколько человек и попробуйте снова."
+        )
+        return
+
     election_id = storage.create_election(
         conn, group.id, "change", chat_id, candidate_chat_id, datetime.now(timezone.utc).isoformat()
     )

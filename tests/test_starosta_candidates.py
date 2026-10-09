@@ -116,3 +116,25 @@ async def test_confirm_callback_refuses_when_vote_already_started_meanwhile(conn
     await confirm_callback(update, context)
 
     assert context.bot.send_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_confirm_callback_refuses_when_membership_shrinks_below_minimum(conn):
+    group_id = _make_group_with_members(conn, 3)
+    other_group_id = storage.create_group(
+        conn, name="Б-Мв-102", source_page_url="u2", pdf_source_url="p2",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    # Move members away so the original group drops below the minimum size
+    # required for a vote, simulating a shrink that happens between showing
+    # the candidate keyboard and the user clicking confirm.
+    storage.upsert_member(conn, 101, other_group_id, joined_at="t", subscribed=True)
+    storage.upsert_member(conn, 102, other_group_id, joined_at="t", subscribed=True)
+
+    update = make_callback_update(100, "starcand:confirm:101")
+    context = make_context(conn)
+
+    await confirm_callback(update, context)
+
+    assert storage.get_open_election(conn, group_id) is None
+    assert context.bot.send_message.await_count == 0
