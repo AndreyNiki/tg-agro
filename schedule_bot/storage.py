@@ -50,6 +50,24 @@ def init_db(conn: sqlite3.Connection) -> None:
             subscribed INTEGER NOT NULL DEFAULT 1,
             joined_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS elections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL REFERENCES groups(id),
+            kind TEXT NOT NULL,
+            initiated_by_chat_id INTEGER NOT NULL,
+            candidate_chat_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            decided_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS election_approvals (
+            election_id INTEGER NOT NULL REFERENCES elections(id),
+            chat_id INTEGER NOT NULL,
+            approved_at TEXT NOT NULL,
+            UNIQUE(election_id, chat_id)
+        );
         """
     )
     conn.commit()
@@ -418,3 +436,80 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl_type: 
     if not _column_exists(conn, table, column):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
         conn.commit()
+
+
+@dataclass
+class ElectionRow:
+    id: int
+    group_id: int
+    kind: str
+    initiated_by_chat_id: int
+    candidate_chat_id: int
+    status: str
+    started_at: str
+    decided_at: str | None
+
+
+_ELECTION_COLUMNS = (
+    "id, group_id, kind, initiated_by_chat_id, candidate_chat_id, status, started_at, decided_at"
+)
+
+
+def create_election(
+    conn: sqlite3.Connection, group_id: int, kind: str, initiated_by_chat_id: int,
+    candidate_chat_id: int, started_at: str,
+) -> int:
+    cursor = conn.execute(
+        "INSERT INTO elections (group_id, kind, initiated_by_chat_id, candidate_chat_id, status, started_at) "
+        "VALUES (?, ?, ?, ?, 'open', ?)",
+        (group_id, kind, initiated_by_chat_id, candidate_chat_id, started_at),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_election(conn: sqlite3.Connection, election_id: int) -> ElectionRow | None:
+    row = conn.execute(f"SELECT {_ELECTION_COLUMNS} FROM elections WHERE id = ?", (election_id,)).fetchone()
+    return ElectionRow(*row) if row else None
+
+
+def get_open_election(conn: sqlite3.Connection, group_id: int) -> ElectionRow | None:
+    row = conn.execute(
+        f"SELECT {_ELECTION_COLUMNS} FROM elections WHERE group_id = ? AND status = 'open'", (group_id,)
+    ).fetchone()
+    return ElectionRow(*row) if row else None
+
+
+def list_open_elections(conn: sqlite3.Connection, group_id: int) -> list[ElectionRow]:
+    rows = conn.execute(
+        f"SELECT {_ELECTION_COLUMNS} FROM elections WHERE group_id = ? AND status = 'open'", (group_id,)
+    ).fetchall()
+    return [ElectionRow(*row) for row in rows]
+
+
+def close_election(conn: sqlite3.Connection, election_id: int, status: str, decided_at: str) -> None:
+    conn.execute("UPDATE elections SET status = ?, decided_at = ? WHERE id = ?", (status, decided_at, election_id))
+    conn.commit()
+
+
+def cancel_open_elections_for_group(conn: sqlite3.Connection, group_id: int, decided_at: str) -> None:
+    conn.execute(
+        "UPDATE elections SET status = 'cancelled', decided_at = ? WHERE group_id = ? AND status = 'open'",
+        (decided_at, group_id),
+    )
+    conn.commit()
+
+
+def add_election_approval(conn: sqlite3.Connection, election_id: int, chat_id: int, approved_at: str) -> bool:
+    cursor = conn.execute(
+        "INSERT OR IGNORE INTO election_approvals (election_id, chat_id, approved_at) VALUES (?, ?, ?)",
+        (election_id, chat_id, approved_at),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def count_election_approvals(conn: sqlite3.Connection, election_id: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM election_approvals WHERE election_id = ?", (election_id,)
+    ).fetchone()[0]

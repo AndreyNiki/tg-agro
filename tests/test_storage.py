@@ -382,3 +382,69 @@ def test_set_group_last_starosta_change_at(conn):
     group_id = _make_group(conn)
     storage.set_group_last_starosta_change_at(conn, group_id, "2026-10-08T00:00:00+00:00")
     assert storage.get_group(conn, group_id).last_starosta_change_at == "2026-10-08T00:00:00+00:00"
+
+
+def test_create_election_defaults_to_open(conn):
+    group_id = _make_group(conn)
+    election_id = storage.create_election(conn, group_id, "initial", 111, 111, "2026-10-08T00:00:00")
+    election = storage.get_election(conn, election_id)
+    assert election.status == "open"
+    assert election.kind == "initial"
+    assert election.candidate_chat_id == 111
+
+
+def test_get_open_election_returns_none_when_absent(conn):
+    group_id = _make_group(conn)
+    assert storage.get_open_election(conn, group_id) is None
+
+
+def test_get_open_election_finds_the_open_one(conn):
+    group_id = _make_group(conn)
+    election_id = storage.create_election(conn, group_id, "initial", 111, 111, "t")
+    storage.close_election(conn, election_id, "cancelled", "t2")
+    second_id = storage.create_election(conn, group_id, "change", 222, 333, "t3")
+    open_election = storage.get_open_election(conn, group_id)
+    assert open_election.id == second_id
+
+
+def test_list_open_elections_is_scoped_by_group(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.create_election(conn, group_a, "initial", 111, 111, "t")
+    storage.create_election(conn, group_b, "initial", 222, 222, "t")
+    assert len(storage.list_open_elections(conn, group_a)) == 1
+
+
+def test_close_election_updates_status_and_decided_at(conn):
+    group_id = _make_group(conn)
+    election_id = storage.create_election(conn, group_id, "initial", 111, 111, "t")
+    storage.close_election(conn, election_id, "approved", "2026-10-08T01:00:00")
+    election = storage.get_election(conn, election_id)
+    assert election.status == "approved"
+    assert election.decided_at == "2026-10-08T01:00:00"
+
+
+def test_cancel_open_elections_for_group_only_affects_open_ones(conn):
+    group_id = _make_group(conn)
+    open_id = storage.create_election(conn, group_id, "initial", 111, 111, "t")
+    storage.cancel_open_elections_for_group(conn, group_id, "t2")
+    assert storage.get_election(conn, open_id).status == "cancelled"
+    assert storage.get_open_election(conn, group_id) is None
+
+
+def test_add_election_approval_is_idempotent_per_chat_id(conn):
+    group_id = _make_group(conn)
+    election_id = storage.create_election(conn, group_id, "initial", 111, 111, "t")
+    first = storage.add_election_approval(conn, election_id, 222, "t")
+    second = storage.add_election_approval(conn, election_id, 222, "t2")
+    assert first is True
+    assert second is False
+    assert storage.count_election_approvals(conn, election_id) == 1
+
+
+def test_count_election_approvals_reaches_two_on_distinct_voters(conn):
+    group_id = _make_group(conn)
+    election_id = storage.create_election(conn, group_id, "initial", 111, 111, "t")
+    storage.add_election_approval(conn, election_id, 222, "t")
+    storage.add_election_approval(conn, election_id, 333, "t")
+    assert storage.count_election_approvals(conn, election_id) == 2
