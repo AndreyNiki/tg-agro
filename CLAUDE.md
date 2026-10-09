@@ -114,19 +114,16 @@ enforces that contract at runtime. `bot_data["week_formula"]` is a
 that the weekly refresh job's in-place mutation of the shared
 `WeekFormulaHolder` is visible without needing to re-populate `bot_data`.
 
-**Known accepted limitation:** `/set_group` updates the `group_name`
-setting in storage immediately, but `bot_data["group_name"]` (read by
-`start_command`/`alert_command`) is only refreshed on the next process
-restart — `sync_fn`/`active_schedule_getter`/`active_pdf_path_getter` all
-correctly re-read storage live, so this only affects new subscriptions and
-`/alert` targeting between a `/set_group` call and a restart. This is
-intentional: real multi-group support is out of scope for the current
-design (see the spec's "Хранение" section), so `group_name` in `bot_data`
-was left as a startup snapshot rather than reopening the handler interface
-for a scenario that isn't supported yet. Don't "fix" this without first
-deciding whether multi-group support is actually being built — a partial
-fix here without the corresponding storage/schema work would be worse than
-the current documented limitation.
+**Multi-group support is fully built.** There is no more global
+`group_name`/`pdf_source` setting and no `/set_group` command — each group
+is its own row in the `groups` table (name, pdf_source_url, send_time,
+check_interval_minutes, timezone, last_sync_failed_at), users attach to
+one via `/start`'s group picker or the in-chat group-creation flow
+(`group_commands.py`), and every admin command that touches a group
+(`/set_pdf_source`, `/set_send_time`, `/set_check_interval`, `/refresh`)
+takes a `group_id` argument and reads/writes that group's row directly —
+nothing is cached per-process in `bot_data` that would go stale the way
+the old single-global-group `group_name` snapshot used to.
 
 **Every per-subscriber send loop must isolate failures.** `sync.py`'s
 notify loop, `scheduler.py`'s `daily_send_job`, and `bot.py`'s
