@@ -111,7 +111,10 @@ async def change_group_confirm_callback(update: Update, context: ContextTypes.DE
     request_id = storage.create_group_change_request(
         conn, chat_id, member.group_id, target_group_id, datetime.now(timezone.utc).isoformat()
     )
-    await notify_approvers(context.bot, conn, target_group, request_id, chat_id, context.bot_data["admin_chat_id"])
+    await notify_approvers(
+        context.bot, conn, target_group, request_id, chat_id, context.bot_data["admin_chat_id"],
+        from_group_id=member.group_id,
+    )
     await query.message.reply_text("Заявка отправлена, ожидайте решения.")
 
 
@@ -218,6 +221,7 @@ async def requests_command(update, context) -> None:
                 ]
             ]
         )
+        verb = "вступление" if request.from_group_id is None else "переход"
         await update.message.reply_text(
-            f"Заявка от {label} на переход в группу «{group.name}».", reply_markup=keyboard
+            f"Заявка от {label} на {verb} в группу «{group.name}».", reply_markup=keyboard
         )

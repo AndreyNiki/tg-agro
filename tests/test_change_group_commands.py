@@ -245,6 +245,26 @@ async def test_requests_command_starosta_sees_own_group_pending_requests(conn):
 
 
 @pytest.mark.asyncio
+async def test_requests_command_wording_join_vs_transfer(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 555, group_b, joined_at="t")
+    storage.update_group_starosta(conn, group_b, 555)
+    storage.create_group_change_request(conn, 111, None, group_b, "t")  # first-time join
+    storage.create_group_change_request(conn, 222, group_a, group_b, "t")  # transfer
+
+    update = make_message_update(555)
+    context = make_context(conn)
+    context.args = []
+
+    await requests_command(update, context)
+
+    texts = [call.args[0] for call in update.message.reply_text.await_args_list]
+    assert any("вступление" in text and "переход" not in text for text in texts)
+    assert any("переход" in text for text in texts)
+
+
+@pytest.mark.asyncio
 async def test_requests_command_reports_empty_list(conn):
     group_b = _make_group(conn, "B")
     storage.upsert_member(conn, 555, group_b, joined_at="t")

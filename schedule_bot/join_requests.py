@@ -13,12 +13,25 @@ def requires_approval(conn, group, chat_id: int) -> bool:
     return bool(group.is_closed) or storage.has_group_exclusion(conn, group.id, chat_id)
 
 
-async def notify_approvers(bot, conn, target_group, request_id: int, requester_chat_id: int, admin_chat_id: int) -> None:
-    requester = storage.get_member(conn, requester_chat_id)
-    label = "Неизвестный"
-    if requester is not None:
-        label = requester.telegram_username or requester.display_name or "Неизвестный"
-    text = f"Заявка на переход в группу «{target_group.name}» от {label}. Одобрить / Отклонить"
+async def notify_approvers(
+    bot,
+    conn,
+    target_group,
+    request_id: int,
+    requester_chat_id: int,
+    admin_chat_id: int,
+    requester_label: str | None = None,
+    from_group_id: int | None = None,
+) -> None:
+    if requester_label is not None:
+        label = requester_label
+    else:
+        requester = storage.get_member(conn, requester_chat_id)
+        label = "Неизвестный"
+        if requester is not None:
+            label = requester.telegram_username or requester.display_name or "Неизвестный"
+    verb = "вступление" if from_group_id is None else "переход"
+    text = f"Заявка на {verb} в группу «{target_group.name}» от {label}. Одобрить / Отклонить"
     keyboard = InlineKeyboardMarkup(
         [
             [
@@ -42,10 +55,19 @@ async def notify_approvers(bot, conn, target_group, request_id: int, requester_c
 
 
 async def create_join_request_and_notify(
-    bot, conn, chat_id: int, from_group_id: int | None, target_group, admin_chat_id: int
+    bot,
+    conn,
+    chat_id: int,
+    from_group_id: int | None,
+    target_group,
+    admin_chat_id: int,
+    requester_label: str | None = None,
 ) -> int:
     request_id = storage.create_group_change_request(
         conn, chat_id, from_group_id, target_group.id, datetime.now(timezone.utc).isoformat()
     )
-    await notify_approvers(bot, conn, target_group, request_id, chat_id, admin_chat_id)
+    await notify_approvers(
+        bot, conn, target_group, request_id, chat_id, admin_chat_id,
+        requester_label=requester_label, from_group_id=from_group_id,
+    )
     return request_id

@@ -76,6 +76,45 @@ async def test_notify_approvers_admin_only_when_no_starosta(conn):
 
 
 @pytest.mark.asyncio
+async def test_notify_approvers_uses_explicit_requester_label_without_db_lookup(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    group = storage.get_group(conn, group_id)
+    # No members row exists for the requester chat_id (222) — a get_member
+    # lookup would render "Неизвестный". An explicit label must be used
+    # instead and must not be overridden by a lookup.
+    request_id = storage.create_group_change_request(conn, 222, None, group_id, "t")
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await notify_approvers(bot, conn, group, request_id, 222, ADMIN_CHAT_ID, requester_label="Ivan Ivanov (@ivan)")
+
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "Ivan Ivanov (@ivan)" in text
+    assert "Неизвестный" not in text
+
+
+@pytest.mark.asyncio
+async def test_notify_approvers_wording_join_vs_transfer(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    group = storage.get_group(conn, group_id)
+    request_id = storage.create_group_change_request(conn, 111, None, group_id, "t")
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await notify_approvers(bot, conn, group, request_id, 111, ADMIN_CHAT_ID, from_group_id=None)
+    text_join = bot.send_message.await_args.kwargs["text"]
+    assert "вступление" in text_join
+    assert "переход" not in text_join
+
+    bot.send_message.reset_mock()
+    await notify_approvers(bot, conn, group, request_id, 111, ADMIN_CHAT_ID, from_group_id=777)
+    text_transfer = bot.send_message.await_args.kwargs["text"]
+    assert "переход" in text_transfer
+
+
+@pytest.mark.asyncio
 async def test_create_join_request_and_notify_creates_pending_row(conn):
     group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")

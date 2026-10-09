@@ -79,3 +79,12 @@ def test_format_starosta_welcome_mentions_election():
 def test_format_starosta_welcome_mentions_admin():
     text = format_starosta_welcome("Б-Мв-101", "admin")
     assert "администратора" in text
+
+
+def test_format_starosta_welcome_mentions_starosta_only_commands():
+    # Regression: /close_group, /open_group, /notify, /requests are not in
+    # /help for non-admin starostas, so the welcome text is their only
+    # discovery path for these commands.
+    text = format_starosta_welcome("Б-Мв-101", "admin")
+    for command in ("/close_group", "/open_group", "/notify", "/requests"):
+        assert command in text

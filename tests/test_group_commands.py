@@ -460,6 +460,26 @@ async def test_group_select_callback_routes_excluded_chat_through_request_even_i
 
 
 @pytest.mark.asyncio
+async def test_group_select_callback_approval_request_carries_real_requester_label(conn):
+    # Regression for the "Неизвестный" finding: no `members` row exists yet
+    # for a first-time joiner awaiting approval, so the label must come from
+    # update.effective_user, not a storage.get_member lookup.
+    _make_groups(conn, 1)
+    group_id = storage.list_all_groups(conn)[0].id
+    storage.update_group_closed(conn, group_id, True)
+    update = make_callback_update(111, f"grp:select:{group_id}", username="ivan", full_name="Ivan Ivanov")
+    context = make_context(conn)
+    context.bot_data["admin_chat_id"] = 999
+    context.bot.send_message = AsyncMock()
+
+    await group_select_callback(update, context)
+
+    text = context.bot.send_message.await_args.kwargs["text"]
+    assert "Ivan Ivanov (@ivan)" in text
+    assert "Неизвестный" not in text
+
+
+@pytest.mark.asyncio
 async def test_group_select_callback_refuses_second_pending_request(conn):
     _make_groups(conn, 1)
     group_id = storage.list_all_groups(conn)[0].id

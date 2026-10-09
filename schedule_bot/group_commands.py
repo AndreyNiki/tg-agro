@@ -32,6 +32,22 @@ SELECT_CALLBACK_PATTERN = r"^grp:select:\d+$"
 PAGE_CALLBACK_PATTERN = r"^grp:page:\d+$"
 
 
+def _format_telegram_user_label(user) -> str:
+    """Mirrors elections.format_candidate_label's precedence/formatting,
+    but builds the label straight from the Telegram User object instead of
+    a `members` row — needed here because no `members` row exists yet for
+    a first-time joiner awaiting approval."""
+    display_name = user.full_name
+    username = user.username
+    if display_name and username:
+        return f"{display_name} (@{username})"
+    if display_name:
+        return display_name
+    if username:
+        return f"@{username}"
+    return "Неизвестный"
+
+
 def build_group_picker_keyboard(conn, page: int = 0) -> InlineKeyboardMarkup:
     offset = page * GROUPS_PER_PAGE
     groups = storage.list_groups(conn, limit=GROUPS_PER_PAGE, offset=offset)
@@ -75,7 +91,11 @@ async def group_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if storage.get_pending_request_for_chat(conn, chat_id) is not None:
             await query.message.reply_text("У вас уже есть заявка на рассмотрении.")
             return
-        await create_join_request_and_notify(context.bot, conn, chat_id, None, group, context.bot_data["admin_chat_id"])
+        requester_label = _format_telegram_user_label(update.effective_user)
+        await create_join_request_and_notify(
+            context.bot, conn, chat_id, None, group, context.bot_data["admin_chat_id"],
+            requester_label=requester_label,
+        )
         await query.message.reply_text("Эта группа закрыта или ограничена для вас — заявка отправлена, ожидайте решения.")
         return
 

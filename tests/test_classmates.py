@@ -264,6 +264,8 @@ async def test_exclude_select_callback_shows_confirmation(conn):
         conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
         send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
     )
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
     storage.upsert_member(conn, 222, group_id, joined_at="t")
     update = make_callback_update(111, "exclude:select:222")
     context = make_context_with_admin(conn)
@@ -284,3 +286,44 @@ async def test_exclude_select_callback_rejects_self_selection(conn):
 
     text = update.callback_query.message.reply_text.call_args[0][0]
     assert "самого себя" in text
+
+
+@pytest.mark.asyncio
+async def test_exclude_select_callback_rejects_unauthorized_caller_without_disclosing_label(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+    storage.update_member_profile(conn, 222, telegram_username="target_user", display_name=None)
+    storage.upsert_member(conn, 333, group_id, joined_at="t")
+
+    update = make_callback_update(333, "exclude:select:222")  # 333 is neither starosta nor admin
+    context = make_context_with_admin(conn)
+
+    await exclude_select_callback(update, context)
+
+    text = update.callback_query.message.reply_text.call_args[0][0]
+    assert "Недостаточно прав" in text
+    assert "target_user" not in text
+
+
+@pytest.mark.asyncio
+async def test_exclude_confirm_callback_clears_starosta_vacancy_when_excluding_starosta(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 222)  # 222 is the starosta being excluded
+
+    update = make_callback_update(111, "exclude:confirm:222")
+    context = make_context_with_admin(conn, admin_chat_id=111)
+
+    await exclude_confirm_callback(update, context)
+
+    assert storage.get_member(conn, 222) is None
+    assert storage.get_group(conn, group_id).starosta_chat_id is None

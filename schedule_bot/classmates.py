@@ -61,6 +61,12 @@ async def exclude_select_callback(update, context) -> None:
     if target is None:
         await query.message.reply_text("Этот участник уже не в группе.")
         return
+    group = storage.get_group(conn, target.group_id)
+    caller_is_admin = caller_chat_id == context.bot_data.get("admin_chat_id")
+    caller_is_starosta = group.starosta_chat_id == caller_chat_id
+    if not (caller_is_admin or caller_is_starosta):
+        await query.message.reply_text("Недостаточно прав.")
+        return
     label = format_candidate_label(target)
     keyboard = InlineKeyboardMarkup(
         [
@@ -103,6 +109,10 @@ async def exclude_confirm_callback(update, context) -> None:
     now = datetime.now(timezone.utc).isoformat()
     storage.create_group_exclusion(conn, group.id, target_chat_id, now, caller_chat_id)
     storage.remove_member(conn, target_chat_id)
+    if group.starosta_chat_id == target_chat_id:
+        storage.cancel_open_elections_for_group(conn, group.id, now)
+        storage.update_group_starosta(conn, group.id, None)
+        storage.set_group_last_starosta_change_at(conn, group.id, now)
     try:
         await send_with_retry(
             lambda: context.bot.send_message(

@@ -86,6 +86,12 @@ async def test_help_command_shows_admin_commands_for_admin(conn):
         assert f"/{name}" in text
 
 
+def test_requests_registered_in_admin_commands():
+    # Regression: /requests was wired as a handler but missing from
+    # ADMIN_COMMANDS, making it invisible in /help and the command menu.
+    assert any(name == "requests" for name, _ in ADMIN_COMMANDS)
+
+
 @pytest.mark.asyncio
 async def test_set_pdf_source_rejects_non_admin(conn):
     group_id = _make_group(conn)
