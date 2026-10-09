@@ -15,6 +15,7 @@ from schedule_bot.bot import (
 )
 from schedule_bot.change_group_commands import _build_requests_messages, change_group_command
 from schedule_bot.classmates import classmates_command
+from schedule_bot.faq import faq_command
 from schedule_bot.group_commands import subscribe_command, unsubscribe_command
 from schedule_bot.report import _apply_report
 from schedule_bot.starosta_commands import starosta_command, votes_command
@@ -32,6 +33,7 @@ def build_root_keyboard(conn, chat_id: int, admin_chat_id: int) -> InlineKeyboar
     if chat_id == admin_chat_id:
         rows.append([InlineKeyboardButton("⚙️ Админ", callback_data="menu:admin:root")])
     rows.append([InlineKeyboardButton("🆘 Сообщить о проблеме", callback_data="menu:report:start")])
+    rows.append([InlineKeyboardButton("❓ FAQ", callback_data="menu:faq:show")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -366,4 +368,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if section == "report":
         context.user_data["pending_menu_action"] = {"action": "report"}
         await query.message.reply_text("Отправьте текст сообщения администратору:")
+        return
+    if section == "faq":
+        await faq_command(update, context)
         return
