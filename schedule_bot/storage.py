@@ -53,6 +53,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+    _ensure_column(conn, "groups", "starosta_chat_id", "INTEGER")
+    _ensure_column(conn, "groups", "last_starosta_change_at", "TEXT")
 
 
 def ensure_default_settings(conn: sqlite3.Connection, defaults: dict[str, str]) -> None:
@@ -127,11 +129,14 @@ class GroupRow:
     timezone: str
     last_sync_failed_at: str | None
     created_at: str
+    starosta_chat_id: int | None
+    last_starosta_change_at: str | None
 
 
 _GROUP_COLUMNS = (
     "id, name, source_page_url, pdf_source_url, send_time, "
-    "check_interval_minutes, timezone, last_sync_failed_at, created_at"
+    "check_interval_minutes, timezone, last_sync_failed_at, created_at, "
+    "starosta_chat_id, last_starosta_change_at"
 )
 
 
@@ -213,6 +218,16 @@ def update_group_check_interval(conn: sqlite3.Connection, group_id: int, check_i
 
 def set_group_last_sync_failed_at(conn: sqlite3.Connection, group_id: int, value: str) -> None:
     conn.execute("UPDATE groups SET last_sync_failed_at = ? WHERE id = ?", (value, group_id))
+    conn.commit()
+
+
+def update_group_starosta(conn: sqlite3.Connection, group_id: int, chat_id: int | None) -> None:
+    conn.execute("UPDATE groups SET starosta_chat_id = ? WHERE id = ?", (chat_id, group_id))
+    conn.commit()
+
+
+def set_group_last_starosta_change_at(conn: sqlite3.Connection, group_id: int, value: str) -> None:
+    conn.execute("UPDATE groups SET last_starosta_change_at = ? WHERE id = ?", (value, group_id))
     conn.commit()
 
 
@@ -392,3 +407,14 @@ def _rebuild_schedule_versions_for_migration(conn: sqlite3.Connection, group_id:
             "VALUES (?, ?, ?, ?, ?, ?)",
             (old_id, effective_group_id, payload_json, pdf_cache_path, parsed_at, status),
         )
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    return column in columns
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl_type: str) -> None:
+    if not _column_exists(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
+        conn.commit()

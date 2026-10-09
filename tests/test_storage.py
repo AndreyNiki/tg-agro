@@ -361,3 +361,24 @@ def test_migrate_legacy_single_group_dedups_multiple_active_rows_onto_latest(con
     # The row with the later parsed_at ('2026-09-16...') must be the one
     # that stayed active.
     assert active_rows[0][0] == '{"a": 1}'
+
+
+def test_create_group_starosta_fields_default_to_none(conn):
+    group_id = _make_group(conn)
+    group = storage.get_group(conn, group_id)
+    assert group.starosta_chat_id is None
+    assert group.last_starosta_change_at is None
+
+
+def test_update_group_starosta_sets_and_clears(conn):
+    group_id = _make_group(conn)
+    storage.update_group_starosta(conn, group_id, 111)
+    assert storage.get_group(conn, group_id).starosta_chat_id == 111
+    storage.update_group_starosta(conn, group_id, None)
+    assert storage.get_group(conn, group_id).starosta_chat_id is None
+
+
+def test_set_group_last_starosta_change_at(conn):
+    group_id = _make_group(conn)
+    storage.set_group_last_starosta_change_at(conn, group_id, "2026-10-08T00:00:00+00:00")
+    assert storage.get_group(conn, group_id).last_starosta_change_at == "2026-10-08T00:00:00+00:00"
