@@ -468,3 +468,101 @@ async def test_notify_command_by_admin_with_group_id_broadcasts(conn):
     await notify_command(update, context)
 
     context.bot.send_message.assert_awaited_once()
+
+
+from schedule_bot.bot import (
+    _apply_alert,
+    _apply_notify,
+    _apply_remove_starosta,
+    _apply_set_check_interval,
+    _apply_set_pdf_source,
+    _apply_set_send_time,
+    _apply_set_starosta,
+)
+
+
+def test_apply_set_pdf_source_updates_and_returns_confirmation(conn):
+    group_id = _make_group(conn)
+    group = storage.get_group(conn, group_id)
+    text = _apply_set_pdf_source(conn, group, "https://example.com/new.pdf")
+    assert "обновлён" in text
+    assert storage.get_group(conn, group_id).pdf_source_url == "https://example.com/new.pdf"
+
+
+def test_apply_set_pdf_source_rejects_bad_scheme(conn):
+    group_id = _make_group(conn)
+    group = storage.get_group(conn, group_id)
+    text = _apply_set_pdf_source(conn, group, "file:///etc/passwd")
+    assert "Неверный источник" in text
+    assert storage.get_group(conn, group_id).pdf_source_url == "p"
+
+
+def test_apply_set_send_time_calls_reschedule(conn):
+    group_id = _make_group(conn)
+    group = storage.get_group(conn, group_id)
+    reschedule_fn = MagicMock()
+    text = _apply_set_send_time(conn, group, "07:30", reschedule_fn)
+    assert "обновлено" in text
+    reschedule_fn.assert_called_once_with(group_id)
+
+
+def test_apply_set_check_interval_rejects_malformed(conn):
+    group_id = _make_group(conn)
+    group = storage.get_group(conn, group_id)
+    reschedule_fn = MagicMock()
+    text = _apply_set_check_interval(conn, group, "abc", reschedule_fn)
+    assert "Неверное значение" in text
+    reschedule_fn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_apply_set_starosta_assigns_and_notifies(conn):
+    group_id = _make_group(conn)
+    group = storage.get_group(conn, group_id)
+    bot_client = MagicMock()
+    bot_client.send_message = AsyncMock()
+
+    text = await _apply_set_starosta(conn, bot_client, group, "111")
+
+    assert "назначен" in text
+    assert storage.get_group(conn, group_id).starosta_chat_id == 111
+    bot_client.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_apply_remove_starosta_clears(conn):
+    group_id = _make_group(conn)
+    storage.update_group_starosta(conn, group_id, 111)
+    group = storage.get_group(conn, group_id)
+
+    text = _apply_remove_starosta(conn, group)
+
+    assert "снят" in text
+    assert storage.get_group(conn, group_id).starosta_chat_id is None
+
+
+@pytest.mark.asyncio
+async def test_apply_notify_broadcasts_to_group(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    group = storage.get_group(conn, group_id)
+    bot_client = MagicMock()
+    bot_client.send_message = AsyncMock()
+
+    text = await _apply_notify(conn, bot_client, group, "Внимание")
+
+    assert "1" in text
+    bot_client.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_apply_alert_broadcasts_globally(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    bot_client = MagicMock()
+    bot_client.send_message = AsyncMock()
+
+    text = await _apply_alert(conn, bot_client, "Обновление бота")
+
+    assert "1" in text
+    bot_client.send_message.assert_awaited_once()

@@ -184,6 +184,13 @@ def _resolve_admin_group(conn, group_id_str: str):
     return storage.get_group(conn, int(group_id_str))
 
 
+def _apply_set_pdf_source(conn, group, value: str) -> str:
+    if not _is_valid_pdf_source(value):
+        return "Неверный источник: разрешены только http(s)-адреса или локальный путь."
+    storage.update_group_pdf_source_url(conn, group.id, value)
+    return f"Источник PDF группы «{group.name}» обновлён: {value}"
+
+
 async def set_pdf_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("bot: /set_pdf_source from chat_id=%s args=%s", update.effective_chat.id, context.args)
     if not is_admin(update, context):
@@ -197,12 +204,7 @@ async def set_pdf_source_command(update: Update, context: ContextTypes.DEFAULT_T
     if group is None:
         await update.message.reply_text("Группа с таким id не найдена.")
         return
-    value = context.args[1]
-    if not _is_valid_pdf_source(value):
-        await update.message.reply_text("Неверный источник: разрешены только http(s)-адреса или локальный путь.")
-        return
-    storage.update_group_pdf_source_url(conn, group.id, value)
-    await update.message.reply_text(f"Источник PDF группы «{group.name}» обновлён: {value}")
+    await update.message.reply_text(_apply_set_pdf_source(conn, group, context.args[1]))
 
 
 _HH_MM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]?\d)$")
@@ -219,6 +221,14 @@ def _is_valid_positive_int(value: str) -> bool:
         return False
 
 
+def _apply_set_send_time(conn, group, value: str, reschedule_fn) -> str:
+    if not _is_valid_hh_mm(value):
+        return "Неверный формат времени, используйте HH:MM."
+    storage.update_group_send_time(conn, group.id, value)
+    reschedule_fn(group.id)
+    return f"Время ежедневной рассылки группы «{group.name}» обновлено: {value}"
+
+
 async def set_send_time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("bot: /set_send_time from chat_id=%s args=%s", update.effective_chat.id, context.args)
     if not is_admin(update, context):
@@ -232,13 +242,16 @@ async def set_send_time_command(update: Update, context: ContextTypes.DEFAULT_TY
     if group is None:
         await update.message.reply_text("Группа с таким id не найдена.")
         return
-    value = context.args[1]
-    if not _is_valid_hh_mm(value):
-        await update.message.reply_text("Неверный формат времени, используйте HH:MM.")
-        return
-    storage.update_group_send_time(conn, group.id, value)
-    context.bot_data["reschedule_group_jobs"](group.id)
-    await update.message.reply_text(f"Время ежедневной рассылки группы «{group.name}» обновлено: {value}")
+    text = _apply_set_send_time(conn, group, context.args[1], context.bot_data["reschedule_group_jobs"])
+    await update.message.reply_text(text)
+
+
+def _apply_set_check_interval(conn, group, value: str, reschedule_fn) -> str:
+    if not _is_valid_positive_int(value):
+        return "Неверное значение интервала, укажите положительное целое число минут."
+    storage.update_group_check_interval(conn, group.id, int(value))
+    reschedule_fn(group.id)
+    return f"Интервал проверки группы «{group.name}» обновлён: {value} мин."
 
 
 async def set_check_interval_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -254,13 +267,8 @@ async def set_check_interval_command(update: Update, context: ContextTypes.DEFAU
     if group is None:
         await update.message.reply_text("Группа с таким id не найдена.")
         return
-    value = context.args[1]
-    if not _is_valid_positive_int(value):
-        await update.message.reply_text("Неверное значение интервала, укажите положительное целое число минут.")
-        return
-    storage.update_group_check_interval(conn, group.id, int(value))
-    context.bot_data["reschedule_group_jobs"](group.id)
-    await update.message.reply_text(f"Интервал проверки группы «{group.name}» обновлён: {value} мин.")
+    text = _apply_set_check_interval(conn, group, context.args[1], context.bot_data["reschedule_group_jobs"])
+    await update.message.reply_text(text)
 
 
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -293,6 +301,17 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("Расписание обновлено и разослано подписчикам.")
 
 
+async def _apply_alert(conn, bot_client, text: str) -> str:
+    chat_ids = storage.list_all_member_chat_ids(conn)
+    for chat_id in chat_ids:
+        try:
+            await send_with_retry(lambda chat_id=chat_id: bot_client.send_message(chat_id=chat_id, text=text))
+        except Exception as error:
+            logger.warning("bot: failed to alert chat_id=%s: %s", chat_id, error)
+        await asyncio.sleep(SEND_PACING_SECONDS)
+    return f"Сообщение разослано {len(chat_ids)} пользователям."
+
+
 async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("bot: /alert from chat_id=%s args=%s", update.effective_chat.id, context.args)
     if not is_admin(update, context):
@@ -301,16 +320,32 @@ async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not context.args:
         await update.message.reply_text("Использование: /alert <текст>")
         return
-    conn = context.bot_data["conn"]
     text = " ".join(context.args)
-    chat_ids = storage.list_all_member_chat_ids(conn)
-    for chat_id in chat_ids:
-        try:
-            await send_with_retry(lambda chat_id=chat_id: context.bot.send_message(chat_id=chat_id, text=text))
-        except Exception as error:
-            logger.warning("bot: failed to alert chat_id=%s: %s", chat_id, error)
-        await asyncio.sleep(SEND_PACING_SECONDS)
-    await update.message.reply_text(f"Сообщение разослано {len(chat_ids)} пользователям.")
+    await update.message.reply_text(await _apply_alert(context.bot_data["conn"], context.bot, text))
+
+
+async def _apply_set_starosta(conn, bot_client, group, chat_id_str: str) -> str:
+    if not chat_id_str.isdigit():
+        return "chat_id должен быть числом."
+    new_starosta_chat_id = int(chat_id_str)
+    now = datetime.now(timezone.utc).isoformat()
+    storage.cancel_open_elections_for_group(conn, group.id, now)
+    storage.update_group_starosta(conn, group.id, new_starosta_chat_id)
+    storage.set_group_last_starosta_change_at(conn, group.id, now)
+    welcome = elections.format_starosta_welcome(group.name, "admin")
+    try:
+        await send_with_retry(lambda: bot_client.send_message(chat_id=new_starosta_chat_id, text=welcome))
+    except Exception as error:
+        logger.warning("bot: failed to notify new starosta chat_id=%s: %s", new_starosta_chat_id, error)
+    return f"Староста группы «{group.name}» назначен."
+
+
+def _apply_remove_starosta(conn, group) -> str:
+    now = datetime.now(timezone.utc).isoformat()
+    storage.cancel_open_elections_for_group(conn, group.id, now)
+    storage.update_group_starosta(conn, group.id, None)
+    storage.set_group_last_starosta_change_at(conn, group.id, now)
+    return f"Староста группы «{group.name}» снят."
 
 
 async def set_starosta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -326,20 +361,8 @@ async def set_starosta_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if group is None:
         await update.message.reply_text("Группа с таким id не найдена.")
         return
-    if not context.args[1].isdigit():
-        await update.message.reply_text("chat_id должен быть числом.")
-        return
-    new_starosta_chat_id = int(context.args[1])
-    now = datetime.now(timezone.utc).isoformat()
-    storage.cancel_open_elections_for_group(conn, group.id, now)
-    storage.update_group_starosta(conn, group.id, new_starosta_chat_id)
-    storage.set_group_last_starosta_change_at(conn, group.id, now)
-    welcome = elections.format_starosta_welcome(group.name, "admin")
-    try:
-        await send_with_retry(lambda: context.bot.send_message(chat_id=new_starosta_chat_id, text=welcome))
-    except Exception as error:
-        logger.warning("bot: failed to notify new starosta chat_id=%s: %s", new_starosta_chat_id, error)
-    await update.message.reply_text(f"Староста группы «{group.name}» назначен.")
+    text = await _apply_set_starosta(conn, context.bot, group, context.args[1])
+    await update.message.reply_text(text)
 
 
 async def remove_starosta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -355,11 +378,7 @@ async def remove_starosta_command(update: Update, context: ContextTypes.DEFAULT_
     if group is None:
         await update.message.reply_text("Группа с таким id не найдена.")
         return
-    now = datetime.now(timezone.utc).isoformat()
-    storage.cancel_open_elections_for_group(conn, group.id, now)
-    storage.update_group_starosta(conn, group.id, None)
-    storage.set_group_last_starosta_change_at(conn, group.id, now)
-    await update.message.reply_text(f"Староста группы «{group.name}» снят.")
+    await update.message.reply_text(_apply_remove_starosta(conn, group))
 
 
 async def _toggle_group_closed(update: Update, context: ContextTypes.DEFAULT_TYPE, is_closed: bool) -> None:
@@ -394,6 +413,19 @@ async def open_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _toggle_group_closed(update, context, False)
 
 
+async def _apply_notify(conn, bot_client, group, text: str) -> str:
+    members = storage.list_group_members(conn, group.id, subscribed_only=False)
+    for member_chat_id in members:
+        try:
+            await send_with_retry(
+                lambda member_chat_id=member_chat_id: bot_client.send_message(chat_id=member_chat_id, text=text)
+            )
+        except Exception as error:
+            logger.warning("bot: failed to notify chat_id=%s: %s", member_chat_id, error)
+        await asyncio.sleep(SEND_PACING_SECONDS)
+    return f"Оповещение отправлено {len(members)} участникам группы «{group.name}»."
+
+
 async def notify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("bot: /notify from chat_id=%s args=%s", update.effective_chat.id, context.args)
     conn = context.bot_data["conn"]
@@ -417,13 +449,4 @@ async def notify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         text = " ".join(context.args)
 
-    members = storage.list_group_members(conn, group.id, subscribed_only=False)
-    for member_chat_id in members:
-        try:
-            await send_with_retry(
-                lambda member_chat_id=member_chat_id: context.bot.send_message(chat_id=member_chat_id, text=text)
-            )
-        except Exception as error:
-            logger.warning("bot: failed to notify chat_id=%s: %s", member_chat_id, error)
-        await asyncio.sleep(SEND_PACING_SECONDS)
-    await update.message.reply_text(f"Оповещение отправлено {len(members)} участникам группы «{group.name}».")
+    await update.message.reply_text(await _apply_notify(conn, context.bot, group, text))
