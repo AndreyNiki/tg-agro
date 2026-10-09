@@ -305,3 +305,59 @@ def test_migrate_legacy_single_group_backfills_group_id_on_old_schedule_versions
     active = storage.get_active_version(conn, group_id)
     assert active is not None
     assert active.payload_json == '{"a": 1}'
+
+
+def test_migrate_legacy_single_group_rebuilds_schedule_versions_so_inserts_work(conn):
+    # Regression test for the critical bug: on a real pre-existing database,
+    # the old group_name TEXT NOT NULL column survived a naive ALTER TABLE
+    # ADD COLUMN migration, so the first insert_new_version call after
+    # migration (i.e. the first time the schedule actually changes) raised
+    # sqlite3.IntegrityError: NOT NULL constraint failed: schedule_versions.group_name.
+    _seed_legacy_single_group_db(conn, with_schedule_version=True)
+    group_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
+
+    new_id = storage.insert_new_version(conn, group_id, '{"a": 2}', "/v2.pdf", "2026-10-09T00:00:00")
+
+    assert new_id is not None
+    active = storage.get_active_version(conn, group_id)
+    assert active is not None
+    assert active.payload_json == '{"a": 2}'
+    assert active.pdf_cache_path == "/v2.pdf"
+
+    # The old 'active' row from the legacy seed must now be superseded —
+    # there must be exactly one active row left for this group_id.
+    active_rows = conn.execute(
+        "SELECT COUNT(*) FROM schedule_versions WHERE group_id = ? AND status = 'active'",
+        (group_id,),
+    ).fetchone()[0]
+    assert active_rows == 1
+
+    # The schedule_versions table must no longer have a group_name column
+    # at all — it should match the current, final schema.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(schedule_versions)").fetchall()}
+    assert "group_name" not in columns
+    assert "group_id" in columns
+
+
+def test_migrate_legacy_single_group_dedups_multiple_active_rows_onto_latest(conn):
+    _seed_legacy_single_group_db(conn, with_schedule_version=True)
+    # Simulate a second, older-shaped 'active' row that also predates the
+    # group_id column (e.g. a stale row left behind by some historical bug)
+    # so that after migration two rows would both claim status='active'
+    # for the same group_id if not deduped.
+    conn.execute(
+        "INSERT INTO schedule_versions (group_name, payload_json, pdf_cache_path, parsed_at, status) "
+        "VALUES ('Б-Мв-101', '{\"a\": 0}', '/v0.pdf', '2026-09-15T00:00:00', 'active')"
+    )
+    conn.commit()
+
+    group_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
+
+    active_rows = conn.execute(
+        "SELECT payload_json FROM schedule_versions WHERE group_id = ? AND status = 'active'",
+        (group_id,),
+    ).fetchall()
+    assert len(active_rows) == 1
+    # The row with the later parsed_at ('2026-09-16...') must be the one
+    # that stayed active.
+    assert active_rows[0][0] == '{"a": 1}'

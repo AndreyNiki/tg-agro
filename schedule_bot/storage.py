@@ -4,6 +4,10 @@ from datetime import datetime, timezone
 
 
 def init_db(conn: sqlite3.Connection) -> None:
+    # REFERENCES groups(id) on members/schedule_versions is otherwise purely
+    # decorative — sqlite3 does not enforce foreign keys unless this pragma
+    # is set per-connection.
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS subscribers (
@@ -293,10 +297,6 @@ def list_all_member_chat_ids(conn: sqlite3.Connection) -> list[int]:
     return [row[0] for row in rows]
 
 
-def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
-
-
 def migrate_legacy_single_group(conn: sqlite3.Connection, legacy_source_page_url: str | None) -> int | None:
     """One-time upgrade from the pre-multi-group schema (a single global
     group tracked via settings.group_name/pdf_source/...) to the groups/
@@ -330,8 +330,65 @@ def migrate_legacy_single_group(conn: sqlite3.Connection, legacy_source_page_url
     for chat_id, joined_at in conn.execute("SELECT chat_id, joined_at FROM subscribers").fetchall():
         upsert_member(conn, chat_id, group_id, joined_at=joined_at, subscribed=True)
 
-    if not _column_exists(conn, "schedule_versions", "group_id"):
-        conn.execute("ALTER TABLE schedule_versions ADD COLUMN group_id INTEGER")
-    conn.execute("UPDATE schedule_versions SET group_id = ? WHERE group_id IS NULL", (group_id,))
+    _rebuild_schedule_versions_for_migration(conn, group_id)
     conn.commit()
     return group_id
+
+
+def _rebuild_schedule_versions_for_migration(conn: sqlite3.Connection, group_id: int) -> None:
+    """Rebuilds `schedule_versions` into the current, final shape
+    (group_id NOT NULL, no group_name column) and backfills every
+    pre-existing row onto `group_id`. A simple `ALTER TABLE ADD COLUMN`
+    is not enough here: on a real pre-multi-group database the old
+    `group_name TEXT NOT NULL` column (no default) is still present
+    alongside the newly-added nullable `group_id`, so the very next
+    `insert_new_version` call — which no longer supplies `group_name` —
+    fails with a NOT NULL constraint violation. Rebuilding the table is
+    the standard SQLite pattern for dropping/retyping a column.
+
+    Also deduplicates `status = 'active'` down to at most one row per
+    group_id (keeping the one with the latest parsed_at), since legacy
+    data could in principle have had more than one old group_name
+    collapse onto the same migrated group_id — `get_active_version`'s
+    bare `fetchone()` has no ORDER BY/tiebreak, so more than one active
+    row would make the result arbitrary."""
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(schedule_versions)").fetchall()}
+    group_id_select = "group_id" if "group_id" in existing_columns else "NULL"
+    old_rows = conn.execute(
+        f"SELECT id, {group_id_select}, payload_json, pdf_cache_path, parsed_at, status "
+        "FROM schedule_versions"
+    ).fetchall()
+
+    conn.execute("DROP TABLE schedule_versions")
+    conn.execute(
+        """
+        CREATE TABLE schedule_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL REFERENCES groups(id),
+            payload_json TEXT NOT NULL,
+            pdf_cache_path TEXT NOT NULL,
+            parsed_at TEXT NOT NULL,
+            status TEXT NOT NULL
+        )
+        """
+    )
+
+    # Dedup active rows per (backfilled) group_id: only the one with the
+    # latest parsed_at stays active, the rest become superseded.
+    latest_active_parsed_at: dict[int, str] = {}
+    for _id, row_group_id, _payload, _cache, parsed_at, status in old_rows:
+        effective_group_id = row_group_id if row_group_id is not None else group_id
+        if status == "active":
+            current = latest_active_parsed_at.get(effective_group_id)
+            if current is None or parsed_at > current:
+                latest_active_parsed_at[effective_group_id] = parsed_at
+
+    for old_id, row_group_id, payload_json, pdf_cache_path, parsed_at, status in old_rows:
+        effective_group_id = row_group_id if row_group_id is not None else group_id
+        if status == "active" and parsed_at != latest_active_parsed_at.get(effective_group_id):
+            status = "superseded"
+        conn.execute(
+            "INSERT INTO schedule_versions (id, group_id, payload_json, pdf_cache_path, parsed_at, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (old_id, effective_group_id, payload_json, pdf_cache_path, parsed_at, status),
+        )
