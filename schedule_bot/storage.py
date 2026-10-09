@@ -1,5 +1,6 @@
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -23,6 +24,18 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            source_page_url TEXT NOT NULL,
+            pdf_source_url TEXT NOT NULL,
+            send_time TEXT NOT NULL,
+            check_interval_minutes INTEGER NOT NULL,
+            timezone TEXT NOT NULL,
+            last_sync_failed_at TEXT,
+            created_at TEXT NOT NULL
         );
         """
     )
@@ -123,3 +136,103 @@ def insert_new_version(
     )
     conn.commit()
     return cursor.lastrowid
+
+
+@dataclass
+class GroupRow:
+    id: int
+    name: str
+    source_page_url: str
+    pdf_source_url: str
+    send_time: str
+    check_interval_minutes: int
+    timezone: str
+    last_sync_failed_at: str | None
+    created_at: str
+
+
+_GROUP_COLUMNS = (
+    "id, name, source_page_url, pdf_source_url, send_time, "
+    "check_interval_minutes, timezone, last_sync_failed_at, created_at"
+)
+
+
+def create_group(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    source_page_url: str,
+    pdf_source_url: str,
+    send_time: str,
+    check_interval_minutes: int,
+    tz_name: str,
+) -> int:
+    cursor = conn.execute(
+        "INSERT INTO groups (name, source_page_url, pdf_source_url, send_time, "
+        "check_interval_minutes, timezone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            name,
+            source_page_url,
+            pdf_source_url,
+            send_time,
+            check_interval_minutes,
+            tz_name,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_group(conn: sqlite3.Connection, group_id: int) -> GroupRow | None:
+    row = conn.execute(
+        f"SELECT {_GROUP_COLUMNS} FROM groups WHERE id = ?", (group_id,)
+    ).fetchone()
+    return GroupRow(*row) if row else None
+
+
+def get_group_by_name(conn: sqlite3.Connection, name: str) -> GroupRow | None:
+    row = conn.execute(
+        f"SELECT {_GROUP_COLUMNS} FROM groups WHERE name = ?", (name,)
+    ).fetchone()
+    return GroupRow(*row) if row else None
+
+
+def list_groups(conn: sqlite3.Connection, *, limit: int, offset: int) -> list[GroupRow]:
+    rows = conn.execute(
+        f"SELECT {_GROUP_COLUMNS} FROM groups ORDER BY name LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    return [GroupRow(*row) for row in rows]
+
+
+def list_all_groups(conn: sqlite3.Connection) -> list[GroupRow]:
+    rows = conn.execute(f"SELECT {_GROUP_COLUMNS} FROM groups ORDER BY name").fetchall()
+    return [GroupRow(*row) for row in rows]
+
+
+def count_groups(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM groups").fetchone()[0]
+
+
+def update_group_pdf_source_url(conn: sqlite3.Connection, group_id: int, pdf_source_url: str) -> None:
+    conn.execute("UPDATE groups SET pdf_source_url = ? WHERE id = ?", (pdf_source_url, group_id))
+    conn.commit()
+
+
+def update_group_send_time(conn: sqlite3.Connection, group_id: int, send_time: str) -> None:
+    conn.execute("UPDATE groups SET send_time = ? WHERE id = ?", (send_time, group_id))
+    conn.commit()
+
+
+def update_group_check_interval(conn: sqlite3.Connection, group_id: int, check_interval_minutes: int) -> None:
+    conn.execute(
+        "UPDATE groups SET check_interval_minutes = ? WHERE id = ?",
+        (check_interval_minutes, group_id),
+    )
+    conn.commit()
+
+
+def set_group_last_sync_failed_at(conn: sqlite3.Connection, group_id: int, value: str) -> None:
+    conn.execute("UPDATE groups SET last_sync_failed_at = ? WHERE id = ?", (value, group_id))
+    conn.commit()
