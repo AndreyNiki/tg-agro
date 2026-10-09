@@ -175,3 +175,44 @@ group_creation_handler = ConversationHandler(
     },
     fallbacks=[CommandHandler("cancel", cancel_group_creation)],
 )
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn = context.bot_data["conn"]
+    chat_id = update.effective_chat.id
+    logger.info("group_commands: /start from chat_id=%s", chat_id)
+    member = storage.get_member(conn, chat_id)
+    if member is None:
+        await update.message.reply_text("Выберите свою группу:", reply_markup=build_group_picker_keyboard(conn))
+        return
+
+    group = storage.get_group(conn, member.group_id)
+    group_name = group.name if group else "—"
+    status = "подписаны на рассылку" if member.subscribed else "отписаны от рассылки (группа закреплена)"
+    await update.message.reply_text(
+        f"Вы {status} группы «{group_name}». Команда /schedule покажет расписание на выбранный день."
+    )
+
+
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn = context.bot_data["conn"]
+    chat_id = update.effective_chat.id
+    member = storage.get_member(conn, chat_id)
+    if member is None:
+        await update.message.reply_text("Сначала выберите группу: /start")
+        return
+    storage.set_member_subscribed(conn, chat_id, True)
+    await update.message.reply_text("Рассылка расписания включена.")
+
+
+async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn = context.bot_data["conn"]
+    chat_id = update.effective_chat.id
+    member = storage.get_member(conn, chat_id)
+    if member is None:
+        await update.message.reply_text("Вы ещё не выбрали группу: /start")
+        return
+    storage.set_member_subscribed(conn, chat_id, False)
+    await update.message.reply_text(
+        "Рассылка отключена. Группа остаётся закреплённой, /schedule продолжит работать."
+    )

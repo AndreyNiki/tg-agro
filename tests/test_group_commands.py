@@ -311,3 +311,82 @@ async def test_cancel_group_creation_ends_conversation(conn):
     state = await cancel_group_creation(update, context)
 
     assert state == ConversationHandler.END
+
+
+from schedule_bot.group_commands import start_command, subscribe_command, unsubscribe_command
+
+
+@pytest.mark.asyncio
+async def test_start_command_shows_picker_when_no_group_attached(conn):
+    _make_groups(conn, 1)
+    update = make_message_update(111, "/start")
+    context = make_context_with_config(conn)
+
+    await start_command(update, context)
+
+    update.message.reply_text.assert_awaited_once()
+    _, kwargs = update.message.reply_text.call_args
+    assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_start_command_shows_status_when_group_already_attached(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 111, group_id, joined_at="t", subscribed=True)
+    update = make_message_update(111, "/start")
+    context = make_context_with_config(conn)
+
+    await start_command(update, context)
+
+    text = update.message.reply_text.call_args[0][0]
+    assert "Б-Мв-101" in text
+    _, kwargs = update.message.reply_text.call_args
+    assert "reply_markup" not in kwargs or kwargs["reply_markup"] is None
+
+
+@pytest.mark.asyncio
+async def test_subscribe_command_requires_existing_group(conn):
+    update = make_message_update(111, "/subscribe")
+    context = make_context_with_config(conn)
+
+    await subscribe_command(update, context)
+
+    assert storage.get_member(conn, 111) is None
+    update.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_command_resubscribes_without_changing_group(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 111, group_id, joined_at="t", subscribed=False)
+    update = make_message_update(111, "/subscribe")
+    context = make_context_with_config(conn)
+
+    await subscribe_command(update, context)
+
+    member = storage.get_member(conn, 111)
+    assert member.subscribed is True
+    assert member.group_id == group_id
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_command_keeps_group_attached(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 111, group_id, joined_at="t", subscribed=True)
+    update = make_message_update(111, "/unsubscribe")
+    context = make_context_with_config(conn)
+
+    await unsubscribe_command(update, context)
+
+    member = storage.get_member(conn, 111)
+    assert member.subscribed is False
+    assert member.group_id == group_id
