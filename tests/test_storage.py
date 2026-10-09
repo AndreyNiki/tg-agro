@@ -514,3 +514,29 @@ def test_remove_member_deletes_the_row(conn):
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.remove_member(conn, 111)
     assert storage.get_member(conn, 111) is None
+
+
+def test_create_group_defaults_to_open(conn):
+    group_id = _make_group(conn)
+    assert storage.get_group(conn, group_id).is_closed is False
+
+
+def test_update_group_closed_toggles(conn):
+    group_id = _make_group(conn)
+    storage.update_group_closed(conn, group_id, True)
+    assert storage.get_group(conn, group_id).is_closed is True
+    storage.update_group_closed(conn, group_id, False)
+    assert storage.get_group(conn, group_id).is_closed is False
+
+
+def test_get_group_where_starosta_returns_none_when_nobody_is(conn):
+    _make_group(conn)
+    assert storage.get_group_where_starosta(conn, 111) is None
+
+
+def test_get_group_where_starosta_finds_the_right_group(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.update_group_starosta(conn, group_b, 111)
+    found = storage.get_group_where_starosta(conn, 111)
+    assert found.id == group_b

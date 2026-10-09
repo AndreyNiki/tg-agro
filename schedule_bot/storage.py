@@ -90,6 +90,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
     _ensure_column(conn, "groups", "starosta_chat_id", "INTEGER")
     _ensure_column(conn, "groups", "last_starosta_change_at", "TEXT")
+    _ensure_column(conn, "groups", "is_closed", "INTEGER NOT NULL DEFAULT 0")
 
 
 def ensure_default_settings(conn: sqlite3.Connection, defaults: dict[str, str]) -> None:
@@ -166,13 +167,19 @@ class GroupRow:
     created_at: str
     starosta_chat_id: int | None
     last_starosta_change_at: str | None
+    is_closed: bool
 
 
 _GROUP_COLUMNS = (
     "id, name, source_page_url, pdf_source_url, send_time, "
     "check_interval_minutes, timezone, last_sync_failed_at, created_at, "
-    "starosta_chat_id, last_starosta_change_at"
+    "starosta_chat_id, last_starosta_change_at, is_closed"
 )
+
+
+def _group_row_from_tuple(row) -> GroupRow:
+    *rest, is_closed = row
+    return GroupRow(*rest, bool(is_closed))
 
 
 def create_group(
@@ -206,14 +213,14 @@ def get_group(conn: sqlite3.Connection, group_id: int) -> GroupRow | None:
     row = conn.execute(
         f"SELECT {_GROUP_COLUMNS} FROM groups WHERE id = ?", (group_id,)
     ).fetchone()
-    return GroupRow(*row) if row else None
+    return _group_row_from_tuple(row) if row else None
 
 
 def get_group_by_name(conn: sqlite3.Connection, name: str) -> GroupRow | None:
     row = conn.execute(
         f"SELECT {_GROUP_COLUMNS} FROM groups WHERE name = ?", (name,)
     ).fetchone()
-    return GroupRow(*row) if row else None
+    return _group_row_from_tuple(row) if row else None
 
 
 def list_groups(conn: sqlite3.Connection, *, limit: int, offset: int) -> list[GroupRow]:
@@ -221,12 +228,12 @@ def list_groups(conn: sqlite3.Connection, *, limit: int, offset: int) -> list[Gr
         f"SELECT {_GROUP_COLUMNS} FROM groups ORDER BY name LIMIT ? OFFSET ?",
         (limit, offset),
     ).fetchall()
-    return [GroupRow(*row) for row in rows]
+    return [_group_row_from_tuple(row) for row in rows]
 
 
 def list_all_groups(conn: sqlite3.Connection) -> list[GroupRow]:
     rows = conn.execute(f"SELECT {_GROUP_COLUMNS} FROM groups ORDER BY name").fetchall()
-    return [GroupRow(*row) for row in rows]
+    return [_group_row_from_tuple(row) for row in rows]
 
 
 def count_groups(conn: sqlite3.Connection) -> int:
@@ -264,6 +271,16 @@ def update_group_starosta(conn: sqlite3.Connection, group_id: int, chat_id: int 
 def set_group_last_starosta_change_at(conn: sqlite3.Connection, group_id: int, value: str) -> None:
     conn.execute("UPDATE groups SET last_starosta_change_at = ? WHERE id = ?", (value, group_id))
     conn.commit()
+
+
+def update_group_closed(conn: sqlite3.Connection, group_id: int, is_closed: bool) -> None:
+    conn.execute("UPDATE groups SET is_closed = ? WHERE id = ?", (1 if is_closed else 0, group_id))
+    conn.commit()
+
+
+def get_group_where_starosta(conn: sqlite3.Connection, chat_id: int) -> GroupRow | None:
+    row = conn.execute(f"SELECT {_GROUP_COLUMNS} FROM groups WHERE starosta_chat_id = ?", (chat_id,)).fetchone()
+    return _group_row_from_tuple(row) if row else None
 
 
 @dataclass
