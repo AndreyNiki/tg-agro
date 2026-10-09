@@ -241,6 +241,38 @@ def test_build_scheduler_binds_daily_trigger_to_group_timezone(conn):
     scheduler.shutdown(wait=False)
 
 
+def test_build_scheduler_gives_each_group_its_own_lock(conn):
+    """Regression test: build_scheduler used to create a SINGLE lock and
+    pass the same object to every group's jobs, which would serialize
+    sync across unrelated groups (different `active` rows, different
+    cache files) — defeating the point of per-group job pairs. Each
+    group's hourly_check job must hold a lock object distinct from every
+    other group's."""
+    group_a = _make_group(conn, name="A")
+    group_b = _make_group(conn, name="B")
+    bot = MagicMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+
+    scheduler = build_scheduler(conn, _config(), bot, holder)
+
+    lock_a = scheduler.get_job(f"hourly_check_{group_a}").args[-1]
+    lock_b = scheduler.get_job(f"hourly_check_{group_b}").args[-1]
+    assert lock_a is not lock_b
+
+    async def _acquire_both_without_blocking():
+        await asyncio.wait_for(lock_a.acquire(), timeout=1)
+        try:
+            # group B's lock must be acquirable while group A's is held —
+            # if they were the same object this would deadlock/time out.
+            await asyncio.wait_for(lock_b.acquire(), timeout=1)
+            lock_b.release()
+        finally:
+            lock_a.release()
+
+    asyncio.run(_acquire_both_without_blocking())
+    scheduler.shutdown(wait=False)
+
+
 def test_reschedule_group_jobs_updates_trigger_time(conn):
     group_id = _make_group(conn)
     bot = MagicMock()

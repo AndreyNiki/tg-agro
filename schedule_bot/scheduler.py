@@ -38,11 +38,12 @@ async def _run_sync(conn, config, bot, group, lock: asyncio.Lock | None = None):
         )
 
     # Guard against hourly_check_job, daily_send_job and a manual /refresh
-    # for the SAME group overlapping (see the original single-group
-    # comment this preserves): without this, two concurrent syncs can
-    # both diff against the same "active" row for that group, both
-    # apply, double-broadcast, and both try to delete the same
-    # superseded cache file.
+    # for the SAME group overlapping: without this, two concurrent syncs
+    # for that one group can both diff against the same "active" row,
+    # both apply, double-broadcast, and both try to delete the same
+    # superseded cache file. Each group is given its OWN lock (see
+    # build_scheduler), so this never serializes syncs ACROSS groups —
+    # only within a single group's own jobs.
     if lock is None:
         return await _do_sync()
     async with lock:
@@ -101,6 +102,9 @@ async def daily_send_job(
     week_type = week_formula_holder.formula.compute(today)
     text = format_day_schedule(day_name, today, week_type, schedule)
     group = storage.get_group(conn, group_id)  # re-fetch: _run_sync may have just set last_sync_failed_at
+    if group is None:
+        logger.warning("scheduler: daily_send_job group_id=%s deleted mid-send, aborting", group_id)
+        return
     if group.last_sync_failed_at:
         text = STALE_SCHEDULE_WARNING + text
 
@@ -218,13 +222,19 @@ def reschedule_group_jobs(scheduler, conn, config, bot, group_id: int, week_form
 
 
 def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder, lock: asyncio.Lock | None = None) -> AsyncIOScheduler:
-    if lock is None:
-        lock = asyncio.Lock()
+    # Each group gets its OWN lock, never shared with another group's jobs —
+    # a shared single lock would serialize sync across unrelated groups
+    # (different `active` schedule_versions rows, different cache files),
+    # which defeats the point of per-group job pairs. The `lock` parameter
+    # is accepted for backward-compatible call sites only and is NOT reused
+    # across groups here; each group_id gets its own lazily-created lock.
+    locks: dict[int, asyncio.Lock] = {}
 
     scheduler = AsyncIOScheduler(timezone=config.default_timezone)
 
     for group in storage.list_all_groups(conn):
-        schedule_group_jobs(scheduler, conn, config, bot, group, week_formula_holder, lock)
+        group_lock = locks.setdefault(group.id, asyncio.Lock())
+        schedule_group_jobs(scheduler, conn, config, bot, group, week_formula_holder, group_lock)
 
     scheduler.add_job(
         weekly_weektype_refresh_job,
