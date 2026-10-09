@@ -199,3 +199,31 @@ async def election_approve_callback(update: Update, context: ContextTypes.DEFAUL
 
 async def election_reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.callback_query.answer("Отклонения не учитываются, решает количество одобрений.")
+
+
+async def votes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn = context.bot_data["conn"]
+    member = storage.get_member(conn, update.effective_chat.id)
+    if member is None:
+        await update.message.reply_text("Сначала выберите группу: /start")
+        return
+
+    open_elections = storage.list_open_elections(conn, member.group_id)
+    if not open_elections:
+        await update.message.reply_text("Нет открытых голосований.")
+        return
+
+    for election in open_elections:
+        candidate = storage.get_member(conn, election.candidate_chat_id)
+        count = storage.count_election_approvals(conn, election.id)
+        kind_label = "Первое назначение старосты" if election.kind == "initial" else "Смена старосты"
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Одобрить", callback_data=f"election:approve:{election.id}"),
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"election:reject:{election.id}"),
+                ]
+            ]
+        )
+        text = f"{kind_label}: {elections.format_candidate_label(candidate)} ({count}/2)"
+        await update.message.reply_text(text, reply_markup=keyboard)

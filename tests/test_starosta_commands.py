@@ -10,6 +10,7 @@ from schedule_bot.starosta_commands import (
     election_reject_callback,
     nominate_self_callback,
     starosta_command,
+    votes_command,
 )
 
 
@@ -176,3 +177,42 @@ async def test_election_reject_does_not_write_anything(conn):
     assert storage.count_election_approvals(conn, election_id) == 0
     assert storage.get_election(conn, election_id).status == "open"
     update.callback_query.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_votes_command_without_group_prompts_start(conn):
+    update = make_message_update(111)
+    context = make_context(conn)
+
+    await votes_command(update, context)
+
+    assert "/start" in update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_votes_command_reports_no_open_votes(conn):
+    group_id = _make_group(conn)
+    _add_members(conn, group_id, [111, 222, 333])
+    update = make_message_update(111)
+    context = make_context(conn)
+
+    await votes_command(update, context)
+
+    assert "Нет открытых голосований" in update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_votes_command_lists_open_election_with_working_button(conn):
+    group_id = _make_group(conn)
+    _add_members(conn, group_id, [111, 222, 333])
+    election_id = storage.create_election(conn, group_id, "initial", 222, 222, "t")
+    update = make_message_update(111)
+    context = make_context(conn)
+
+    await votes_command(update, context)
+
+    update.message.reply_text.assert_awaited_once()
+    text, kwargs = update.message.reply_text.call_args[0][0], update.message.reply_text.call_args[1]
+    assert "0/2" in text
+    buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any(b.callback_data == f"election:approve:{election_id}" for b in buttons)
