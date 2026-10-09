@@ -16,7 +16,6 @@ from schedule_bot.bot import (
     refresh_command,
     alert_command,
 )
-
 ADMIN_CHAT_ID = 999
 
 
@@ -133,10 +132,28 @@ async def test_set_pdf_source_accepts_local_path(conn):
 
 
 @pytest.mark.asyncio
+async def test_set_group_migrates_existing_subscribers(conn):
+    """Regression: changing the tracked group must not orphan existing
+    subscribers — every broadcast loop filters by the *current*
+    group_name setting, so their rows must move with it."""
+    storage.set_setting(conn, "group_name", "Б-Мв-101")
+    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
+    storage.add_subscriber(conn, 222, "Б-Мв-101", "2026-09-16T00:00:00")
+
+    update = make_update(ADMIN_CHAT_ID, "Б-Мв-102")
+    context = make_context(conn)
+    context.args = ["Б-Мв-102"]
+
+    await set_group_command(update, context)
+
+    assert storage.get_setting(conn, "group_name") == "Б-Мв-102"
+    assert sorted(list_subscribers(conn, "Б-Мв-102")) == [111, 222]
+    assert list_subscribers(conn, "Б-Мв-101") == []
+
+
+@pytest.mark.asyncio
 async def test_set_group_rejects_non_admin(conn):
-    """Note: This test previously checked subscriber migration, but that's now
-    handled by the members table (Task 2). The core functionality of rejecting
-    non-admin calls remains tested."""
+    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
     update = make_update(12345, "Б-Мв-102")
     context = make_context(conn)
     context.args = ["Б-Мв-102"]
@@ -144,6 +161,7 @@ async def test_set_group_rejects_non_admin(conn):
     await set_group_command(update, context)
 
     assert storage.get_setting(conn, "group_name") is None
+    assert list_subscribers(conn, "Б-Мв-101") == [111]
 
 
 @pytest.mark.asyncio
@@ -248,6 +266,20 @@ async def test_refresh_command_reports_sync_error_without_crashing(conn):
 
     update.message.reply_text.assert_awaited_once()
     assert "не удал" in update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_alert_command_broadcasts_to_all_subscribers(conn):
+    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
+    storage.add_subscriber(conn, 222, "Б-Мв-101", "2026-09-16T00:00:00")
+    update = make_update(ADMIN_CHAT_ID, "Внимание, ошибка в расписании")
+    context = make_context(conn)
+    context.args = ["Внимание,", "ошибка", "в", "расписании"]
+    context.bot.send_message = AsyncMock()
+
+    await alert_command(update, context)
+
+    assert context.bot.send_message.await_count == 2
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,20 @@ class RecordingNotifier:
         self.sent.append((chat_id, text))
 
 
+def test_first_sync_seeds_active_version_without_notifying(conn, tmp_path):
+    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
+    notifier = RecordingNotifier()
+
+    result = asyncio.run(
+        check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier)
+    )
+
+    assert result.status == "initial"
+    assert notifier.sent == []
+    active = storage.get_active_version(conn, "Б-Мв-101")
+    assert active is not None
+
+
 def test_second_sync_with_same_pdf_reports_no_changes(conn, tmp_path):
     notifier = RecordingNotifier()
     asyncio.run(check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier))
@@ -35,6 +49,34 @@ def test_second_sync_with_same_pdf_reports_no_changes(conn, tmp_path):
 
     assert result.status == "no_changes"
     assert notifier.sent == []
+
+
+def test_sync_with_changed_pdf_notifies_all_subscribers(conn, tmp_path, monkeypatch):
+    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
+    storage.add_subscriber(conn, 222, "Б-Мв-101", "2026-09-16T00:00:00")
+    notifier = RecordingNotifier()
+    asyncio.run(check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier))
+
+    # Simulate the PDF changing by monkeypatching parse_schedule's diff outcome:
+    # force a fake non-empty diff via a stub parse_schedule that flips one lesson.
+    import schedule_bot.sync as sync_module
+    from schedule_bot.pdf_parser import parse_schedule as real_parse_schedule
+
+    def fake_parse_schedule(source, group_name):
+        schedule = real_parse_schedule(source, group_name)
+        wednesday = schedule.days["Среда"]
+        wednesday.lessons[0].upper = "ИЗМЕНЁННЫЙ ПРЕДМЕТ"
+        return schedule
+
+    monkeypatch.setattr(sync_module, "parse_schedule", fake_parse_schedule)
+
+    result = asyncio.run(
+        check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier)
+    )
+
+    assert result.status == "applied"
+    assert len(result.changes) >= 1
+    assert {chat_id for chat_id, _ in notifier.sent} == {111, 222}
 
 
 def test_write_cache_sanitizes_group_name_used_as_path_segment(tmp_path):
@@ -54,6 +96,17 @@ def test_sync_caches_pdf_file_on_disk(conn, tmp_path):
     asyncio.run(check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier))
     active = storage.get_active_version(conn, "Б-Мв-101")
     assert Path(active.pdf_cache_path).exists()
+
+
+class PartiallyFailingNotifier:
+    def __init__(self, failing_chat_id):
+        self.failing_chat_id = failing_chat_id
+        self.sent = []
+
+    async def __call__(self, chat_id, text):
+        if chat_id == self.failing_chat_id:
+            raise RuntimeError("bot blocked by user")
+        self.sent.append((chat_id, text))
 
 
 def test_sync_reads_pdf_source_exactly_once_and_cache_matches_parsed_bytes(conn, tmp_path, monkeypatch):
@@ -84,6 +137,40 @@ def test_sync_reads_pdf_source_exactly_once_and_cache_matches_parsed_bytes(conn,
     cached_bytes = Path(active.pdf_cache_path).read_bytes()
     original_bytes = Path(FIXTURE_PATH).read_bytes()
     assert cached_bytes == original_bytes
+
+
+def test_sync_deletes_superseded_cache_file_on_change(conn, tmp_path, monkeypatch):
+    """I7: when a sync applies a change, the previous (now superseded)
+    version's cache file must be deleted from disk, while the new version's
+    cache file must remain."""
+    notifier = RecordingNotifier()
+    asyncio.run(check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier))
+    first_active = storage.get_active_version(conn, "Б-Мв-101")
+    first_cache_path = Path(first_active.pdf_cache_path)
+    assert first_cache_path.exists()
+
+    import schedule_bot.sync as sync_module
+    from schedule_bot.pdf_parser import parse_schedule as real_parse_schedule
+
+    def fake_parse_schedule(source, group_name):
+        schedule = real_parse_schedule(source, group_name)
+        wednesday = schedule.days["Среда"]
+        wednesday.lessons[0].upper = "ИЗМЕНЁННЫЙ ПРЕДМЕТ"
+        return schedule
+
+    monkeypatch.setattr(sync_module, "parse_schedule", fake_parse_schedule)
+
+    result = asyncio.run(
+        check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier)
+    )
+
+    assert result.status == "applied"
+    second_active = storage.get_active_version(conn, "Б-Мв-101")
+    second_cache_path = Path(second_active.pdf_cache_path)
+
+    assert not first_cache_path.exists()
+    assert second_cache_path.exists()
+    assert second_cache_path != first_cache_path
 
 
 def test_sync_retries_transient_fetch_failure_and_succeeds(conn, tmp_path, monkeypatch):
@@ -157,3 +244,27 @@ def test_sync_clears_failure_flag_on_next_successful_sync(conn, tmp_path, monkey
     assert storage.get_setting(conn, "last_sync_failed_at") in (None, "")
 
 
+def test_sync_notifies_remaining_subscribers_when_one_notify_fails(conn, tmp_path, monkeypatch):
+    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
+    storage.add_subscriber(conn, 222, "Б-Мв-101", "2026-09-16T00:00:00")
+    seed_notifier = RecordingNotifier()
+    asyncio.run(check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), seed_notifier))
+
+    import schedule_bot.sync as sync_module
+    from schedule_bot.pdf_parser import parse_schedule as real_parse_schedule
+
+    def fake_parse_schedule(source, group_name):
+        schedule = real_parse_schedule(source, group_name)
+        wednesday = schedule.days["Среда"]
+        wednesday.lessons[0].upper = "ИЗМЕНЁННЫЙ ПРЕДМЕТ"
+        return schedule
+
+    monkeypatch.setattr(sync_module, "parse_schedule", fake_parse_schedule)
+
+    notifier = PartiallyFailingNotifier(failing_chat_id=111)
+    result = asyncio.run(
+        check_and_apply_diff(conn, FIXTURE_PATH, "Б-Мв-101", str(tmp_path), notifier)
+    )
+
+    assert result.status == "applied"
+    assert {chat_id for chat_id, _ in notifier.sent} == {222}
