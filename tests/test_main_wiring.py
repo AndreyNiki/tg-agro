@@ -433,3 +433,27 @@ def test_build_application_registers_classmates_command(conn, config, monkeypatc
     assert "classmates" in command_names
 
     application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+def test_build_application_registers_privilege_handlers(conn, config, monkeypatch):
+    _patch_week_formula(monkeypatch)
+
+    application = build_application(config, conn)
+
+    command_names = set()
+    for handlers in application.handlers.values():
+        for handler in handlers:
+            if hasattr(handler, "commands"):
+                command_names.update(handler.commands)
+    assert {"close_group", "open_group", "notify", "requests"}.issubset(command_names)
+
+    callback_patterns = set()
+    for handlers in application.handlers.values():
+        for handler in handlers:
+            if hasattr(handler, "pattern") and handler.pattern is not None:
+                callback_patterns.add(handler.pattern.pattern)
+    assert r"^exclude:select:\d+$" in callback_patterns
+    assert r"^exclude:confirm:\d+$" in callback_patterns
+    assert r"^exclude:abort$" in callback_patterns
+
+    application.bot_data["_scheduler"].shutdown(wait=False)

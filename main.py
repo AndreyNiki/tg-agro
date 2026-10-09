@@ -11,9 +11,12 @@ from schedule_bot.bot import (
     NOOP_CALLBACK_DATA,
     USER_COMMANDS,
     alert_command,
+    close_group_command,
     day_callback,
     help_command,
     noop_callback,
+    notify_command,
+    open_group_command,
     refresh_command,
     schedule_command,
     remove_starosta_command,
@@ -22,7 +25,7 @@ from schedule_bot.bot import (
     set_send_time_command,
     set_starosta_command,
 )
-from schedule_bot.classmates import classmates_command
+from schedule_bot.classmates import classmates_command, exclude_abort_callback, exclude_confirm_callback, exclude_select_callback
 from schedule_bot.change_group_commands import (
     change_group_abort_callback,
     change_group_command,
@@ -31,6 +34,7 @@ from schedule_bot.change_group_commands import (
     change_group_select_callback,
     change_request_approve_callback,
     change_request_reject_callback,
+    requests_command,
 )
 from schedule_bot.config import Config, load_config
 from schedule_bot.group_commands import (
@@ -203,6 +207,15 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CallbackQueryHandler(change_group_confirm_callback, pattern=r"^chgconfirm:\d+$"))
     application.add_handler(CallbackQueryHandler(change_request_approve_callback, pattern=r"^chgreq:approve:\d+$"))
     application.add_handler(CallbackQueryHandler(change_request_reject_callback, pattern=r"^chgreq:reject:\d+$"))
+
+    application.add_handler(CommandHandler("close_group", close_group_command))
+    application.add_handler(CommandHandler("open_group", open_group_command))
+    application.add_handler(CommandHandler("notify", notify_command))
+    application.add_handler(CommandHandler("requests", requests_command))
+
+    application.add_handler(CallbackQueryHandler(exclude_select_callback, pattern=r"^exclude:select:\d+$"))
+    application.add_handler(CallbackQueryHandler(exclude_confirm_callback, pattern=r"^exclude:confirm:\d+$"))
+    application.add_handler(CallbackQueryHandler(exclude_abort_callback, pattern=r"^exclude:abort$"))
 
     # Pass the SAME group_locks dict used by sync_fn/reschedule_group_jobs_cb
     # above, so every group that already exists at startup gets its
