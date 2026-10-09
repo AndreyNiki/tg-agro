@@ -1,4 +1,10 @@
-from schedule_bot.classmates import format_member_line
+import sqlite3
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from schedule_bot import storage
+from schedule_bot.classmates import format_member_line, classmates_command
 from schedule_bot.storage import MemberRow
 
 
@@ -39,15 +45,6 @@ def test_format_member_line_no_mark_when_not_starosta():
     member = _member(display_name="Ivan Ivanov")
     line = format_member_line(member, is_starosta=False)
     assert "👑" not in line
-
-
-import sqlite3
-from unittest.mock import AsyncMock, MagicMock
-
-import pytest
-
-from schedule_bot import storage
-from schedule_bot.classmates import classmates_command
 
 
 @pytest.fixture
