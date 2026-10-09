@@ -204,3 +204,102 @@ async def test_menu_callback_group_changegroup_calls_change_group_command(conn):
     await menu_callback(update, context)
 
     update.callback_query.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_starosta_root_delegates_to_starosta_command_when_not_starosta(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+    storage.upsert_member(conn, 333, group_id, joined_at="t")
+    update = make_callback_update(111, "menu:starosta:root")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_starosta_root_shows_privileges_when_caller_is_starosta(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    update = make_callback_update(111, "menu:starosta:root")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any("Исключить" in t for t in texts)
+    assert any("Закрыть" in t or "Открыть" in t for t in texts)
+    assert any("Оповестить" in t for t in texts)
+    assert any("Заявки" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_starosta_toggleclosed_flips_state(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    update = make_callback_update(111, "menu:starosta:toggleclosed")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    assert storage.get_group(conn, group_id).is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_starosta_exclude_shows_classmates_with_buttons(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+    update = make_callback_update(111, "menu:starosta:exclude")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+    _, kwargs = update.callback_query.message.reply_text.call_args
+    assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_starosta_requests_lists_pending(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 555, group_b, joined_at="t")
+    storage.update_group_starosta(conn, group_b, 555)
+    storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+    update = make_callback_update(555, "menu:starosta:requests")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_starosta_notify_prompts_for_text(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    update = make_callback_update(111, "menu:starosta:notify")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    assert context.user_data["pending_menu_action"] == {"action": "notify", "group_id": group_id}
+    update.callback_query.message.reply_text.assert_awaited_once()
