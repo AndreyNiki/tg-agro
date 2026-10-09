@@ -22,6 +22,7 @@ from schedule_bot.bot import (
     set_send_time_command,
     set_starosta_command,
 )
+from schedule_bot.classmates import classmates_command
 from schedule_bot.change_group_commands import (
     change_group_abort_callback,
     change_group_command,
@@ -168,6 +169,7 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CommandHandler("subscribe", subscribe_command))
     application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
     application.add_handler(CommandHandler("schedule", schedule_command))
+    application.add_handler(CommandHandler("classmates", classmates_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(day_callback, pattern=r"^day:\d{4}-\d{2}-\d{2}$"))
     application.add_handler(CallbackQueryHandler(noop_callback, pattern=f"^{NOOP_CALLBACK_DATA}$"))

@@ -418,3 +418,18 @@ def test_build_application_registers_starosta_and_change_group_handlers(conn, co
     assert r"^chgreq:approve:\d+$" in callback_patterns
 
     application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+def test_build_application_registers_classmates_command(conn, config, monkeypatch):
+    _patch_week_formula(monkeypatch)
+
+    application = build_application(config, conn)
+
+    command_names = set()
+    for handlers in application.handlers.values():
+        for handler in handlers:
+            if hasattr(handler, "commands"):
+                command_names.update(handler.commands)
+    assert "classmates" in command_names
+
+    application.bot_data["_scheduler"].shutdown(wait=False)
