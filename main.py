@@ -16,9 +16,20 @@ from schedule_bot.bot import (
     noop_callback,
     refresh_command,
     schedule_command,
+    remove_starosta_command,
     set_check_interval_command,
     set_pdf_source_command,
     set_send_time_command,
+    set_starosta_command,
+)
+from schedule_bot.change_group_commands import (
+    change_group_abort_callback,
+    change_group_command,
+    change_group_confirm_callback,
+    change_group_page_callback,
+    change_group_select_callback,
+    change_request_approve_callback,
+    change_request_reject_callback,
 )
 from schedule_bot.config import Config, load_config
 from schedule_bot.group_commands import (
@@ -35,6 +46,20 @@ from schedule_bot.scheduler import (
     WeekFormulaHolder,
     build_scheduler,
     reschedule_group_jobs,
+)
+from schedule_bot.starosta_candidates import (
+    abort_callback as starcand_abort_callback,
+    confirm_callback as starcand_confirm_callback,
+    page_callback as starcand_page_callback,
+    select_callback as starcand_select_callback,
+)
+from schedule_bot.starosta_commands import (
+    election_approve_callback,
+    election_reject_callback,
+    nominate_self_callback,
+    starosta_change_callback,
+    starosta_command,
+    votes_command,
 )
 from schedule_bot.sync import check_and_apply_diff
 from schedule_bot.telegram_utils import send_with_retry
@@ -154,6 +179,28 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CommandHandler("set_check_interval", set_check_interval_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("alert", alert_command))
+
+    application.add_handler(CommandHandler("starosta", starosta_command))
+    application.add_handler(CommandHandler("votes", votes_command))
+    application.add_handler(CommandHandler("change_group", change_group_command))
+    application.add_handler(CommandHandler("set_starosta", set_starosta_command))
+    application.add_handler(CommandHandler("remove_starosta", remove_starosta_command))
+
+    application.add_handler(CallbackQueryHandler(nominate_self_callback, pattern=r"^starosta:nominate_self$"))
+    application.add_handler(CallbackQueryHandler(starosta_change_callback, pattern=r"^starosta:change$"))
+    application.add_handler(CallbackQueryHandler(starcand_page_callback, pattern=r"^starcand:page:\d+$"))
+    application.add_handler(CallbackQueryHandler(starcand_select_callback, pattern=r"^starcand:select:\d+$"))
+    application.add_handler(CallbackQueryHandler(starcand_abort_callback, pattern=r"^starcand:abort$"))
+    application.add_handler(CallbackQueryHandler(starcand_confirm_callback, pattern=r"^starcand:confirm:\d+$"))
+    application.add_handler(CallbackQueryHandler(election_approve_callback, pattern=r"^election:approve:\d+$"))
+    application.add_handler(CallbackQueryHandler(election_reject_callback, pattern=r"^election:reject:\d+$"))
+
+    application.add_handler(CallbackQueryHandler(change_group_page_callback, pattern=r"^chggrp:page:\d+$"))
+    application.add_handler(CallbackQueryHandler(change_group_select_callback, pattern=r"^chggrp:select:\d+$"))
+    application.add_handler(CallbackQueryHandler(change_group_abort_callback, pattern=r"^chgabort$"))
+    application.add_handler(CallbackQueryHandler(change_group_confirm_callback, pattern=r"^chgconfirm:\d+$"))
+    application.add_handler(CallbackQueryHandler(change_request_approve_callback, pattern=r"^chgreq:approve:\d+$"))
+    application.add_handler(CallbackQueryHandler(change_request_reject_callback, pattern=r"^chgreq:reject:\d+$"))
 
     # Pass the SAME group_locks dict used by sync_fn/reschedule_group_jobs_cb
     # above, so every group that already exists at startup gets its

@@ -394,3 +394,27 @@ def test_build_application_still_gives_different_groups_independent_locks(conn, 
     assert lock_a is not lock_b
 
     scheduler.shutdown(wait=False)
+
+
+def test_build_application_registers_starosta_and_change_group_handlers(conn, config, monkeypatch):
+    _patch_week_formula(monkeypatch)
+
+    application = build_application(config, conn)
+
+    command_names = set()
+    for handlers in application.handlers.values():
+        for handler in handlers:
+            if hasattr(handler, "commands"):
+                command_names.update(handler.commands)
+    assert {"starosta", "votes", "change_group", "set_starosta", "remove_starosta"}.issubset(command_names)
+
+    callback_patterns = set()
+    for handlers in application.handlers.values():
+        for handler in handlers:
+            if hasattr(handler, "pattern") and handler.pattern is not None:
+                callback_patterns.add(handler.pattern.pattern)
+    assert r"^starosta:nominate_self$" in callback_patterns
+    assert r"^election:approve:\d+$" in callback_patterns
+    assert r"^chgreq:approve:\d+$" in callback_patterns
+
+    application.bot_data["_scheduler"].shutdown(wait=False)
