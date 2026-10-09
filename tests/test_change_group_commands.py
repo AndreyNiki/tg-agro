@@ -316,3 +316,26 @@ async def test_requests_command_admin_with_group_id_sees_requests(conn):
     await requests_command(update, context)
 
     update.message.reply_text.assert_awaited_once()
+
+
+from schedule_bot.change_group_commands import _build_requests_messages
+
+
+def test_build_requests_messages_returns_one_entry_per_pending_request(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+    group_b_row = storage.get_group(conn, group_b)
+
+    entries = _build_requests_messages(conn, group_b_row)
+
+    assert len(entries) == 1
+    text, keyboard = entries[0]
+    assert "A" not in text  # requester label is shown, not the source group name
+    buttons = [b for row in keyboard.inline_keyboard for b in row]
+    assert any(b.callback_data.startswith("chgreq:approve:") for b in buttons)
+
+
+def test_build_requests_messages_empty_for_group_without_pending(conn):
+    group_b = storage.get_group(conn, _make_group(conn, "B"))
+    assert _build_requests_messages(conn, group_b) == []
