@@ -460,6 +460,42 @@ def test_create_group_change_request_defaults_to_pending(conn):
     assert request.to_group_id == group_b
 
 
+def test_create_group_change_request_accepts_null_from_group(conn):
+    group_b = _make_group(conn, "B")
+    request_id = storage.create_group_change_request(conn, 111, None, group_b, "t")
+    request = storage.get_group_change_request(conn, request_id)
+    assert request.from_group_id is None
+    assert request.to_group_id == group_b
+
+
+def test_migrate_group_change_requests_preserves_existing_rows(conn):
+    """Simulates an upgrade from sub-project 2's NOT NULL schema: an
+    existing row with a real from_group_id must survive the rebuild
+    unchanged, including an already-decided one."""
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    conn.execute("DROP TABLE group_change_requests")
+    conn.execute(
+        "CREATE TABLE group_change_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, "
+        "from_group_id INTEGER NOT NULL REFERENCES groups(id), to_group_id INTEGER NOT NULL REFERENCES groups(id), "
+        "requested_at TEXT NOT NULL, status TEXT NOT NULL, decided_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO group_change_requests (chat_id, from_group_id, to_group_id, requested_at, status, decided_at) "
+        "VALUES (111, ?, ?, 't', 'approved', 't2')",
+        (group_a, group_b),
+    )
+    conn.commit()
+
+    storage._migrate_group_change_requests_nullable_from_group(conn)
+
+    rows = conn.execute("SELECT chat_id, from_group_id, to_group_id, status, decided_at FROM group_change_requests").fetchall()
+    assert rows == [(111, group_a, group_b, "approved", "t2")]
+    # and the column is now nullable:
+    new_request_id = storage.create_group_change_request(conn, 222, None, group_b, "t3")
+    assert storage.get_group_change_request(conn, new_request_id).from_group_id is None
+
+
 def test_get_pending_request_for_chat_returns_none_when_absent(conn):
     assert storage.get_pending_request_for_chat(conn, 111) is None
 

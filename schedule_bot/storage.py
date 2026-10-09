@@ -72,7 +72,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS group_change_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER NOT NULL,
-            from_group_id INTEGER NOT NULL REFERENCES groups(id),
+            from_group_id INTEGER REFERENCES groups(id),
             to_group_id INTEGER NOT NULL REFERENCES groups(id),
             requested_at TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -91,6 +91,34 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "groups", "starosta_chat_id", "INTEGER")
     _ensure_column(conn, "groups", "last_starosta_change_at", "TEXT")
     _ensure_column(conn, "groups", "is_closed", "INTEGER NOT NULL DEFAULT 0")
+    _migrate_group_change_requests_nullable_from_group(conn)
+
+
+def _migrate_group_change_requests_nullable_from_group(conn: sqlite3.Connection) -> None:
+    info = conn.execute("PRAGMA table_info(group_change_requests)").fetchall()
+    from_group_column = next((row for row in info if row[1] == "from_group_id"), None)
+    if from_group_column is None or from_group_column[3] == 0:
+        return  # table doesn't exist yet, or is already nullable
+    conn.executescript(
+        """
+        ALTER TABLE group_change_requests RENAME TO group_change_requests_old;
+        CREATE TABLE group_change_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            from_group_id INTEGER REFERENCES groups(id),
+            to_group_id INTEGER NOT NULL REFERENCES groups(id),
+            requested_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            decided_at TEXT
+        );
+        INSERT INTO group_change_requests
+            (id, chat_id, from_group_id, to_group_id, requested_at, status, decided_at)
+            SELECT id, chat_id, from_group_id, to_group_id, requested_at, status, decided_at
+            FROM group_change_requests_old;
+        DROP TABLE group_change_requests_old;
+        """
+    )
+    conn.commit()
 
 
 def ensure_default_settings(conn: sqlite3.Connection, defaults: dict[str, str]) -> None:
@@ -564,7 +592,7 @@ _REQUEST_COLUMNS = "id, chat_id, from_group_id, to_group_id, requested_at, statu
 
 
 def create_group_change_request(
-    conn: sqlite3.Connection, chat_id: int, from_group_id: int, to_group_id: int, requested_at: str
+    conn: sqlite3.Connection, chat_id: int, from_group_id: int | None, to_group_id: int, requested_at: str
 ) -> int:
     cursor = conn.execute(
         "INSERT INTO group_change_requests (chat_id, from_group_id, to_group_id, requested_at, status) "
