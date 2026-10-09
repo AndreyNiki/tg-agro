@@ -63,13 +63,13 @@ module):
    `active` (the old row is flipped to `superseded`), and the *previous*
    version's cache file is deleted from disk — this is the only cleanup
    mechanism for `pdf_cache_dir`, so don't remove it without adding another.
-4. `schedule_bot/scheduler.py` calls this from two independent APScheduler
-   jobs (hourly check, daily send) and `schedule_bot/bot.py`'s
-   `refresh_command` calls it via an injected `sync_fn` closure built in
-   `main.py` — all three paths must resolve `pdf_source`/`group_name`
-   through `scheduler.resolve_sync_settings(conn, config)`, not by reading
-   `storage.get_setting` directly, or you'll reintroduce the exact
-   fallback-logic duplication bug (I8) that was fixed post-review.
+4. `schedule_bot/scheduler.py` calls this from two independent per-group
+   APScheduler jobs (hourly check, daily send) and `schedule_bot/bot.py`'s
+   `refresh_command` calls it via an injected `sync_fn(group_id)` closure
+   built in `main.py` — all three paths read the group's row via
+   `storage.get_group(conn, group_id)`, so there's a single source of
+   truth for a group's `pdf_source_url`/`send_time`/`check_interval_minutes`
+   and no separate settings-resolution layer to keep in sync.
 
 **`pdf_parser.py` is deliberately split into two layers** — this split is
 the reason the trickiest part of the system (interpreting a hand-typeset,
@@ -101,10 +101,11 @@ tries live fetch → falls back to the persisted value → falls back to a
 hardcoded default, in that order, and never raises.
 
 **`bot_data` is the dependency-injection seam.** Every handler in
-`bot.py` reads its dependencies (`conn`, `group_name`, `admin_chat_id`,
-`week_formula`, `active_schedule_getter`, `active_pdf_path_getter`,
-`sync_fn`, `reschedule_daily_job`, `reschedule_hourly_job`) off
-`context.bot_data`, never from module-level state. `main.py`'s
+`bot.py` reads its dependencies (`conn`, `config`, `admin_chat_id`,
+`week_formula`, `active_schedule_getter(group_id)`,
+`active_pdf_path_getter(group_id)`, `sync_fn(group_id)`,
+`reschedule_group_jobs(group_id)`) off `context.bot_data`, never from
+module-level state. `main.py`'s
 `build_application` is the only place that populates it. If you add a
 handler that needs a new dependency, add the key there — and if you're
 changing what a getter returns, check both `bot.py` (the consumer) and
