@@ -1,5 +1,8 @@
+import asyncio
 import logging
+import os
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -14,7 +17,7 @@ from telegram.ext import (
 
 from schedule_bot import storage
 from schedule_bot.group_links import GroupLinkNotFoundError, SourcePageUnreachableError, resolve_group_pdf_source
-from schedule_bot.pdf_parser import _load_pdf_bytes
+from schedule_bot.pdf_parser import _load_pdf_bytes, parse_schedule
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +100,33 @@ async def receive_group_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ASK_SOURCE_PAGE_URL
 
 
+def _resolve_and_validate_pdf_source(source_page_url: str, group_name: str) -> str:
+    """Resolves the PDF link for group_name from the source page, then
+    fetches and parses the PDF to confirm group_name actually exists as a
+    column in the table. This is a stricter check than link resolution
+    itself: group_links.py matches the group name against the PDF *link*
+    case-insensitively, while pdf_parser.find_group_column_index matches
+    it against the table *header* case-sensitively — a name that passes
+    the former can still fail the latter, which would otherwise create a
+    group that can never sync successfully. Runs entirely off the event
+    loop (see check_and_apply_diff in sync.py for the same pattern): both
+    the link resolution and the PDF fetch+parse are blocking network/CPU
+    calls."""
+    pdf_source_url = resolve_group_pdf_source(source_page_url, group_name)
+    pdf_bytes = _load_pdf_bytes(pdf_source_url)
+    tmp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    try:
+        tmp_file.write(pdf_bytes)
+        tmp_file.close()
+        parse_schedule(tmp_file.name, group_name)
+    finally:
+        try:
+            os.unlink(tmp_file.name)
+        except OSError:
+            pass
+    return pdf_source_url
+
+
 async def receive_source_page_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     group_name = context.user_data["new_group_name"]
     source_page_url = update.message.text.strip()
@@ -109,8 +139,12 @@ async def receive_source_page_url(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
 
     try:
-        pdf_source_url = resolve_group_pdf_source(source_page_url, group_name)
-        _load_pdf_bytes(pdf_source_url)
+        # Blocking network fetch + pdfplumber parsing — offload to a worker
+        # thread so a slow/unreachable source page never freezes the whole
+        # bot's event loop for every chat, not just this conversation.
+        pdf_source_url = await asyncio.to_thread(
+            _resolve_and_validate_pdf_source, source_page_url, group_name
+        )
     except SourcePageUnreachableError:
         await update.message.reply_text(
             "Не удалось открыть страницу со ссылками на расписания. Проверьте ссылку и пришлите её ещё раз."
@@ -120,6 +154,15 @@ async def receive_source_page_url(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(
             f"На этой странице не нашлось ссылки на расписание группы «{group_name}». "
             "Проверьте название группы или пришлите другую ссылку на страницу."
+        )
+        return ASK_SOURCE_PAGE_URL
+    except ValueError:
+        # Raised by pdf_parser.find_group_column_index: the PDF was
+        # reachable and parseable, but group_name isn't an actual column
+        # header in it — the link matched something else by substring.
+        await update.message.reply_text(
+            f"Группа «{group_name}» не найдена в расписании по этой ссылке — "
+            "проверьте точное название группы."
         )
         return ASK_SOURCE_PAGE_URL
     except Exception as error:

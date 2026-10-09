@@ -262,6 +262,7 @@ async def test_receive_source_page_url_creates_group_on_success(conn, monkeypatc
         group_commands_module, "resolve_group_pdf_source", lambda *a, **k: "https://example.com/101.pdf"
     )
     monkeypatch.setattr(group_commands_module, "_load_pdf_bytes", lambda *a, **k: b"%PDF-fake")
+    monkeypatch.setattr(group_commands_module, "parse_schedule", lambda *a, **k: object())
     update = make_message_update(111, "https://example.com/schedules")
     context = make_context_with_config(conn)
     context.user_data["new_group_name"] = "Б-Мв-999"
@@ -277,6 +278,38 @@ async def test_receive_source_page_url_creates_group_on_success(conn, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_receive_source_page_url_reports_group_not_found_in_pdf(conn, monkeypatch):
+    """If the PDF link resolves and the file downloads fine, but group_name
+    is not an actual column header in the parsed table (find_group_column_index
+    raises ValueError), the group must NOT be created and the user must get
+    a clear, retryable error instead of silently creating a group that can
+    never sync."""
+    import schedule_bot.group_commands as group_commands_module
+
+    monkeypatch.setattr(
+        group_commands_module, "resolve_group_pdf_source", lambda *a, **k: "https://example.com/101.pdf"
+    )
+    monkeypatch.setattr(group_commands_module, "_load_pdf_bytes", lambda *a, **k: b"%PDF-fake")
+
+    def _raise_value_error(*args, **kwargs):
+        raise ValueError("Column for group 'Б-Мв-999' not found in table header")
+
+    monkeypatch.setattr(group_commands_module, "parse_schedule", _raise_value_error)
+
+    update = make_message_update(111, "https://example.com/schedules")
+    context = make_context_with_config(conn)
+    context.user_data["new_group_name"] = "Б-Мв-999"
+
+    state = await receive_source_page_url(update, context)
+
+    assert state == ASK_SOURCE_PAGE_URL
+    assert storage.count_groups(conn) == 0
+    update.message.reply_text.assert_awaited_once()
+    (message_text,), _ = update.message.reply_text.call_args
+    assert "Б-Мв-999" in message_text
+
+
+@pytest.mark.asyncio
 async def test_receive_source_page_url_handles_integrity_error_race(conn, monkeypatch):
     """Even if the pre-check for an existing name races with a concurrent
     creation, a sqlite3.IntegrityError from storage.create_group itself must
@@ -287,6 +320,7 @@ async def test_receive_source_page_url_handles_integrity_error_race(conn, monkey
         group_commands_module, "resolve_group_pdf_source", lambda *a, **k: "https://example.com/101.pdf"
     )
     monkeypatch.setattr(group_commands_module, "_load_pdf_bytes", lambda *a, **k: b"%PDF-fake")
+    monkeypatch.setattr(group_commands_module, "parse_schedule", lambda *a, **k: object())
 
     def _raise_integrity_error(*args, **kwargs):
         raise sqlite3.IntegrityError("UNIQUE constraint failed: groups.name")
