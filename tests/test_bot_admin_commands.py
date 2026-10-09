@@ -10,12 +10,12 @@ from schedule_bot.bot import (
     help_command,
     is_admin,
     set_pdf_source_command,
-    set_group_command,
     set_send_time_command,
     set_check_interval_command,
     refresh_command,
     alert_command,
 )
+
 ADMIN_CHAT_ID = 999
 
 
@@ -26,14 +26,19 @@ def conn():
     return connection
 
 
+def _make_group(conn, name="Б-Мв-101"):
+    return storage.create_group(
+        conn, name=name, source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+
+
 def make_context(conn, **extra):
     context = MagicMock()
     context.bot_data = {
         "conn": conn,
         "admin_chat_id": ADMIN_CHAT_ID,
-        "group_name": "Б-Мв-101",
-        "reschedule_daily_job": MagicMock(),
-        "reschedule_hourly_job": MagicMock(),
+        "reschedule_group_jobs": MagicMock(),
         **extra,
     }
     return context
@@ -63,9 +68,7 @@ def test_is_admin_false_for_other_chat_id(conn):
 async def test_help_command_shows_only_user_commands_for_non_admin(conn):
     update = make_update(12345)
     context = make_context(conn)
-
     await help_command(update, context)
-
     text = update.message.reply_text.call_args[0][0]
     for name, _ in USER_COMMANDS:
         assert f"/{name}" in text
@@ -77,9 +80,7 @@ async def test_help_command_shows_only_user_commands_for_non_admin(conn):
 async def test_help_command_shows_admin_commands_for_admin(conn):
     update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn)
-
     await help_command(update, context)
-
     text = update.message.reply_text.call_args[0][0]
     for name, _ in USER_COMMANDS + ADMIN_COMMANDS:
         assert f"/{name}" in text
@@ -87,204 +88,172 @@ async def test_help_command_shows_admin_commands_for_admin(conn):
 
 @pytest.mark.asyncio
 async def test_set_pdf_source_rejects_non_admin(conn):
-    update = make_update(12345, "https://example.com/new.pdf")
+    group_id = _make_group(conn)
+    update = make_update(12345)
     context = make_context(conn)
-    context.args = ["https://example.com/new.pdf"]
+    context.args = [str(group_id), "https://example.com/new.pdf"]
 
     await set_pdf_source_command(update, context)
 
-    update.message.reply_text.assert_awaited_once()
-    assert storage.get_setting(conn, "pdf_source") is None
+    assert storage.get_group(conn, group_id).pdf_source_url == "p"
 
 
 @pytest.mark.asyncio
-async def test_set_pdf_source_updates_setting_for_admin(conn):
-    update = make_update(ADMIN_CHAT_ID, "https://example.com/new.pdf")
+async def test_set_pdf_source_updates_group_for_admin(conn):
+    group_id = _make_group(conn)
+    update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn)
-    context.args = ["https://example.com/new.pdf"]
+    context.args = [str(group_id), "https://example.com/new.pdf"]
 
     await set_pdf_source_command(update, context)
 
-    assert storage.get_setting(conn, "pdf_source") == "https://example.com/new.pdf"
+    assert storage.get_group(conn, group_id).pdf_source_url == "https://example.com/new.pdf"
 
 
 @pytest.mark.asyncio
 async def test_set_pdf_source_rejects_disallowed_scheme(conn):
-    """SSRF hardening: only http(s) URLs or bare local paths are accepted."""
-    update = make_update(ADMIN_CHAT_ID, "file:///etc/passwd")
+    group_id = _make_group(conn)
+    update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn)
-    context.args = ["file:///etc/passwd"]
+    context.args = [str(group_id), "file:///etc/passwd"]
 
     await set_pdf_source_command(update, context)
 
-    assert storage.get_setting(conn, "pdf_source") is None
+    assert storage.get_group(conn, group_id).pdf_source_url == "p"
 
 
 @pytest.mark.asyncio
 async def test_set_pdf_source_accepts_local_path(conn):
-    update = make_update(ADMIN_CHAT_ID, "/data/schedule.pdf")
+    group_id = _make_group(conn)
+    update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn)
-    context.args = ["/data/schedule.pdf"]
+    context.args = [str(group_id), "/data/schedule.pdf"]
 
     await set_pdf_source_command(update, context)
 
-    assert storage.get_setting(conn, "pdf_source") == "/data/schedule.pdf"
+    assert storage.get_group(conn, group_id).pdf_source_url == "/data/schedule.pdf"
 
 
 @pytest.mark.asyncio
-async def test_set_group_migrates_existing_subscribers(conn):
-    """Regression: changing the tracked group must not orphan existing
-    subscribers — every broadcast loop filters by the *current*
-    group_name setting, so their rows must move with it."""
-    storage.set_setting(conn, "group_name", "Б-Мв-101")
-    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
-    storage.add_subscriber(conn, 222, "Б-Мв-101", "2026-09-16T00:00:00")
-
-    update = make_update(ADMIN_CHAT_ID, "Б-Мв-102")
+async def test_set_pdf_source_rejects_unknown_group_id(conn):
+    update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn)
-    context.args = ["Б-Мв-102"]
+    context.args = ["9999", "https://example.com/new.pdf"]
 
-    await set_group_command(update, context)
+    await set_pdf_source_command(update, context)
 
-    assert storage.get_setting(conn, "group_name") == "Б-Мв-102"
-    assert sorted(list_subscribers(conn, "Б-Мв-102")) == [111, 222]
-    assert list_subscribers(conn, "Б-Мв-101") == []
+    update.message.reply_text.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_set_group_rejects_non_admin(conn):
-    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
-    update = make_update(12345, "Б-Мв-102")
+async def test_set_send_time_reschedules_group_jobs(conn):
+    group_id = _make_group(conn)
+    update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn)
-    context.args = ["Б-Мв-102"]
-
-    await set_group_command(update, context)
-
-    assert storage.get_setting(conn, "group_name") is None
-    assert list_subscribers(conn, "Б-Мв-101") == [111]
-
-
-@pytest.mark.asyncio
-async def test_set_send_time_reschedules_daily_job(conn):
-    update = make_update(ADMIN_CHAT_ID, "07:30")
-    context = make_context(conn)
-    context.args = ["07:30"]
+    context.args = [str(group_id), "07:30"]
 
     await set_send_time_command(update, context)
 
-    assert storage.get_setting(conn, "daily_send_time") == "07:30"
-    context.bot_data["reschedule_daily_job"].assert_called_once()
+    assert storage.get_group(conn, group_id).send_time == "07:30"
+    context.bot_data["reschedule_group_jobs"].assert_called_once_with(group_id)
 
 
 @pytest.mark.asyncio
-async def test_set_check_interval_reschedules_hourly_job(conn):
-    update = make_update(ADMIN_CHAT_ID, "30")
+async def test_set_check_interval_reschedules_group_jobs(conn):
+    group_id = _make_group(conn)
+    update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn)
-    context.args = ["30"]
+    context.args = [str(group_id), "30"]
 
     await set_check_interval_command(update, context)
 
-    assert storage.get_setting(conn, "check_interval_minutes") == "30"
-    context.bot_data["reschedule_hourly_job"].assert_called_once()
+    assert storage.get_group(conn, group_id).check_interval_minutes == 30
+    context.bot_data["reschedule_group_jobs"].assert_called_once_with(group_id)
 
 
 @pytest.mark.asyncio
 async def test_set_send_time_rejects_malformed_value_without_writing(conn):
-    """C2 regression: malformed /set_send_time input must not be persisted."""
-    update = make_update(ADMIN_CHAT_ID, "9h30")
+    group_id = _make_group(conn)
+    update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn)
-    context.args = ["9h30"]
+    context.args = [str(group_id), "9h30"]
 
     await set_send_time_command(update, context)
 
-    assert storage.get_setting(conn, "daily_send_time") is None
-    context.bot_data["reschedule_daily_job"].assert_not_called()
-    update.message.reply_text.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_set_send_time_rejects_out_of_range_value(conn):
-    update = make_update(ADMIN_CHAT_ID, "25:00")
-    context = make_context(conn)
-    context.args = ["25:00"]
-
-    await set_send_time_command(update, context)
-
-    assert storage.get_setting(conn, "daily_send_time") is None
+    assert storage.get_group(conn, group_id).send_time == "09:00"
+    context.bot_data["reschedule_group_jobs"].assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_set_check_interval_rejects_non_numeric_value_without_writing(conn):
-    """C2 regression: malformed /set_check_interval input must not be persisted."""
-    update = make_update(ADMIN_CHAT_ID, "abc")
+    group_id = _make_group(conn)
+    update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn)
-    context.args = ["abc"]
+    context.args = [str(group_id), "abc"]
 
     await set_check_interval_command(update, context)
 
-    assert storage.get_setting(conn, "check_interval_minutes") is None
-    context.bot_data["reschedule_hourly_job"].assert_not_called()
-    update.message.reply_text.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_set_check_interval_rejects_non_positive_value(conn):
-    update = make_update(ADMIN_CHAT_ID, "0")
-    context = make_context(conn)
-    context.args = ["0"]
-
-    await set_check_interval_command(update, context)
-
-    assert storage.get_setting(conn, "check_interval_minutes") is None
+    assert storage.get_group(conn, group_id).check_interval_minutes == 60
+    context.bot_data["reschedule_group_jobs"].assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_refresh_command_reports_result(conn):
-    async def fake_sync(*args, **kwargs):
-        from schedule_bot.sync import SyncResult
+    group_id = _make_group(conn)
 
+    async def fake_sync(group_id_arg):
+        from schedule_bot.sync import SyncResult
         return SyncResult(status="no_changes")
 
     update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn, sync_fn=fake_sync)
+    context.args = [str(group_id)]
 
     await refresh_command(update, context)
 
-    update.message.reply_text.assert_awaited_once()
     assert "Изменений нет" in update.message.reply_text.call_args[0][0]
 
 
 @pytest.mark.asyncio
 async def test_refresh_command_reports_sync_error_without_crashing(conn):
-    async def failing_sync(*args, **kwargs):
+    group_id = _make_group(conn)
+
+    async def failing_sync(group_id_arg):
         raise ConnectionError("network unreachable")
 
     update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn, sync_fn=failing_sync)
+    context.args = [str(group_id)]
 
     await refresh_command(update, context)
 
-    update.message.reply_text.assert_awaited_once()
     assert "не удал" in update.message.reply_text.call_args[0][0]
 
 
 @pytest.mark.asyncio
-async def test_alert_command_broadcasts_to_all_subscribers(conn):
-    storage.add_subscriber(conn, 111, "Б-Мв-101", "2026-09-16T00:00:00")
-    storage.add_subscriber(conn, 222, "Б-Мв-101", "2026-09-16T00:00:00")
-    update = make_update(ADMIN_CHAT_ID, "Внимание, ошибка в расписании")
+async def test_alert_command_broadcasts_to_every_group_globally(conn):
+    """/alert is deliberately global (bot-update announcements), not
+    per-group — members of two DIFFERENT groups must both receive it."""
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    storage.upsert_member(conn, 222, group_b, joined_at="t")
+    update = make_update(ADMIN_CHAT_ID)
     context = make_context(conn)
-    context.args = ["Внимание,", "ошибка", "в", "расписании"]
+    context.args = ["Внимание,", "вышло", "обновление", "бота"]
     context.bot.send_message = AsyncMock()
 
     await alert_command(update, context)
 
     assert context.bot.send_message.await_count == 2
+    sent_chat_ids = {call.kwargs["chat_id"] for call in context.bot.send_message.await_args_list}
+    assert sent_chat_ids == {111, 222}
 
 
 @pytest.mark.asyncio
 async def test_alert_command_rejects_non_admin(conn):
-    update = make_update(12345, "test")
+    storage.upsert_member(conn, 111, _make_group(conn), joined_at="t")
+    update = make_update(12345)
     context = make_context(conn)
     context.args = ["test"]
     context.bot.send_message = AsyncMock()

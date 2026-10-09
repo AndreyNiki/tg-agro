@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from urllib.parse import urlparse
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -21,19 +21,19 @@ DAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
 NOOP_CALLBACK_DATA = "noop"
 
 USER_COMMANDS = [
-    ("start", "Подписаться на ежедневную рассылку расписания"),
-    ("stop", "Отписаться от рассылки"),
+    ("start", "Выбрать группу / статус подписки"),
+    ("subscribe", "Включить рассылку расписания"),
+    ("unsubscribe", "Отключить рассылку (группа остаётся закреплённой)"),
     ("schedule", "Показать расписание на выбранный день"),
     ("help", "Список доступных команд"),
 ]
 
 ADMIN_COMMANDS = [
-    ("set_pdf_source", "Изменить источник PDF с расписанием"),
-    ("set_group", "Изменить отслеживаемую группу"),
-    ("set_send_time", "Изменить время ежедневной рассылки (HH:MM)"),
-    ("set_check_interval", "Изменить интервал проверки обновлений (мин.)"),
-    ("refresh", "Принудительно проверить и разослать обновления"),
-    ("alert", "Разослать произвольное сообщение всем подписчикам"),
+    ("set_pdf_source", "Изменить источник PDF группы: <group_id> <url_или_путь>"),
+    ("set_send_time", "Изменить время ежедневной рассылки группы: <group_id> <HH:MM>"),
+    ("set_check_interval", "Изменить интервал проверки группы: <group_id> <минуты>"),
+    ("refresh", "Принудительно проверить и разослать обновления группы: <group_id>"),
+    ("alert", "Разослать объявление всем пользователям бота: <текст>"),
 ]
 
 STALE_SCHEDULE_WARNING = (
@@ -42,8 +42,8 @@ STALE_SCHEDULE_WARNING = (
 )
 
 
-def _stale_warning_prefix(conn) -> str:
-    return STALE_SCHEDULE_WARNING if storage.get_setting(conn, "last_sync_failed_at") else ""
+def _stale_warning_prefix(group) -> str:
+    return STALE_SCHEDULE_WARNING if group and group.last_sync_failed_at else ""
 
 
 def _week_dates(monday: date) -> list[date]:
@@ -89,31 +89,18 @@ async def noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.callback_query.answer()
 
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    conn = context.bot_data["conn"]
-    group_name = context.bot_data["group_name"]
-    chat_id = update.effective_chat.id
-    logger.info("bot: /start from chat_id=%s", chat_id)
-    storage.add_subscriber(conn, chat_id, group_name, datetime.now(timezone.utc).isoformat())
-    await update.message.reply_text(
-        "Вы подписались на ежедневную рассылку расписания. "
-        "Команда /schedule покажет расписание на выбранный день."
-    )
-
-
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    conn = context.bot_data["conn"]
-    chat_id = update.effective_chat.id
-    logger.info("bot: /stop from chat_id=%s", chat_id)
-    storage.remove_subscriber(conn, chat_id)
-    await update.message.reply_text("Подписка отменена.")
-
-
 async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = context.bot_data["conn"]
-    logger.info("bot: /schedule from chat_id=%s", update.effective_chat.id)
-    text = _stale_warning_prefix(conn) + "Выберите день недели:"
-    await update.message.reply_text(text, reply_markup=build_day_keyboard(today_in_configured_timezone(conn)))
+    chat_id = update.effective_chat.id
+    logger.info("bot: /schedule from chat_id=%s", chat_id)
+    member = storage.get_member(conn, chat_id)
+    if member is None:
+        await update.message.reply_text("Сначала выберите группу: /start")
+        return
+    group = storage.get_group(conn, member.group_id)
+    text = _stale_warning_prefix(group) + "Выберите день недели:"
+    today = today_in_configured_timezone(group.timezone if group else None)
+    await update.message.reply_text(text, reply_markup=build_day_keyboard(today))
 
 
 async def day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -122,9 +109,16 @@ async def day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     on_date = day_date_from_callback(query.data)
     day_name = DAY_ORDER[on_date.weekday()]
-    logger.info("bot: day_callback %s (%s) from chat_id=%s", day_name, on_date, update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    logger.info("bot: day_callback %s (%s) from chat_id=%s", day_name, on_date, chat_id)
 
-    schedule = context.bot_data["active_schedule_getter"]()
+    conn = context.bot_data["conn"]
+    member = storage.get_member(conn, chat_id)
+    if member is None:
+        await query.message.reply_text("Сначала выберите группу: /start")
+        return
+
+    schedule = context.bot_data["active_schedule_getter"](member.group_id)
     if schedule is None:
         await query.message.reply_text(
             "Расписание ещё не загружено, попробуйте позже."
@@ -137,7 +131,7 @@ async def day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = format_day_schedule(day_name, on_date, week_type, schedule)
     await query.message.reply_text(text)
 
-    pdf_path = context.bot_data["active_pdf_path_getter"]()
+    pdf_path = context.bot_data["active_pdf_path_getter"](member.group_id)
     if pdf_path is None:
         return
 
@@ -174,44 +168,31 @@ def _is_valid_pdf_source(value: str) -> bool:
     return urlparse(value).scheme in _ALLOWED_PDF_SOURCE_SCHEMES
 
 
+def _resolve_admin_group(conn, group_id_str: str):
+    if not group_id_str.isdigit():
+        return None
+    return storage.get_group(conn, int(group_id_str))
+
+
 async def set_pdf_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("bot: /set_pdf_source from chat_id=%s args=%s", update.effective_chat.id, context.args)
     if not is_admin(update, context):
         await update.message.reply_text("Недостаточно прав.")
         return
-    if not context.args:
-        await update.message.reply_text("Использование: /set_pdf_source <url_или_путь>")
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /set_pdf_source <group_id> <url_или_путь>")
         return
-    value = context.args[0]
+    conn = context.bot_data["conn"]
+    group = _resolve_admin_group(conn, context.args[0])
+    if group is None:
+        await update.message.reply_text("Группа с таким id не найдена.")
+        return
+    value = context.args[1]
     if not _is_valid_pdf_source(value):
         await update.message.reply_text("Неверный источник: разрешены только http(s)-адреса или локальный путь.")
         return
-    storage.set_setting(context.bot_data["conn"], "pdf_source", value)
-    await update.message.reply_text(f"Источник PDF обновлён: {value}")
-
-
-async def set_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("bot: /set_group from chat_id=%s args=%s", update.effective_chat.id, context.args)
-    if not is_admin(update, context):
-        await update.message.reply_text("Недостаточно прав.")
-        return
-    if not context.args:
-        await update.message.reply_text("Использование: /set_group <название>")
-        return
-    conn = context.bot_data["conn"]
-    new_group_name = context.args[0]
-    # Re-point every existing subscriber at the new group; otherwise they'd
-    # be silently dropped from every future broadcast (daily send, change
-    # notifications, /alert), since those all filter subscribers by the
-    # *current* group_name setting.
-    old_group_name = storage.get_setting(conn, "group_name")
-    migrated = 0
-    if old_group_name and old_group_name != new_group_name:
-        migrated = storage.update_subscribers_group(conn, old_group_name, new_group_name)
-    storage.set_setting(conn, "group_name", new_group_name)
-    await update.message.reply_text(
-        f"Группа обновлена: {new_group_name}. Подписчиков перенесено: {migrated}."
-    )
+    storage.update_group_pdf_source_url(conn, group.id, value)
+    await update.message.reply_text(f"Источник PDF группы «{group.name}» обновлён: {value}")
 
 
 _HH_MM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]?\d)$")
@@ -233,16 +214,21 @@ async def set_send_time_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not is_admin(update, context):
         await update.message.reply_text("Недостаточно прав.")
         return
-    if not context.args:
-        await update.message.reply_text("Использование: /set_send_time <HH:MM>")
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /set_send_time <group_id> <HH:MM>")
         return
-    value = context.args[0]
+    conn = context.bot_data["conn"]
+    group = _resolve_admin_group(conn, context.args[0])
+    if group is None:
+        await update.message.reply_text("Группа с таким id не найдена.")
+        return
+    value = context.args[1]
     if not _is_valid_hh_mm(value):
         await update.message.reply_text("Неверный формат времени, используйте HH:MM.")
         return
-    storage.set_setting(context.bot_data["conn"], "daily_send_time", value)
-    context.bot_data["reschedule_daily_job"]()
-    await update.message.reply_text(f"Время ежедневной рассылки обновлено: {value}")
+    storage.update_group_send_time(conn, group.id, value)
+    context.bot_data["reschedule_group_jobs"](group.id)
+    await update.message.reply_text(f"Время ежедневной рассылки группы «{group.name}» обновлено: {value}")
 
 
 async def set_check_interval_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -250,26 +236,39 @@ async def set_check_interval_command(update: Update, context: ContextTypes.DEFAU
     if not is_admin(update, context):
         await update.message.reply_text("Недостаточно прав.")
         return
-    if not context.args:
-        await update.message.reply_text("Использование: /set_check_interval <минуты>")
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /set_check_interval <group_id> <минуты>")
         return
-    value = context.args[0]
+    conn = context.bot_data["conn"]
+    group = _resolve_admin_group(conn, context.args[0])
+    if group is None:
+        await update.message.reply_text("Группа с таким id не найдена.")
+        return
+    value = context.args[1]
     if not _is_valid_positive_int(value):
         await update.message.reply_text("Неверное значение интервала, укажите положительное целое число минут.")
         return
-    storage.set_setting(context.bot_data["conn"], "check_interval_minutes", value)
-    context.bot_data["reschedule_hourly_job"]()
-    await update.message.reply_text(f"Интервал проверки обновлён: {value} мин.")
+    storage.update_group_check_interval(conn, group.id, int(value))
+    context.bot_data["reschedule_group_jobs"](group.id)
+    await update.message.reply_text(f"Интервал проверки группы «{group.name}» обновлён: {value} мин.")
 
 
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("bot: /refresh from chat_id=%s", update.effective_chat.id)
+    logger.info("bot: /refresh from chat_id=%s args=%s", update.effective_chat.id, context.args)
     if not is_admin(update, context):
         await update.message.reply_text("Недостаточно прав.")
         return
+    if not context.args:
+        await update.message.reply_text("Использование: /refresh <group_id>")
+        return
+    conn = context.bot_data["conn"]
+    group = _resolve_admin_group(conn, context.args[0])
+    if group is None:
+        await update.message.reply_text("Группа с таким id не найдена.")
+        return
     sync_fn = context.bot_data["sync_fn"]
     try:
-        result = await sync_fn()
+        result = await sync_fn(group.id)
     except Exception as error:
         logger.warning("bot: /refresh sync failed: %s", error)
         await update.message.reply_text(
@@ -285,21 +284,20 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("bot: /alert from chat_id=%s", update.effective_chat.id)
+    logger.info("bot: /alert from chat_id=%s args=%s", update.effective_chat.id, context.args)
     if not is_admin(update, context):
         await update.message.reply_text("Недостаточно прав.")
         return
     if not context.args:
         await update.message.reply_text("Использование: /alert <текст>")
         return
-    text = " ".join(context.args)
     conn = context.bot_data["conn"]
-    group_name = context.bot_data["group_name"]
-    subscribers = storage.list_subscribers(conn, group_name)
-    for chat_id in subscribers:
+    text = " ".join(context.args)
+    chat_ids = storage.list_all_member_chat_ids(conn)
+    for chat_id in chat_ids:
         try:
             await send_with_retry(lambda chat_id=chat_id: context.bot.send_message(chat_id=chat_id, text=text))
         except Exception as error:
             logger.warning("bot: failed to alert chat_id=%s: %s", chat_id, error)
         await asyncio.sleep(SEND_PACING_SECONDS)
-    await update.message.reply_text(f"Сообщение разослано {len(subscribers)} подписчикам.")
+    await update.message.reply_text(f"Сообщение разослано {len(chat_ids)} пользователям.")

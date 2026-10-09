@@ -9,8 +9,6 @@ from schedule_bot.bot import (
     DAY_LABELS,
     build_day_keyboard,
     day_date_from_callback,
-    start_command,
-    stop_command,
     schedule_command,
     day_callback,
 )
@@ -61,16 +59,24 @@ def test_day_date_from_callback_rejects_bad_data():
         day_date_from_callback("nope")
 
 
-def make_context(conn, week_formula, active_schedule, pdf_cache_path="/tmp/does-not-matter.pdf"):
+def make_context(conn, group_id=None, week_formula=None, active_schedule=None, pdf_cache_path="/tmp/does-not-matter.pdf"):
     context = MagicMock()
     context.bot_data = {
         "conn": conn,
-        "group_name": "Б-Мв-101",
         "week_formula": week_formula,
-        "active_schedule_getter": lambda: active_schedule,
-        "active_pdf_path_getter": lambda: pdf_cache_path,
+        "active_schedule_getter": lambda gid: active_schedule,
+        "active_pdf_path_getter": lambda gid: pdf_cache_path,
     }
     return context
+
+
+def _make_group_and_member(conn, chat_id=111, name="Б-Мв-101"):
+    group_id = storage.create_group(
+        conn, name=name, source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, chat_id, group_id, joined_at="t", subscribed=True)
+    return group_id
 
 
 @pytest.fixture
@@ -95,10 +101,12 @@ def sample_schedule():
 
 @pytest.mark.asyncio
 async def test_schedule_command_sends_day_keyboard(conn, sample_schedule):
+    group_id = _make_group_and_member(conn, chat_id=111)
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
     update = MagicMock()
+    update.effective_chat.id = 111
     update.message.reply_text = AsyncMock()
-    context = make_context(conn, formula, sample_schedule)
+    context = make_context(conn, group_id=group_id, week_formula=formula, active_schedule=sample_schedule)
 
     await schedule_command(update, context)
 
@@ -109,11 +117,13 @@ async def test_schedule_command_sends_day_keyboard(conn, sample_schedule):
 
 @pytest.mark.asyncio
 async def test_schedule_command_warns_when_last_sync_failed(conn, sample_schedule):
-    storage.set_setting(conn, "last_sync_failed_at", "2026-09-17T08:00:00+00:00")
+    group_id = _make_group_and_member(conn, chat_id=111)
+    storage.set_group_last_sync_failed_at(conn, group_id, "2026-09-17T08:00:00+00:00")
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
     update = MagicMock()
+    update.effective_chat.id = 111
     update.message.reply_text = AsyncMock()
-    context = make_context(conn, formula, sample_schedule)
+    context = make_context(conn, group_id=group_id, week_formula=formula, active_schedule=sample_schedule)
 
     await schedule_command(update, context)
 
@@ -123,10 +133,12 @@ async def test_schedule_command_warns_when_last_sync_failed(conn, sample_schedul
 
 @pytest.mark.asyncio
 async def test_schedule_command_no_warning_when_last_sync_ok(conn, sample_schedule):
+    group_id = _make_group_and_member(conn, chat_id=111)
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
     update = MagicMock()
+    update.effective_chat.id = 111
     update.message.reply_text = AsyncMock()
-    context = make_context(conn, formula, sample_schedule)
+    context = make_context(conn, group_id=group_id, week_formula=formula, active_schedule=sample_schedule)
 
     await schedule_command(update, context)
 
@@ -136,15 +148,17 @@ async def test_schedule_command_no_warning_when_last_sync_ok(conn, sample_schedu
 
 @pytest.mark.asyncio
 async def test_day_callback_sends_text_and_image_when_lessons_exist(conn, sample_schedule, monkeypatch):
+    group_id = _make_group_and_member(conn, chat_id=111)
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
     wednesday = date(2026, 9, 16)
 
     update = MagicMock()
+    update.effective_chat.id = 111
     update.callback_query.data = f"day:{wednesday.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
-    context = make_context(conn, formula, sample_schedule)
+    context = make_context(conn, group_id=group_id, week_formula=formula, active_schedule=sample_schedule)
 
     import schedule_bot.bot as bot_module
     monkeypatch.setattr(bot_module, "render_day_image", lambda *args, **kwargs: b"fake-png-bytes")
@@ -158,15 +172,17 @@ async def test_day_callback_sends_text_and_image_when_lessons_exist(conn, sample
 
 @pytest.mark.asyncio
 async def test_day_callback_skips_image_when_no_lessons(conn, sample_schedule, monkeypatch):
+    group_id = _make_group_and_member(conn, chat_id=111)
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
     monday = date(2026, 9, 14)  # not present in sample_schedule.days
 
     update = MagicMock()
+    update.effective_chat.id = 111
     update.callback_query.data = f"day:{monday.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
-    context = make_context(conn, formula, sample_schedule)
+    context = make_context(conn, group_id=group_id, week_formula=formula, active_schedule=sample_schedule)
 
     import schedule_bot.bot as bot_module
     monkeypatch.setattr(bot_module, "render_day_image", lambda *args, **kwargs: None)
@@ -180,15 +196,17 @@ async def test_day_callback_skips_image_when_no_lessons(conn, sample_schedule, m
 @pytest.mark.asyncio
 async def test_day_callback_replies_gracefully_when_no_active_schedule(conn):
     """C1 regression: fresh deploy with no schedule version must not crash."""
+    group_id = _make_group_and_member(conn, chat_id=111)
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
     wednesday = date(2026, 9, 16)
 
     update = MagicMock()
+    update.effective_chat.id = 111
     update.callback_query.data = f"day:{wednesday.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
-    context = make_context(conn, formula, active_schedule=None, pdf_cache_path=None)
+    context = make_context(conn, group_id=group_id, week_formula=formula, active_schedule=None, pdf_cache_path=None)
 
     await day_callback(update, context)
 
@@ -199,15 +217,17 @@ async def test_day_callback_replies_gracefully_when_no_active_schedule(conn):
 
 @pytest.mark.asyncio
 async def test_day_callback_skips_image_when_pdf_path_is_none(conn, sample_schedule):
+    group_id = _make_group_and_member(conn, chat_id=111)
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
     wednesday = date(2026, 9, 16)
 
     update = MagicMock()
+    update.effective_chat.id = 111
     update.callback_query.data = f"day:{wednesday.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
-    context = make_context(conn, formula, sample_schedule, pdf_cache_path=None)
+    context = make_context(conn, group_id=group_id, week_formula=formula, active_schedule=sample_schedule, pdf_cache_path=None)
 
     await day_callback(update, context)
 
@@ -218,15 +238,17 @@ async def test_day_callback_skips_image_when_pdf_path_is_none(conn, sample_sched
 @pytest.mark.asyncio
 async def test_day_callback_swallows_render_error_and_sends_text_only(conn, sample_schedule, monkeypatch):
     """I4 regression: a missing/stale cached PDF must not crash the response."""
+    group_id = _make_group_and_member(conn, chat_id=111)
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
     wednesday = date(2026, 9, 16)
 
     update = MagicMock()
+    update.effective_chat.id = 111
     update.callback_query.data = f"day:{wednesday.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
-    context = make_context(conn, formula, sample_schedule, pdf_cache_path="/does/not/exist.pdf")
+    context = make_context(conn, group_id=group_id, week_formula=formula, active_schedule=sample_schedule, pdf_cache_path="/does/not/exist.pdf")
 
     import schedule_bot.bot as bot_module
 
@@ -246,6 +268,7 @@ async def test_day_callback_uses_exact_picked_date_not_today(conn):
     """Regression: the callback now carries an explicit date, so picking a
     day from the next-week section must use that exact date for both the
     week-type computation and the message header — not date.today()."""
+    group_id = _make_group_and_member(conn, chat_id=111)
     schedule = Schedule(
         table_x0=0.0,
         table_x1=500.0,
@@ -267,13 +290,14 @@ async def test_day_callback_uses_exact_picked_date_not_today(conn):
     picked_date = date(2026, 9, 21)  # a Monday picked from the "next week" section
 
     update = MagicMock()
+    update.effective_chat.id = 111
     update.callback_query.data = f"day:{picked_date.isoformat()}"
     update.callback_query.answer = AsyncMock()
     update.callback_query.message.reply_text = AsyncMock()
     update.callback_query.message.reply_photo = AsyncMock()
 
     formula = RecordingFormula()
-    context = make_context(conn, formula, schedule, pdf_cache_path=None)
+    context = make_context(conn, group_id=group_id, week_formula=formula, active_schedule=schedule, pdf_cache_path=None)
 
     await day_callback(update, context)
 
