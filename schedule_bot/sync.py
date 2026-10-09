@@ -11,6 +11,7 @@ from typing import Awaitable, Callable
 
 from schedule_bot import storage
 from schedule_bot.diff import compute_diff
+from schedule_bot.group_links import resolve_group_pdf_source
 from schedule_bot.pdf_parser import (
     _load_pdf_bytes,
     parse_schedule,
@@ -49,20 +50,23 @@ def _write_cache(pdf_bytes: bytes, pdf_cache_dir: str, group_name: str) -> str:
 
 
 def _fetch_and_parse_with_retries(
-    pdf_source: str, group_name: str
-) -> tuple[bytes | None, object | None, Exception | None]:
-    # I5: read the PDF exactly once per attempt (avoids a TOCTOU mismatch
-    # between the bytes that get parsed and the bytes that end up cached on
-    # disk when pdf_source is a remote URL that could change between two
-    # fetches). Retried up to MAX_SYNC_ATTEMPTS times since a fetch/parse
-    # failure is often a transient network blip.
+    pdf_source: str, group_name: str, source_page_url: str | None
+) -> tuple[bytes | None, object | None, str, Exception | None]:
+    # I5: read the PDF exactly once per attempt. Retried up to
+    # MAX_SYNC_ATTEMPTS times since a fetch/parse failure is often a
+    # transient network blip — OR the institute renamed the PDF file
+    # (the motivating bug): on the first failure, try re-discovering the
+    # link once via source_page_url before burning the rest of the retry
+    # budget against a now-permanently-dead URL.
+    current_source = pdf_source
+    reconnect_attempted = False
     pdf_bytes = None
     new_schedule = None
     last_error: Exception | None = None
     for attempt in range(MAX_SYNC_ATTEMPTS):
         tmp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
         try:
-            pdf_bytes = _load_pdf_bytes(pdf_source)
+            pdf_bytes = _load_pdf_bytes(current_source)
             tmp_file.write(pdf_bytes)
             tmp_file.close()
             new_schedule = parse_schedule(tmp_file.name, group_name)
@@ -72,47 +76,53 @@ def _fetch_and_parse_with_retries(
             last_error = exc
             logger.warning(
                 "sync: attempt %d/%d failed for %r (group %r): %s",
-                attempt + 1,
-                MAX_SYNC_ATTEMPTS,
-                pdf_source,
-                group_name,
-                exc,
+                attempt + 1, MAX_SYNC_ATTEMPTS, current_source, group_name, exc,
             )
+            if not reconnect_attempted and source_page_url:
+                reconnect_attempted = True
+                try:
+                    current_source = resolve_group_pdf_source(source_page_url, group_name)
+                    logger.info(
+                        "sync: re-discovered pdf link for group %r: %s", group_name, current_source
+                    )
+                except Exception as reconnect_error:
+                    logger.warning(
+                        "sync: 404-reconnect failed for group %r: %s", group_name, reconnect_error
+                    )
         finally:
             try:
                 os.unlink(tmp_file.name)
             except OSError:
                 pass
-    return pdf_bytes, new_schedule, last_error
+    return pdf_bytes, new_schedule, current_source, last_error
 
 
-async def check_and_apply_diff(
-    conn, pdf_source: str, group_name: str, pdf_cache_dir: str, notify: Notifier
-) -> SyncResult:
+async def check_and_apply_diff(conn, group, pdf_cache_dir: str, notify: Notifier) -> SyncResult:
+    group_id, pdf_source, group_name = group.id, group.pdf_source_url, group.name
     logger.info("sync: checking %r for group %r", pdf_source, group_name)
-    active = storage.get_active_version(conn, group_name)
+    active = storage.get_active_version(conn, group_id)
     old_schedule = schedule_from_dict(json.loads(active.payload_json)) if active else None
 
     # Network fetch + pdfplumber parsing are blocking calls; running them
     # directly here would freeze the whole asyncio event loop (including
     # python-telegram-bot's own polling/HTTP traffic) for their entire
     # duration. Offload to a worker thread so the loop stays responsive.
-    pdf_bytes, new_schedule, last_error = await asyncio.to_thread(
-        _fetch_and_parse_with_retries, pdf_source, group_name
+    pdf_bytes, new_schedule, resolved_source, last_error = await asyncio.to_thread(
+        _fetch_and_parse_with_retries, pdf_source, group_name, group.source_page_url
     )
 
+    if resolved_source != pdf_source:
+        storage.update_group_pdf_source_url(conn, group_id, resolved_source)
+
     if last_error is not None:
-        storage.set_setting(conn, "last_sync_failed_at", datetime.now(timezone.utc).isoformat())
+        storage.set_group_last_sync_failed_at(conn, group_id, datetime.now(timezone.utc).isoformat())
         logger.error(
             "sync: all %d attempts failed for %r (group %r): %s",
-            MAX_SYNC_ATTEMPTS,
-            pdf_source,
-            group_name,
-            last_error,
+            MAX_SYNC_ATTEMPTS, pdf_source, group_name, last_error,
         )
         raise last_error
 
-    storage.set_setting(conn, "last_sync_failed_at", "")
+    storage.set_group_last_sync_failed_at(conn, group_id, "")
 
     changes = compute_diff(old_schedule, new_schedule)
 
@@ -123,20 +133,17 @@ async def check_and_apply_diff(
     cache_path = _write_cache(pdf_bytes, pdf_cache_dir, group_name)
     payload_json = json.dumps(schedule_to_dict(new_schedule))
     parsed_at = datetime.now(timezone.utc).isoformat()
-    storage.insert_new_version(conn, group_name, payload_json, cache_path, parsed_at)
+    storage.insert_new_version(conn, group_id, payload_json, cache_path, parsed_at)
 
     # I7: the previous active version has just been superseded; its
-    # cached PDF file is no longer referenced by any row, so delete it
-    # to stop the cache directory from growing without bound.
+    # cached PDF file is no longer referenced by any row.
     if active is not None and active.pdf_cache_path:
         try:
             Path(active.pdf_cache_path).unlink(missing_ok=True)
         except OSError as exc:
             logger.warning(
                 "sync: failed to delete superseded cache file %r for group %r: %s",
-                active.pdf_cache_path,
-                group_name,
-                exc,
+                active.pdf_cache_path, group_name, exc,
             )
 
     if active is None:
@@ -144,11 +151,11 @@ async def check_and_apply_diff(
         return SyncResult(status="initial")
 
     logger.info("sync: schedule changed for group %r: %s", group_name, changes)
-    weektype_url = storage.get_setting(conn, "weektype_url")
     message = "Расписание изменилось. Актуальную версию смотрите на сайте"
+    weektype_url = storage.get_setting(conn, "weektype_url")
     if weektype_url:
         message += ":\n" + weektype_url
-    for chat_id in storage.list_subscribers(conn, group_name):
+    for chat_id in storage.list_group_members(conn, group_id):
         try:
             await notify(chat_id, message)
         except Exception as exc:
