@@ -378,7 +378,7 @@ async def test_start_command_shows_status_when_group_already_attached(conn):
     text = update.message.reply_text.call_args[0][0]
     assert "Б-Мв-101" in text
     _, kwargs = update.message.reply_text.call_args
-    assert "reply_markup" not in kwargs or kwargs["reply_markup"] is None
+    assert "reply_markup" in kwargs
 
 
 @pytest.mark.asyncio
@@ -506,3 +506,20 @@ async def test_group_select_callback_still_instant_for_open_unrestricted_group(c
     await group_select_callback(update, context)
 
     assert storage.get_member(conn, 111).group_id == group_id
+
+
+@pytest.mark.asyncio
+async def test_start_command_with_group_offers_menu_button(conn):
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 111, group_id, joined_at="t", subscribed=True)
+    update = make_message_update(111, "/start")
+    context = make_context_with_config(conn)
+
+    await start_command(update, context)
+
+    _, kwargs = update.message.reply_text.call_args
+    buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any(b.callback_data == "menu:root:_" for b in buttons)

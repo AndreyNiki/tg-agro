@@ -28,6 +28,7 @@ GROUPS_PER_PAGE = 8
 SELECT_PREFIX = "grp:select:"
 PAGE_PREFIX = "grp:page:"
 CREATE_CALLBACK_DATA = "grp:create"
+_MENU_ROOT_CALLBACK_DATA = "menu:root:_"
 
 SELECT_CALLBACK_PATTERN = r"^grp:select:\d+$"
 PAGE_CALLBACK_PATTERN = r"^grp:page:\d+$"
@@ -263,8 +264,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     group = storage.get_group(conn, member.group_id)
     group_name = group.name if group else "—"
     status = "подписаны на рассылку" if member.subscribed else "отписаны от рассылки (группа закреплена)"
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Меню", callback_data=_MENU_ROOT_CALLBACK_DATA)]])
     await update.message.reply_text(
-        f"Вы {status} группы «{group_name}». Команда /schedule покажет расписание на выбранный день."
+        f"Вы {status} группы «{group_name}». Команда /schedule покажет расписание на выбранный день.",
+        reply_markup=keyboard,
     )
 
 
