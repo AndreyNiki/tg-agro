@@ -8,7 +8,7 @@ from schedule_bot import elections, storage
 from schedule_bot.bot import _resolve_admin_group, is_admin
 from schedule_bot.group_commands import GROUPS_PER_PAGE
 from schedule_bot.join_requests import notify_approvers
-from schedule_bot.telegram_utils import send_with_retry
+from schedule_bot.telegram_utils import reply, send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +41,13 @@ async def change_group_command(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
     member = storage.get_member(conn, chat_id)
     if member is None:
-        await update.message.reply_text("Сначала выберите группу: /start")
+        await reply(update, "Сначала выберите группу: /start")
         return
     if storage.get_pending_request_for_chat(conn, chat_id) is not None:
-        await update.message.reply_text("У вас уже есть заявка на рассмотрении.")
+        await reply(update, "У вас уже есть заявка на рассмотрении.")
         return
     keyboard = build_change_group_keyboard(conn, member.group_id)
-    await update.message.reply_text("Выберите новую группу:", reply_markup=keyboard)
+    await reply(update, "Выберите новую группу:", reply_markup=keyboard)
 
 
 async def change_group_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

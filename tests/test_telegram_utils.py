@@ -1,9 +1,9 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telegram.error import RetryAfter, TimedOut
 
-from schedule_bot.telegram_utils import send_with_retry
+from schedule_bot.telegram_utils import send_with_retry, reply
 
 
 @pytest.mark.asyncio
@@ -59,3 +59,25 @@ async def test_send_with_retry_propagates_second_failure():
 
     with pytest.raises(RuntimeError):
         await send_with_retry(send)
+
+
+@pytest.mark.asyncio
+async def test_reply_uses_update_message_when_present():
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    update.callback_query = None
+
+    await reply(update, "hello", reply_markup="kb")
+
+    update.message.reply_text.assert_awaited_once_with("hello", reply_markup="kb")
+
+
+@pytest.mark.asyncio
+async def test_reply_falls_back_to_callback_query_message_when_no_message():
+    update = MagicMock()
+    update.message = None
+    update.callback_query.message.reply_text = AsyncMock()
+
+    await reply(update, "hello", reply_markup="kb")
+
+    update.callback_query.message.reply_text.assert_awaited_once_with("hello", reply_markup="kb")

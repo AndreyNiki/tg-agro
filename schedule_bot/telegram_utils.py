@@ -29,3 +29,14 @@ async def send_with_retry(send: Callable[[], Awaitable[T]]) -> T:
         logger.warning("telegram: request timed out, retrying once")
         await asyncio.sleep(1)
         return await send()
+
+
+async def reply(update, text, **kwargs) -> None:
+    """Replies through whichever of update.message/update.callback_query.message
+    is actually populated — lets a handler written for a plain /command
+    invocation also work unchanged when the menu calls it directly with
+    a callback-query Update."""
+    if update.message is not None:
+        await update.message.reply_text(text, **kwargs)
+    else:
+        await update.callback_query.message.reply_text(text, **kwargs)

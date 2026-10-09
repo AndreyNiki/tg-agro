@@ -19,6 +19,7 @@ from schedule_bot import storage
 from schedule_bot.group_links import GroupLinkNotFoundError, SourcePageUnreachableError, resolve_group_pdf_source
 from schedule_bot.join_requests import create_join_request_and_notify, requires_approval
 from schedule_bot.pdf_parser import _load_pdf_bytes, parse_schedule
+from schedule_bot.telegram_utils import reply
 
 logger = logging.getLogger(__name__)
 
@@ -272,10 +273,10 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     chat_id = update.effective_chat.id
     member = storage.get_member(conn, chat_id)
     if member is None:
-        await update.message.reply_text("Сначала выберите группу: /start")
+        await reply(update, "Сначала выберите группу: /start")
         return
     storage.set_member_subscribed(conn, chat_id, True)
-    await update.message.reply_text("Рассылка расписания включена.")
+    await reply(update, "Рассылка расписания включена.")
 
 
 async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -283,9 +284,9 @@ async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = update.effective_chat.id
     member = storage.get_member(conn, chat_id)
     if member is None:
-        await update.message.reply_text("Вы ещё не выбрали группу: /start")
+        await reply(update, "Вы ещё не выбрали группу: /start")
         return
     storage.set_member_subscribed(conn, chat_id, False)
-    await update.message.reply_text(
+    await reply(update,
         "Рассылка отключена. Группа остаётся закреплённой, /schedule продолжит работать."
     )

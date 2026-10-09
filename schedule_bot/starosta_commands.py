@@ -6,7 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from schedule_bot import elections, storage
-from schedule_bot.telegram_utils import SEND_PACING_SECONDS, send_with_retry
+from schedule_bot.telegram_utils import SEND_PACING_SECONDS, reply, send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -16,25 +16,25 @@ async def starosta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id = update.effective_chat.id
     member = storage.get_member(conn, chat_id)
     if member is None:
-        await update.message.reply_text("Сначала выберите группу: /start")
+        await reply(update, "Сначала выберите группу: /start")
         return
     group = storage.get_group(conn, member.group_id)
 
     if storage.get_open_election(conn, group.id) is not None:
-        await update.message.reply_text("По вашей группе уже идёт голосование. Посмотреть его можно командой /votes.")
+        await reply(update, "По вашей группе уже идёт голосование. Посмотреть его можно командой /votes.")
         return
 
     if group.starosta_chat_id is None:
         member_count = len(storage.list_group_members(conn, group.id, subscribed_only=False))
         if not elections.has_enough_members(member_count):
-            await update.message.reply_text(
+            await reply(update,
                 "В группе недостаточно участников для голосования, пригласите несколько человек и попробуйте снова."
             )
             return
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("🙋 Я староста", callback_data="starosta:nominate_self")]]
         )
-        await update.message.reply_text("В группе ещё нет старосты.", reply_markup=keyboard)
+        await reply(update, "В группе ещё нет старосты.", reply_markup=keyboard)
         return
 
     is_current_starosta = group.starosta_chat_id == chat_id
@@ -42,12 +42,12 @@ async def starosta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     remaining = elections.cooldown_remaining(group.last_starosta_change_at, datetime.now(timezone.utc))
     if remaining is not None:
         next_date = (datetime.now(timezone.utc) + remaining).date().isoformat()
-        await update.message.reply_text(f"Старосту можно сменить не раньше {next_date}.")
+        await reply(update, f"Старосту можно сменить не раньше {next_date}.")
         return
 
     member_count = len(storage.list_group_members(conn, group.id, subscribed_only=False))
     if not elections.has_enough_members(member_count):
-        await update.message.reply_text(
+        await reply(update,
             "В группе недостаточно участников для голосования, пригласите несколько человек и попробуйте снова."
         )
         return
@@ -56,7 +56,7 @@ async def starosta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         [[InlineKeyboardButton("🔁 Староста изменился", callback_data="starosta:change")]]
     )
     status_line = f"Вы староста группы «{group.name}»." if is_current_starosta else "В группе есть староста."
-    await update.message.reply_text(status_line, reply_markup=keyboard)
+    await reply(update, status_line, reply_markup=keyboard)
 
 
 async def _broadcast_election(bot, conn, group, election_id: int, candidate_chat_id: int, kind: str) -> None:
@@ -213,12 +213,12 @@ async def votes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     conn = context.bot_data["conn"]
     member = storage.get_member(conn, update.effective_chat.id)
     if member is None:
-        await update.message.reply_text("Сначала выберите группу: /start")
+        await reply(update, "Сначала выберите группу: /start")
         return
 
     open_elections = storage.list_open_elections(conn, member.group_id)
     if not open_elections:
-        await update.message.reply_text("Нет открытых голосований.")
+        await reply(update, "Нет открытых голосований.")
         return
 
     for election in open_elections:
@@ -234,4 +234,4 @@ async def votes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             ]
         )
         text = f"{kind_label}: {elections.format_candidate_label(candidate)} ({count}/2)"
-        await update.message.reply_text(text, reply_markup=keyboard)
+        await reply(update, text, reply_markup=keyboard)

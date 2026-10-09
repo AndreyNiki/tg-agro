@@ -11,7 +11,7 @@ from schedule_bot import elections, storage
 from schedule_bot.formatting import format_day_schedule
 from schedule_bot.pdf_parser import DAY_ORDER
 from schedule_bot.screenshot import render_day_image
-from schedule_bot.telegram_utils import SEND_PACING_SECONDS, send_with_retry
+from schedule_bot.telegram_utils import SEND_PACING_SECONDS, reply, send_with_retry
 from schedule_bot.timeutil import today_in_configured_timezone
 
 logger = logging.getLogger(__name__)
@@ -105,12 +105,12 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     logger.info("bot: /schedule from chat_id=%s", chat_id)
     member = storage.get_member(conn, chat_id)
     if member is None:
-        await update.message.reply_text("Сначала выберите группу: /start")
+        await reply(update, "Сначала выберите группу: /start")
         return
     group = storage.get_group(conn, member.group_id)
     text = _stale_warning_prefix(group) + "Выберите день недели:"
     today = today_in_configured_timezone(group.timezone if group else None)
-    await update.message.reply_text(text, reply_markup=build_day_keyboard(today))
+    await reply(update, text, reply_markup=build_day_keyboard(today))
 
 
 async def day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

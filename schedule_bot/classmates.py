@@ -5,7 +5,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from schedule_bot import storage
 from schedule_bot.elections import format_candidate_label
-from schedule_bot.telegram_utils import send_with_retry
+from schedule_bot.telegram_utils import reply, send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ async def classmates_command(update, context) -> None:
     chat_id = update.effective_chat.id
     member = storage.get_member(conn, chat_id)
     if member is None:
-        await update.message.reply_text("Сначала выберите группу: /start")
+        await reply(update, "Сначала выберите группу: /start")
         return
 
     group = storage.get_group(conn, member.group_id)
@@ -42,10 +42,10 @@ async def classmates_command(update, context) -> None:
             label = format_member_line(m, m.chat_id == group.starosta_chat_id)
             rows.append([InlineKeyboardButton(f"❌ Исключить {label}", callback_data=f"exclude:select:{m.chat_id}")])
         if rows:
-            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+            await reply(update, text, reply_markup=InlineKeyboardMarkup(rows))
             return
 
-    await update.message.reply_text(text)
+    await reply(update, text)
 
 
 async def exclude_select_callback(update, context) -> None:
