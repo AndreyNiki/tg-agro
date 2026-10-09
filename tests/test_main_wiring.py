@@ -483,3 +483,18 @@ def test_build_application_registers_menu_handlers(conn, config, monkeypatch):
     assert len(message_handlers) >= 1
 
     application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+def test_build_application_registers_report_and_faq_commands(conn, config, monkeypatch):
+    _patch_week_formula(monkeypatch)
+
+    application = build_application(config, conn)
+
+    command_names = set()
+    for handlers in application.handlers.values():
+        for handler in handlers:
+            if hasattr(handler, "commands"):
+                command_names.update(handler.commands)
+    assert {"report", "faq"}.issubset(command_names)
+
+    application.bot_data["_scheduler"].shutdown(wait=False)

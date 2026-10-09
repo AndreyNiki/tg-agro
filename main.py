@@ -27,6 +27,8 @@ from schedule_bot.bot import (
     set_starosta_command,
 )
 from schedule_bot.classmates import classmates_command, exclude_abort_callback, exclude_confirm_callback, exclude_select_callback
+from schedule_bot.faq import faq_command
+from schedule_bot.report import report_command
 from schedule_bot.change_group_commands import (
     change_group_abort_callback,
     change_group_command,
@@ -220,6 +222,8 @@ def build_application(config: Config, conn) -> Application:
 
     application.add_handler(CommandHandler("menu", menu_command))
     application.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
+    application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CommandHandler("faq", faq_command))
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, pending_action_followup))
 
