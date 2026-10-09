@@ -303,3 +303,136 @@ async def test_menu_callback_starosta_notify_prompts_for_text(conn):
 
     assert context.user_data["pending_menu_action"] == {"action": "notify", "group_id": group_id}
     update.callback_query.message.reply_text.assert_awaited_once()
+
+
+from schedule_bot.menu import pending_action_followup
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_root_shows_admin_keyboard(conn):
+    update = make_callback_update(ADMIN_CHAT_ID, "menu:admin:root")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any("Объявление" in t for t in texts)
+    assert any("Настройки группы" in t for t in texts)
+    assert any("Старосты" in t for t in texts)
+    assert any("Открытость" in t for t in texts)
+    assert any("Заявки" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_alert_prompts_for_text(conn):
+    update = make_callback_update(ADMIN_CHAT_ID, "menu:admin:alert")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    assert context.user_data["pending_menu_action"] == {"action": "alert"}
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_groupsettings_shows_group_picker(conn):
+    _make_group(conn, "A")
+    update = make_callback_update(ADMIN_CHAT_ID, "menu:admin:groupsettings")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert "A" in texts
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_pickgroup_shows_group_settings_submenu(conn):
+    group_id = _make_group(conn, "A")
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:pickgroup:{group_id}")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any("PDF" in t for t in texts)
+    assert any("рассылки" in t for t in texts)
+    assert any("Интервал" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_setpdf_prompts_with_group_id(conn):
+    group_id = _make_group(conn, "A")
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:setpdf:{group_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    assert context.user_data["pending_menu_action"] == {"action": "set_pdf_source", "group_id": group_id}
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_toggleclosed_flips_picked_group(conn):
+    group_id = _make_group(conn, "A")
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:toggleclosed:{group_id}")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    assert storage.get_group(conn, group_id).is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_removestarosta_clears_picked_group(conn):
+    group_id = _make_group(conn, "A")
+    storage.update_group_starosta(conn, group_id, 111)
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:removestarosta:{group_id}")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    assert storage.get_group(conn, group_id).starosta_chat_id is None
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_applies_set_send_time(conn):
+    group_id = _make_group(conn, "A")
+    update = MagicMock()
+    update.effective_chat.id = ADMIN_CHAT_ID
+    update.message.text = "07:45"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "set_send_time", "group_id": group_id}}
+    context.bot_data["reschedule_group_jobs"] = MagicMock()
+
+    await pending_action_followup(update, context)
+
+    assert storage.get_group(conn, group_id).send_time == "07:45"
+    assert "pending_menu_action" not in context.user_data
+    update.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_applies_alert_globally(conn):
+    group_id = _make_group(conn, "A")
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    update = MagicMock()
+    update.effective_chat.id = ADMIN_CHAT_ID
+    update.message.text = "Обновление"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "alert"}}
+    context.bot.send_message = AsyncMock()
+
+    await pending_action_followup(update, context)
+
+    context.bot.send_message.assert_awaited_once()
+    assert "pending_menu_action" not in context.user_data

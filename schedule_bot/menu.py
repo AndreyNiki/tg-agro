@@ -2,7 +2,17 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from schedule_bot import elections, storage
-from schedule_bot.bot import schedule_command
+from schedule_bot.bot import (
+    _apply_alert,
+    _apply_notify,
+    _apply_remove_starosta,
+    _apply_set_check_interval,
+    _apply_set_pdf_source,
+    _apply_set_send_time,
+    _apply_set_starosta,
+    _resolve_admin_group,
+    schedule_command,
+)
 from schedule_bot.change_group_commands import _build_requests_messages, change_group_command
 from schedule_bot.classmates import classmates_command
 from schedule_bot.group_commands import subscribe_command, unsubscribe_command
@@ -139,6 +149,178 @@ async def _handle_starosta_section(update, context, conn, chat_id: int, action: 
         return
 
 
+GROUPS_PER_MENU_PAGE = 8
+
+
+def _admin_root_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📢 Объявление всем", callback_data="menu:admin:alert")],
+            [InlineKeyboardButton("🔧 Настройки группы", callback_data="menu:admin:groupsettings")],
+            [InlineKeyboardButton("👑 Старосты", callback_data="menu:admin:starostas")],
+            [InlineKeyboardButton("🔒 Открытость группы", callback_data="menu:admin:closedtoggle")],
+            [InlineKeyboardButton("📥 Заявки", callback_data="menu:admin:requests")],
+            [InlineKeyboardButton("◀️ Назад", callback_data=ROOT_CALLBACK_DATA)],
+        ]
+    )
+
+
+def _build_admin_group_picker(conn, pick_action: str, page: int = 0) -> InlineKeyboardMarkup:
+    offset = page * GROUPS_PER_MENU_PAGE
+    groups = storage.list_groups(conn, limit=GROUPS_PER_MENU_PAGE, offset=offset)
+    total = storage.count_groups(conn)
+    rows = [[InlineKeyboardButton(g.name, callback_data=f"menu:{pick_action}:{g.id}")] for g in groups]
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("« Назад", callback_data=f"menu:{pick_action}page:{page - 1}"))
+    if offset + GROUPS_PER_MENU_PAGE < total:
+        nav_row.append(InlineKeyboardButton("Вперёд »", callback_data=f"menu:{pick_action}page:{page + 1}"))
+    if nav_row:
+        rows.append(nav_row)
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="menu:admin:root")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _group_settings_submenu(group_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Источник PDF", callback_data=f"menu:setpdf:{group_id}")],
+            [InlineKeyboardButton("Время рассылки", callback_data=f"menu:setsendtime:{group_id}")],
+            [InlineKeyboardButton("Интервал проверки", callback_data=f"menu:setinterval:{group_id}")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu:admin:groupsettings")],
+        ]
+    )
+
+
+def _starosta_pick_submenu(group_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Назначить", callback_data=f"menu:setstarosta:{group_id}")],
+            [InlineKeyboardButton("Снять", callback_data=f"menu:removestarosta:{group_id}")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu:admin:starostas")],
+        ]
+    )
+
+
+async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_id: int, action: str) -> None:
+    query = update.callback_query
+    if chat_id != admin_chat_id:
+        await query.message.reply_text("Недостаточно прав.")
+        return
+
+    if action == "root":
+        await query.edit_message_text("Админ-меню:", reply_markup=_admin_root_keyboard())
+        return
+    if action == "alert":
+        context.user_data["pending_menu_action"] = {"action": "alert"}
+        await query.message.reply_text("Отправьте текст объявления:")
+        return
+    if action == "groupsettings":
+        await query.edit_message_text("Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickgroup"))
+        return
+    if action == "starostas":
+        await query.edit_message_text(
+            "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickstarostagroup")
+        )
+        return
+    if action == "closedtoggle":
+        await query.edit_message_text(
+            "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "toggleclosed")
+        )
+        return
+    if action == "requests":
+        await query.edit_message_text(
+            "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickrequestsgroup")
+        )
+        return
+
+
+async def _handle_group_scoped_pick(update, context, conn, action: str, group_id: int) -> None:
+    query = update.callback_query
+    group = storage.get_group(conn, group_id)
+    if group is None:
+        await query.message.reply_text("Эта группа больше не существует.")
+        return
+
+    if action == "pickgroup":
+        await query.edit_message_text(
+            f"Настройки группы «{group.name}»:", reply_markup=_group_settings_submenu(group_id)
+        )
+        return
+    if action == "pickstarostagroup":
+        await query.edit_message_text(
+            f"Старосты группы «{group.name}»:", reply_markup=_starosta_pick_submenu(group_id)
+        )
+        return
+    if action == "toggleclosed":
+        storage.update_group_closed(conn, group.id, not group.is_closed)
+        await query.edit_message_text(f"Группа «{group.name}»: состояние обновлено.")
+        return
+    if action == "pickrequestsgroup":
+        entries = _build_requests_messages(conn, group)
+        if not entries:
+            await query.message.reply_text("Нет заявок на рассмотрении.")
+            return
+        for text, keyboard in entries:
+            await query.message.reply_text(text, reply_markup=keyboard)
+        return
+    if action == "setpdf":
+        context.user_data["pending_menu_action"] = {"action": "set_pdf_source", "group_id": group_id}
+        await query.message.reply_text("Отправьте новый источник PDF:")
+        return
+    if action == "setsendtime":
+        context.user_data["pending_menu_action"] = {"action": "set_send_time", "group_id": group_id}
+        await query.message.reply_text("Отправьте новое время (HH:MM):")
+        return
+    if action == "setinterval":
+        context.user_data["pending_menu_action"] = {"action": "set_check_interval", "group_id": group_id}
+        await query.message.reply_text("Отправьте новый интервал в минутах:")
+        return
+    if action == "setstarosta":
+        context.user_data["pending_menu_action"] = {"action": "set_starosta", "group_id": group_id}
+        await query.message.reply_text("Отправьте chat_id нового старосты:")
+        return
+    if action == "removestarosta":
+        await query.edit_message_text(_apply_remove_starosta(conn, group))
+        return
+
+
+async def pending_action_followup(update, context) -> None:
+    pending = context.user_data.get("pending_menu_action")
+    if pending is None:
+        return
+
+    conn = context.bot_data["conn"]
+    action = pending["action"]
+    value = update.message.text
+    del context.user_data["pending_menu_action"]
+
+    if action == "alert":
+        text = await _apply_alert(conn, context.bot, value)
+        await update.message.reply_text(text)
+        return
+
+    group = storage.get_group(conn, pending["group_id"])
+    if group is None:
+        await update.message.reply_text("Эта группа больше не существует.")
+        return
+
+    if action == "set_pdf_source":
+        await update.message.reply_text(_apply_set_pdf_source(conn, group, value))
+    elif action == "set_send_time":
+        await update.message.reply_text(
+            _apply_set_send_time(conn, group, value, context.bot_data["reschedule_group_jobs"])
+        )
+    elif action == "set_check_interval":
+        await update.message.reply_text(
+            _apply_set_check_interval(conn, group, value, context.bot_data["reschedule_group_jobs"])
+        )
+    elif action == "set_starosta":
+        await update.message.reply_text(await _apply_set_starosta(conn, context.bot, group, value))
+    elif action == "notify":
+        await update.message.reply_text(await _apply_notify(conn, context.bot, group, value))
+
+
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -146,6 +328,14 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat_id = update.effective_chat.id
     admin_chat_id = context.bot_data["admin_chat_id"]
     _, section, action = query.data.split(":", 2)
+
+    group_scoped_actions = {
+        "pickgroup", "pickstarostagroup", "toggleclosed", "pickrequestsgroup",
+        "setpdf", "setsendtime", "setinterval", "setstarosta", "removestarosta",
+    }
+    if section in group_scoped_actions:
+        await _handle_group_scoped_pick(update, context, conn, section, int(action))
+        return
 
     if section == "root":
         await query.edit_message_text("Главное меню:", reply_markup=build_root_keyboard(conn, chat_id, admin_chat_id))
@@ -158,4 +348,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if section == "starosta":
         await _handle_starosta_section(update, context, conn, chat_id, action)
+        return
+    if section == "admin":
+        await _handle_admin_section(update, context, conn, chat_id, admin_chat_id, action)
         return
