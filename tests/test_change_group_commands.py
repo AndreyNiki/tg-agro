@@ -220,3 +220,79 @@ async def test_change_request_reject_by_admin_keeps_member_in_place(conn):
 
     assert storage.get_member(conn, 111).group_id == group_a
     assert storage.get_group_change_request(conn, request_id).status == "rejected"
+
+
+from schedule_bot.change_group_commands import requests_command
+
+
+@pytest.mark.asyncio
+async def test_requests_command_starosta_sees_own_group_pending_requests(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 555, group_b, joined_at="t")
+    storage.update_group_starosta(conn, group_b, 555)
+    storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+
+    update = make_message_update(555)
+    context = make_context(conn)
+    context.args = []
+
+    await requests_command(update, context)
+
+    update.message.reply_text.assert_awaited_once()
+    _, kwargs = update.message.reply_text.call_args
+    assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_requests_command_reports_empty_list(conn):
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 555, group_b, joined_at="t")
+    storage.update_group_starosta(conn, group_b, 555)
+
+    update = make_message_update(555)
+    context = make_context(conn)
+    context.args = []
+
+    await requests_command(update, context)
+
+    assert "Нет заявок" in update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_requests_command_rejects_plain_member(conn):
+    group_a = _make_group(conn, "A")
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    update = make_message_update(111)
+    context = make_context(conn)
+    context.args = []
+
+    await requests_command(update, context)
+
+    assert "не староста" in update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_requests_command_admin_requires_group_id(conn):
+    update = make_message_update(ADMIN_CHAT_ID)
+    context = make_context(conn)
+    context.args = []
+
+    await requests_command(update, context)
+
+    assert "Использование" in update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_requests_command_admin_with_group_id_sees_requests(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+
+    update = make_message_update(ADMIN_CHAT_ID)
+    context = make_context(conn)
+    context.args = [str(group_b)]
+
+    await requests_command(update, context)
+
+    update.message.reply_text.assert_awaited_once()

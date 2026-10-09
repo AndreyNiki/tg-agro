@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from schedule_bot import storage
+from schedule_bot import elections, storage
+from schedule_bot.bot import _resolve_admin_group, is_admin
 from schedule_bot.group_commands import GROUPS_PER_PAGE
+from schedule_bot.join_requests import notify_approvers
 from schedule_bot.telegram_utils import send_with_retry
 
 logger = logging.getLogger(__name__)
@@ -85,32 +87,6 @@ async def change_group_abort_callback(update: Update, context: ContextTypes.DEFA
     await query.message.reply_text("Отменено.")
 
 
-async def _notify_approvers(bot, conn, target_group, request_id: int, requester_chat_id: int, admin_chat_id: int) -> None:
-    requester = storage.get_member(conn, requester_chat_id)
-    label = requester.telegram_username or requester.display_name or "Неизвестный"
-    text = f"Заявка на переход в группу «{target_group.name}» от {label}. Одобрить / Отклонить"
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("✅ Одобрить", callback_data=f"chgreq:approve:{request_id}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"chgreq:reject:{request_id}"),
-            ]
-        ]
-    )
-    recipients = {admin_chat_id}
-    if target_group.starosta_chat_id is not None:
-        recipients.add(target_group.starosta_chat_id)
-    for recipient_chat_id in recipients:
-        try:
-            await send_with_retry(
-                lambda recipient_chat_id=recipient_chat_id: bot.send_message(
-                    chat_id=recipient_chat_id, text=text, reply_markup=keyboard
-                )
-            )
-        except Exception as error:
-            logger.warning("change_group_commands: failed to notify chat_id=%s: %s", recipient_chat_id, error)
-
-
 async def change_group_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -135,7 +111,7 @@ async def change_group_confirm_callback(update: Update, context: ContextTypes.DE
     request_id = storage.create_group_change_request(
         conn, chat_id, member.group_id, target_group_id, datetime.now(timezone.utc).isoformat()
     )
-    await _notify_approvers(context.bot, conn, target_group, request_id, chat_id, context.bot_data["admin_chat_id"])
+    await notify_approvers(context.bot, conn, target_group, request_id, chat_id, context.bot_data["admin_chat_id"])
     await query.message.reply_text("Заявка отправлена, ожидайте решения.")
 
 
@@ -208,3 +184,40 @@ async def change_request_reject_callback(update: Update, context: ContextTypes.D
     except Exception as error:
         logger.warning("change_group_commands: failed to notify requester chat_id=%s: %s", request.chat_id, error)
     await query.message.reply_text("Заявка отклонена.")
+
+
+async def requests_command(update, context) -> None:
+    conn = context.bot_data["conn"]
+    if is_admin(update, context):
+        if not context.args:
+            await update.message.reply_text("Использование: /requests <group_id>")
+            return
+        group = _resolve_admin_group(conn, context.args[0])
+        if group is None:
+            await update.message.reply_text("Группа с таким id не найдена.")
+            return
+    else:
+        group = storage.get_group_where_starosta(conn, update.effective_chat.id)
+        if group is None:
+            await update.message.reply_text("Вы не староста ни одной группы.")
+            return
+
+    pending = storage.list_pending_requests_for_group(conn, group.id)
+    if not pending:
+        await update.message.reply_text("Нет заявок на рассмотрении.")
+        return
+
+    for request in pending:
+        requester = storage.get_member(conn, request.chat_id)
+        label = elections.format_candidate_label(requester) if requester is not None else "Неизвестный"
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Одобрить", callback_data=f"chgreq:approve:{request.id}"),
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"chgreq:reject:{request.id}"),
+                ]
+            ]
+        )
+        await update.message.reply_text(
+            f"Заявка от {label} на переход в группу «{group.name}».", reply_markup=keyboard
+        )
