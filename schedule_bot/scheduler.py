@@ -221,14 +221,26 @@ def reschedule_group_jobs(scheduler, conn, config, bot, group_id: int, week_form
     schedule_group_jobs(scheduler, conn, config, bot, group, week_formula_holder, lock)
 
 
-def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder, lock: asyncio.Lock | None = None) -> AsyncIOScheduler:
+def build_scheduler(
+    conn, config, bot, week_formula_holder: WeekFormulaHolder, locks: dict[int, asyncio.Lock] | None = None
+) -> AsyncIOScheduler:
     # Each group gets its OWN lock, never shared with another group's jobs —
     # a shared single lock would serialize sync across unrelated groups
     # (different `active` schedule_versions rows, different cache files),
-    # which defeats the point of per-group job pairs. The `lock` parameter
-    # is accepted for backward-compatible call sites only and is NOT reused
-    # across groups here; each group_id gets its own lazily-created lock.
-    locks: dict[int, asyncio.Lock] = {}
+    # which defeats the point of per-group job pairs.
+    #
+    # `locks` is an externally-owned {group_id: Lock} dict, normally
+    # created once in main.py's build_application and also used by its
+    # sync_fn (manual /refresh) and reschedule_group_jobs callback — this
+    # is what guarantees a manual /refresh for a group and that SAME
+    # group's own scheduled hourly/daily job always serialize against each
+    # other via the identical Lock object, not just two different locks
+    # that happen to both exist. If no dict is supplied (e.g. scheduler-
+    # only tests that don't care about cross-call-site locking), a fresh
+    # one is created and used only internally for this scheduler's own
+    # per-group isolation.
+    if locks is None:
+        locks = {}
 
     scheduler = AsyncIOScheduler(timezone=config.default_timezone)
 

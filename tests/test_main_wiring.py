@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock
@@ -300,3 +301,98 @@ async def test_post_init_backfill_isolates_per_chat_failures(conn, config, monke
     assert storage.get_member(conn, 111).telegram_username is None
 
     application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_build_application_shares_one_lock_per_group_between_refresh_and_scheduled_jobs(
+    conn, config, monkeypatch, tmp_path
+):
+    """Regression test for the Task 12 review's Critical finding: a
+    manual /refresh (sync_fn) and that SAME group's own scheduled
+    hourly/daily job used to lock on two DIFFERENT asyncio.Lock objects —
+    build_scheduler kept its own internal {group_id: Lock} dict, separate
+    from main.py's single module-wide sync_lock — so they could run
+    check_and_apply_diff concurrently for this group (double-apply,
+    double-broadcast, cache-file race). They must now share the exact
+    same Lock object for a group that already exists when
+    build_application/build_scheduler runs at startup.
+
+    This creates the group BEFORE build_application so it's picked up by
+    build_scheduler's own startup loop (not by a later
+    reschedule_group_jobs_cb call) — that startup path is exactly where
+    the bug lived.
+
+    check_and_apply_diff is stubbed out (fast AsyncMock) so the only
+    thing that can make sync_fn block is lock contention itself — a real
+    PDF parse call would also take long enough to look "blocked" within
+    a short sleep() window even on a DIFFERENT, unlocked Lock object,
+    which would make this test pass for the wrong reason (confirmed by
+    temporarily reverting the fix with a real PDF parse: the test still
+    passed, a false negative) and defeat the point of the regression
+    test."""
+    _patch_week_formula(monkeypatch)
+
+    group_id = storage.create_group(
+        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+
+    application = build_application(config, conn)
+    scheduler = application.bot_data["_scheduler"]
+    sync_fn = application.bot_data["sync_fn"]
+
+    from schedule_bot.sync import SyncResult
+
+    stub = AsyncMock(return_value=SyncResult(status="no_changes"))
+    monkeypatch.setattr("main.check_and_apply_diff", stub)
+
+    job_lock = scheduler.get_job(f"hourly_check_{group_id}").args[-1]
+    assert isinstance(job_lock, asyncio.Lock)
+
+    # Acquire the scheduled job's lock first (uncontended acquire on an
+    # asyncio.Lock completes without yielding to the event loop, so this
+    # is guaranteed to win before any background scheduler job runs).
+    await job_lock.acquire()
+    try:
+        task = asyncio.ensure_future(sync_fn(group_id))
+        await asyncio.sleep(0.05)
+        # If sync_fn used a DIFFERENT lock object, the stubbed
+        # check_and_apply_diff (near-instant) would have already run
+        # while job_lock is held — proving the bug. With the fix, sync_fn
+        # must still be blocked waiting on the identical lock object, so
+        # the stub must not have been called yet.
+        assert not task.done()
+        stub.assert_not_awaited()
+    finally:
+        job_lock.release()
+
+    await asyncio.wait_for(task, timeout=5)
+    stub.assert_awaited_once()
+
+    scheduler.shutdown(wait=False)
+
+
+def test_build_application_still_gives_different_groups_independent_locks(conn, config, monkeypatch):
+    """Guard against re-introducing Task 11's original bug while fixing
+    the above: group_locks must still hand out a DISTINCT Lock per
+    group_id — a single shared lock across ALL groups would defeat the
+    whole point of per-group job isolation."""
+    _patch_week_formula(monkeypatch)
+
+    group_a = storage.create_group(
+        conn, name="A", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    group_b = storage.create_group(
+        conn, name="B", source_page_url="u", pdf_source_url="p",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+
+    application = build_application(config, conn)
+    scheduler = application.bot_data["_scheduler"]
+
+    lock_a = scheduler.get_job(f"hourly_check_{group_a}").args[-1]
+    lock_b = scheduler.get_job(f"hourly_check_{group_b}").args[-1]
+    assert lock_a is not lock_b
+
+    scheduler.shutdown(wait=False)

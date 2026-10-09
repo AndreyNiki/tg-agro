@@ -98,7 +98,22 @@ def build_application(config: Config, conn) -> Application:
     application.bot_data["active_schedule_getter"] = lambda group_id: _load_active_schedule(conn, group_id)
     application.bot_data["active_pdf_path_getter"] = lambda group_id: _load_active_pdf_path(conn, group_id)
 
-    sync_lock = asyncio.Lock()
+    # One Lock per group_id, lazily created and shared by EVERY call site
+    # that can run check_and_apply_diff for that group: manual /refresh
+    # (sync_fn, below), the scheduler's own hourly_check_job/daily_send_job
+    # (via the SAME dict object passed into build_scheduler), and any job
+    # scheduled for a brand-new group via reschedule_group_jobs_cb. Using
+    # one shared dict (rather than each call site creating its own lock)
+    # is what guarantees a manual /refresh and that group's own scheduled
+    # sync can never run check_and_apply_diff concurrently — a
+    # per-call-site lock would only coincidentally overlap, and previously
+    # didn't: build_scheduler used to keep its own separate locks dict,
+    # so a startup-scheduled job and /refresh for the same group used
+    # different lock objects and could race (double-apply, double-
+    # broadcast, and a cache-file read/unlink race). Different group_ids
+    # still get independent locks from each other via setdefault, so
+    # unrelated groups' syncs are never serialized against one another.
+    group_locks: dict[int, asyncio.Lock] = {}
 
     async def sync_fn(group_id: int):
         group = storage.get_group(conn, group_id)
@@ -108,7 +123,8 @@ def build_application(config: Config, conn) -> Application:
         async def notify(chat_id, text):
             await send_with_retry(lambda: application.bot.send_message(chat_id=chat_id, text=text))
 
-        async with sync_lock:
+        lock = group_locks.setdefault(group_id, asyncio.Lock())
+        async with lock:
             return await check_and_apply_diff(conn, group, config.pdf_cache_dir, notify)
 
     application.bot_data["sync_fn"] = sync_fn
@@ -116,8 +132,9 @@ def build_application(config: Config, conn) -> Application:
     scheduler_holder: dict = {}
 
     def reschedule_group_jobs_cb(group_id: int) -> None:
+        lock = group_locks.setdefault(group_id, asyncio.Lock())
         reschedule_group_jobs(
-            scheduler_holder["scheduler"], conn, config, application.bot, group_id, week_formula_holder, sync_lock
+            scheduler_holder["scheduler"], conn, config, application.bot, group_id, week_formula_holder, lock
         )
 
     application.bot_data["reschedule_group_jobs"] = reschedule_group_jobs_cb
@@ -138,14 +155,13 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("alert", alert_command))
 
-    # NOTE: build_scheduler's `lock` parameter is dead for this call site —
-    # as of Task 11's scheduler.py rewrite, build_scheduler creates its own
-    # lazily-created per-group lock dict internally and never reads the
-    # `lock` argument at all (see schedule_bot/scheduler.py's docstring on
-    # build_scheduler). Passing sync_lock here would do nothing but imply
-    # a connection between this module-wide lock and per-group scheduled
-    # jobs that doesn't exist — so it's deliberately omitted.
-    scheduler_holder["scheduler"] = build_scheduler(conn, config, application.bot, week_formula_holder)
+    # Pass the SAME group_locks dict used by sync_fn/reschedule_group_jobs_cb
+    # above, so every group that already exists at startup gets its
+    # scheduled jobs wired to the identical Lock object a manual /refresh
+    # for that group will use — not a separate, internally-created lock.
+    scheduler_holder["scheduler"] = build_scheduler(
+        conn, config, application.bot, week_formula_holder, locks=group_locks
+    )
     application.bot_data["_scheduler"] = scheduler_holder["scheduler"]
 
     return application
