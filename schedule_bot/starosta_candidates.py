@@ -88,6 +88,16 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     group = storage.get_group(conn, member.group_id)
 
+    if group.starosta_chat_id is None:
+        await query.message.reply_text("В группе больше нет старосты — используйте /starosta.")
+        return
+
+    remaining = elections.cooldown_remaining(group.last_starosta_change_at, datetime.now(timezone.utc))
+    if remaining is not None:
+        next_date = (datetime.now(timezone.utc) + remaining).date().isoformat()
+        await query.message.reply_text(f"Старосту можно сменить не раньше {next_date}.")
+        return
+
     if storage.get_open_election(conn, group.id) is not None:
         await query.message.reply_text("Голосование уже идёт.")
         return
@@ -97,6 +107,10 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.message.reply_text(
             "В группе недостаточно участников для голосования, пригласите несколько человек и попробуйте снова."
         )
+        return
+
+    if candidate_chat_id not in storage.list_group_members(conn, group.id, subscribed_only=False):
+        await query.message.reply_text("Этот участник больше не в вашей группе.")
         return
 
     election_id = storage.create_election(

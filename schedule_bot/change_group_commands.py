@@ -163,6 +163,12 @@ async def change_request_approve_callback(update: Update, context: ContextTypes.
     now = datetime.now(timezone.utc).isoformat()
     storage.decide_group_change_request(conn, request_id, "approved", now)
     storage.upsert_member(conn, request.chat_id, request.to_group_id, joined_at=now, subscribed=True)
+
+    from_group = storage.get_group(conn, request.from_group_id)
+    if from_group is not None and from_group.starosta_chat_id == request.chat_id:
+        storage.cancel_open_elections_for_group(conn, from_group.id, now)
+        storage.update_group_starosta(conn, from_group.id, None)
+        storage.set_group_last_starosta_change_at(conn, from_group.id, now)
     try:
         await send_with_retry(
             lambda: context.bot.send_message(

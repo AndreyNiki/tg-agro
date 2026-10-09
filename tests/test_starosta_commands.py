@@ -163,6 +163,56 @@ async def test_election_approve_same_chat_id_twice_does_not_double_count(conn):
 
 
 @pytest.mark.asyncio
+async def test_election_approve_refuses_voter_no_longer_in_group(conn):
+    # Finding 4 regression: a chat_id that moved to a different group must
+    # not be able to approve an election in their OLD group.
+    group_id = _make_group(conn)
+    _add_members(conn, group_id, [111, 222, 333])
+    other_group_id = _make_group(conn, "Б-Мв-102")
+    election_id = storage.create_election(conn, group_id, "initial", 111, 111, "t")
+    storage.upsert_member(conn, 222, other_group_id, joined_at="t")
+
+    update = make_callback_update(222, f"election:approve:{election_id}")
+    context = make_context(conn)
+
+    await election_approve_callback(update, context)
+
+    assert storage.count_election_approvals(conn, election_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_election_approve_refuses_candidate_voting_for_self(conn):
+    # Finding 5 regression: the candidate should not count as one of the
+    # required approvals — spec requires candidate + at least 2 voters.
+    group_id = _make_group(conn)
+    _add_members(conn, group_id, [111, 222, 333])
+    election_id = storage.create_election(conn, group_id, "initial", 111, 111, "t")
+
+    update = make_callback_update(111, f"election:approve:{election_id}")
+    context = make_context(conn)
+
+    await election_approve_callback(update, context)
+
+    assert storage.count_election_approvals(conn, election_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_starosta_command_offers_change_button_to_current_starosta(conn):
+    # Finding 6 regression: the current starosta must be able to start a
+    # change vote (self-nomination is allowed by spec).
+    group_id = _make_group(conn)
+    _add_members(conn, group_id, [111, 222, 333])
+    storage.update_group_starosta(conn, group_id, 111)
+    update = make_message_update(111)
+    context = make_context(conn)
+
+    await starosta_command(update, context)
+
+    _, kwargs = update.message.reply_text.call_args
+    assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
 async def test_election_reject_does_not_write_anything(conn):
     group_id = _make_group(conn)
     _add_members(conn, group_id, [111, 222, 333])

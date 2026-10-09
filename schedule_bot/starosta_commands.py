@@ -37,9 +37,7 @@ async def starosta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("В группе ещё нет старосты.", reply_markup=keyboard)
         return
 
-    if group.starosta_chat_id == chat_id:
-        await update.message.reply_text(f"Вы староста группы «{group.name}».")
-        return
+    is_current_starosta = group.starosta_chat_id == chat_id
 
     remaining = elections.cooldown_remaining(group.last_starosta_change_at, datetime.now(timezone.utc))
     if remaining is not None:
@@ -57,7 +55,8 @@ async def starosta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("🔁 Староста изменился", callback_data="starosta:change")]]
     )
-    await update.message.reply_text("В группе есть староста.", reply_markup=keyboard)
+    status_line = f"Вы староста группы «{group.name}»." if is_current_starosta else "В группе есть староста."
+    await update.message.reply_text(status_line, reply_markup=keyboard)
 
 
 async def _broadcast_election(bot, conn, group, election_id: int, candidate_chat_id: int, kind: str) -> None:
@@ -187,6 +186,15 @@ async def election_approve_callback(update: Update, context: ContextTypes.DEFAUL
     election = storage.get_election(conn, election_id)
     if election is None or election.status != "open":
         await query.message.reply_text("Это голосование уже завершено.")
+        return
+
+    member = storage.get_member(conn, chat_id)
+    if member is None or member.group_id != election.group_id:
+        await query.message.reply_text("Вы больше не в этой группе.")
+        return
+
+    if chat_id == election.candidate_chat_id:
+        await query.message.reply_text("Вы не можете голосовать за себя.")
         return
 
     storage.add_election_approval(conn, election_id, chat_id, datetime.now(timezone.utc).isoformat())

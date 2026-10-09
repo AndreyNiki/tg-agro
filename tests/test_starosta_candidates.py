@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -94,6 +95,7 @@ async def test_abort_callback_replies_cancelled(conn):
 @pytest.mark.asyncio
 async def test_confirm_callback_creates_election_and_broadcasts(conn):
     group_id = _make_group_with_members(conn, 3)
+    storage.update_group_starosta(conn, group_id, 102)
     update = make_callback_update(100, "starcand:confirm:101")
     context = make_context(conn)
 
@@ -109,6 +111,7 @@ async def test_confirm_callback_creates_election_and_broadcasts(conn):
 @pytest.mark.asyncio
 async def test_confirm_callback_refuses_when_vote_already_started_meanwhile(conn):
     group_id = _make_group_with_members(conn, 3)
+    storage.update_group_starosta(conn, group_id, 102)
     storage.create_election(conn, group_id, "change", 102, 102, "t")
     update = make_callback_update(100, "starcand:confirm:101")
     context = make_context(conn)
@@ -121,6 +124,7 @@ async def test_confirm_callback_refuses_when_vote_already_started_meanwhile(conn
 @pytest.mark.asyncio
 async def test_confirm_callback_refuses_when_membership_shrinks_below_minimum(conn):
     group_id = _make_group_with_members(conn, 3)
+    storage.update_group_starosta(conn, group_id, 100)
     other_group_id = storage.create_group(
         conn, name="Б-Мв-102", source_page_url="u2", pdf_source_url="p2",
         send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
@@ -131,6 +135,59 @@ async def test_confirm_callback_refuses_when_membership_shrinks_below_minimum(co
     storage.upsert_member(conn, 101, other_group_id, joined_at="t", subscribed=True)
     storage.upsert_member(conn, 102, other_group_id, joined_at="t", subscribed=True)
 
+    update = make_callback_update(100, "starcand:confirm:101")
+    context = make_context(conn)
+
+    await confirm_callback(update, context)
+
+    assert storage.get_open_election(conn, group_id) is None
+    assert context.bot.send_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_confirm_callback_refuses_when_cooldown_still_active(conn):
+    # Finding 1 regression: starosta_change_callback's cooldown check is a
+    # pure UI step and writes nothing, so confirm_callback must re-check the
+    # cooldown itself — otherwise a stale confirm button bypasses it.
+    group_id = _make_group_with_members(conn, 3)
+    storage.update_group_starosta(conn, group_id, 102)
+    storage.set_group_last_starosta_change_at(
+        conn, group_id, datetime.now(timezone.utc).isoformat()
+    )
+    update = make_callback_update(100, "starcand:confirm:101")
+    context = make_context(conn)
+
+    await confirm_callback(update, context)
+
+    assert storage.get_open_election(conn, group_id) is None
+    assert context.bot.send_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_confirm_callback_refuses_when_group_has_no_starosta(conn):
+    # Finding 1 regression: the "has a starosta" check in
+    # starosta_change_callback is just as stale by confirm time.
+    group_id = _make_group_with_members(conn, 3)
+    update = make_callback_update(100, "starcand:confirm:101")
+    context = make_context(conn)
+
+    await confirm_callback(update, context)
+
+    assert storage.get_open_election(conn, group_id) is None
+    assert context.bot.send_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_confirm_callback_refuses_when_candidate_left_the_group(conn):
+    # Finding 3 regression: candidate_chat_id from callback_data must still
+    # be a current member of the caller's group.
+    group_id = _make_group_with_members(conn, 3)
+    storage.update_group_starosta(conn, group_id, 102)
+    other_group_id = storage.create_group(
+        conn, name="Б-Мв-103", source_page_url="u3", pdf_source_url="p3",
+        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+    )
+    storage.upsert_member(conn, 101, other_group_id, joined_at="t", subscribed=True)
     update = make_callback_update(100, "starcand:confirm:101")
     context = make_context(conn)
 

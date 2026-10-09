@@ -190,6 +190,24 @@ async def test_change_request_approve_rejects_unauthorized_caller(conn):
 
 
 @pytest.mark.asyncio
+async def test_change_request_approve_clears_starosta_of_origin_group(conn):
+    # Finding 2 regression: if the requester was the starosta of their OLD
+    # group, that group must not keep pointing at a departed starosta.
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    storage.update_group_starosta(conn, group_a, 111)
+    request_id = storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+    update = make_callback_update(ADMIN_CHAT_ID, f"chgreq:approve:{request_id}")
+    context = make_context(conn)
+
+    await change_request_approve_callback(update, context)
+
+    assert storage.get_member(conn, 111).group_id == group_b
+    assert storage.get_group(conn, group_a).starosta_chat_id is None
+
+
+@pytest.mark.asyncio
 async def test_change_request_reject_by_admin_keeps_member_in_place(conn):
     group_a = _make_group(conn, "A")
     group_b = _make_group(conn, "B")
