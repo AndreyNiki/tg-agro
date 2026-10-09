@@ -1,13 +1,13 @@
 import asyncio
 import logging
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from schedule_bot import storage
+from schedule_bot import elections, storage
 from schedule_bot.formatting import format_day_schedule
 from schedule_bot.pdf_parser import DAY_ORDER
 from schedule_bot.screenshot import render_day_image
@@ -34,6 +34,8 @@ ADMIN_COMMANDS = [
     ("set_check_interval", "Изменить интервал проверки группы: <group_id> <минуты>"),
     ("refresh", "Принудительно проверить и разослать обновления группы: <group_id>"),
     ("alert", "Разослать объявление всем пользователям бота: <текст>"),
+    ("set_starosta", "Назначить старосту группы: <group_id> <chat_id>"),
+    ("remove_starosta", "Снять старосту группы: <group_id>"),
 ]
 
 STALE_SCHEDULE_WARNING = (
@@ -301,3 +303,52 @@ async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             logger.warning("bot: failed to alert chat_id=%s: %s", chat_id, error)
         await asyncio.sleep(SEND_PACING_SECONDS)
     await update.message.reply_text(f"Сообщение разослано {len(chat_ids)} пользователям.")
+
+
+async def set_starosta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("bot: /set_starosta from chat_id=%s args=%s", update.effective_chat.id, context.args)
+    if not is_admin(update, context):
+        await update.message.reply_text("Недостаточно прав.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /set_starosta <group_id> <chat_id>")
+        return
+    conn = context.bot_data["conn"]
+    group = _resolve_admin_group(conn, context.args[0])
+    if group is None:
+        await update.message.reply_text("Группа с таким id не найдена.")
+        return
+    if not context.args[1].isdigit():
+        await update.message.reply_text("chat_id должен быть числом.")
+        return
+    new_starosta_chat_id = int(context.args[1])
+    now = datetime.now(timezone.utc).isoformat()
+    storage.cancel_open_elections_for_group(conn, group.id, now)
+    storage.update_group_starosta(conn, group.id, new_starosta_chat_id)
+    storage.set_group_last_starosta_change_at(conn, group.id, now)
+    welcome = elections.format_starosta_welcome(group.name, "admin")
+    try:
+        await send_with_retry(lambda: context.bot.send_message(chat_id=new_starosta_chat_id, text=welcome))
+    except Exception as error:
+        logger.warning("bot: failed to notify new starosta chat_id=%s: %s", new_starosta_chat_id, error)
+    await update.message.reply_text(f"Староста группы «{group.name}» назначен.")
+
+
+async def remove_starosta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("bot: /remove_starosta from chat_id=%s args=%s", update.effective_chat.id, context.args)
+    if not is_admin(update, context):
+        await update.message.reply_text("Недостаточно прав.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /remove_starosta <group_id>")
+        return
+    conn = context.bot_data["conn"]
+    group = _resolve_admin_group(conn, context.args[0])
+    if group is None:
+        await update.message.reply_text("Группа с таким id не найдена.")
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    storage.cancel_open_elections_for_group(conn, group.id, now)
+    storage.update_group_starosta(conn, group.id, None)
+    storage.set_group_last_starosta_change_at(conn, group.id, now)
+    await update.message.reply_text(f"Староста группы «{group.name}» снят.")

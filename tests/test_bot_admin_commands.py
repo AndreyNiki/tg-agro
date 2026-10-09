@@ -261,3 +261,95 @@ async def test_alert_command_rejects_non_admin(conn):
     await alert_command(update, context)
 
     context.bot.send_message.assert_not_awaited()
+
+
+from datetime import datetime, timezone
+
+from schedule_bot.bot import remove_starosta_command, set_starosta_command
+
+
+@pytest.mark.asyncio
+async def test_set_starosta_assigns_and_notifies(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn)
+    context.args = [str(group_id), "111"]
+    context.bot.send_message = AsyncMock()
+
+    await set_starosta_command(update, context)
+
+    assert storage.get_group(conn, group_id).starosta_chat_id == 111
+    assert storage.get_group(conn, group_id).last_starosta_change_at is not None
+    assert context.bot.send_message.await_args.kwargs["chat_id"] == 111
+
+
+@pytest.mark.asyncio
+async def test_set_starosta_cancels_open_election_and_resets_cooldown(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.set_group_last_starosta_change_at(conn, group_id, "2026-10-01T00:00:00+00:00")
+    election_id = storage.create_election(conn, group_id, "change", 222, 333, "t")
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn)
+    context.args = [str(group_id), "111"]
+    context.bot.send_message = AsyncMock()
+
+    await set_starosta_command(update, context)
+
+    assert storage.get_election(conn, election_id).status == "cancelled"
+    assert storage.get_group(conn, group_id).last_starosta_change_at != "2026-10-01T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_set_starosta_rejects_non_admin(conn):
+    group_id = _make_group(conn)
+    update = make_update(12345)
+    context = make_context(conn)
+    context.args = [str(group_id), "111"]
+    context.bot.send_message = AsyncMock()
+
+    await set_starosta_command(update, context)
+
+    assert storage.get_group(conn, group_id).starosta_chat_id is None
+    context.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_starosta_rejects_non_numeric_chat_id(conn):
+    group_id = _make_group(conn)
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn)
+    context.args = [str(group_id), "not-a-number"]
+
+    await set_starosta_command(update, context)
+
+    assert storage.get_group(conn, group_id).starosta_chat_id is None
+
+
+@pytest.mark.asyncio
+async def test_remove_starosta_clears_and_resets_cooldown(conn):
+    group_id = _make_group(conn)
+    storage.update_group_starosta(conn, group_id, 111)
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn)
+    context.args = [str(group_id)]
+
+    await remove_starosta_command(update, context)
+
+    group = storage.get_group(conn, group_id)
+    assert group.starosta_chat_id is None
+    assert group.last_starosta_change_at is not None
+
+
+@pytest.mark.asyncio
+async def test_remove_starosta_rejects_non_admin(conn):
+    group_id = _make_group(conn)
+    storage.update_group_starosta(conn, group_id, 111)
+    update = make_update(12345)
+    context = make_context(conn)
+    context.args = [str(group_id)]
+
+    await remove_starosta_command(update, context)
+
+    assert storage.get_group(conn, group_id).starosta_chat_id == 111
