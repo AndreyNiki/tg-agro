@@ -136,6 +136,14 @@ def _resolve_link_identity(snapshot_links, pdf_url: str, group_names: list[str])
             return link
 
     candidate_names = set(group_names)
+    if not candidate_names:
+        # An empty name set matches nothing by phase 2 — `set() == set()`
+        # is vacuously True for ANY two links with no valid group names,
+        # which would otherwise merge unrelated catalog noise (e.g. two
+        # different "Приказ..." links across two scans) into one row via
+        # a meaningless coincidence. Noise links can only ever be
+        # re-identified by pdf_url (phase 1).
+        return None
     for link in snapshot_links:
         if set(json.loads(link.group_names_json)) == candidate_names:
             return link

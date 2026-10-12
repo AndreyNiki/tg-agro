@@ -181,6 +181,51 @@ def test_refresh_institute_catalog_conflict_keeps_existing_binding(conn, monkeyp
     assert group_after.institute_link_id == link_a.id  # unchanged — binding isn't re-decided every scan
 
 
+def test_refresh_institute_catalog_two_noise_links_with_no_valid_names_stay_distinct(conn, monkeypatch):
+    """Regression test: phase-2 identity matching compares group-name
+    SETS, and set() == set() is vacuously True for any two links that
+    both filtered down to zero valid group names. Without a guard, a
+    brand-new noise link (e.g. an "order"/"guideline" link whose label
+    has no group-looking fragment) at a never-before-seen pdf_url would
+    spuriously match ANY pre-existing noise link via the empty-set
+    comparison and get merged into it, silently losing the record that
+    the old pdf_url ever existed as its own link.
+    """
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    monkeypatch.setattr(
+        group_links_module, "fetch_source_page_html",
+        lambda url: '<a href="/orders.pdf">Приказ №12 от 01.09</a>',
+    )
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+    first_links = storage.list_institute_links(conn, institute_id)
+    assert len(first_links) == 1
+    noise_link_id = first_links[0].id
+
+    # Second scan: a DIFFERENT noise link at a never-before-seen pdf_url,
+    # whose label also filters down to zero valid group names. Both the
+    # old noise link (/orders.pdf, now stale) and the new one
+    # (/rules.pdf) should end up as two SEPARATE rows, not merged.
+    monkeypatch.setattr(
+        group_links_module, "fetch_source_page_html",
+        lambda url: '<a href="/rules.pdf">Методические указания</a>',
+    )
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+
+    links = storage.list_institute_links(conn, institute_id)
+    assert len(links) == 2
+    links_by_id = {link.id: link for link in links}
+
+    old_link = links_by_id[noise_link_id]
+    assert old_link.pdf_url == "https://example.com/orders.pdf"  # untouched, not repointed to /rules.pdf
+    assert old_link.is_stale is True  # not seen in this scan, correctly marked stale
+
+    new_link = next(link for link in links if link.id != noise_link_id)
+    assert new_link.pdf_url == "https://example.com/rules.pdf"
+    assert new_link.is_stale is False
+
+
 def test_refresh_institute_catalog_does_not_mutate_db_on_zero_links(conn, monkeypatch):
     """Explicit safety test required by review focus: a catalog scan that
     returns 0 links must not call any storage mutation function at all —
