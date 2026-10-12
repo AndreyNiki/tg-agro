@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import pytest
 from schedule_bot import storage
 
@@ -513,3 +514,81 @@ def test_set_institute_last_catalog_sync_at(conn):
 
 def test_get_institute_returns_none_for_missing_id(conn):
     assert storage.get_institute(conn, 999) is None
+
+
+def test_create_institute_link_round_trips_group_names(conn):
+    institute_id = _make_institute(conn)
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url="https://example.com/a.pdf",
+        group_names=["Б-А-301", "Б-А-302"], raw_label="Б-А-301,302", last_seen_at="t",
+    )
+    link = storage.get_institute_link(conn, link_id)
+    assert link.pdf_url == "https://example.com/a.pdf"
+    assert json.loads(link.group_names_json) == ["Б-А-301", "Б-А-302"]
+    assert link.is_stale is False
+
+
+def test_create_institute_link_rejects_duplicate_pdf_url_for_same_institute(conn):
+    institute_id = _make_institute(conn)
+    storage.create_institute_link(conn, institute_id=institute_id, pdf_url="u", group_names=["A"], raw_label="A", last_seen_at="t")
+    with pytest.raises(sqlite3.IntegrityError):
+        storage.create_institute_link(conn, institute_id=institute_id, pdf_url="u", group_names=["B"], raw_label="B", last_seen_at="t")
+
+
+def test_get_institute_link_by_pdf_url_scoped_to_institute(conn):
+    institute_a = _make_institute(conn, "А")
+    institute_b = _make_institute(conn, "Б")
+    storage.create_institute_link(conn, institute_id=institute_a, pdf_url="u", group_names=["A"], raw_label="A", last_seen_at="t")
+    assert storage.get_institute_link_by_pdf_url(conn, institute_b, "u") is None
+    assert storage.get_institute_link_by_pdf_url(conn, institute_a, "u") is not None
+
+
+def test_list_institute_links_includes_stale_by_default(conn):
+    institute_id = _make_institute(conn)
+    link_id = storage.create_institute_link(conn, institute_id=institute_id, pdf_url="u", group_names=["A"], raw_label="A", last_seen_at="t")
+    storage.mark_stale_links_not_in(conn, institute_id, confirmed_link_ids=[])
+    links = storage.list_institute_links(conn, institute_id)
+    assert len(links) == 1
+    assert links[0].is_stale is True
+    assert storage.list_institute_links(conn, institute_id, include_stale=False) == []
+
+
+def test_update_institute_link_group_names_resets_stale_and_bumps_last_seen(conn):
+    institute_id = _make_institute(conn)
+    link_id = storage.create_institute_link(conn, institute_id=institute_id, pdf_url="u", group_names=["A"], raw_label="A", last_seen_at="t1")
+    storage.mark_stale_links_not_in(conn, institute_id, confirmed_link_ids=[])
+    storage.update_institute_link_group_names(conn, link_id, group_names=["A", "B"], raw_label="A,B", last_seen_at="t2")
+    link = storage.get_institute_link(conn, link_id)
+    assert json.loads(link.group_names_json) == ["A", "B"]
+    assert link.raw_label == "A,B"
+    assert link.last_seen_at == "t2"
+    assert link.is_stale is False
+
+
+def test_update_institute_link_pdf_url_keeps_id_stable(conn):
+    institute_id = _make_institute(conn)
+    link_id = storage.create_institute_link(conn, institute_id=institute_id, pdf_url="old.pdf", group_names=["A"], raw_label="A", last_seen_at="t")
+    storage.update_institute_link_pdf_url(conn, link_id, "new.pdf")
+    link = storage.get_institute_link(conn, link_id)
+    assert link.id == link_id
+    assert link.pdf_url == "new.pdf"
+
+
+def test_mark_institute_link_seen_resets_stale_without_touching_names(conn):
+    institute_id = _make_institute(conn)
+    link_id = storage.create_institute_link(conn, institute_id=institute_id, pdf_url="u", group_names=["A"], raw_label="A", last_seen_at="t1")
+    storage.mark_stale_links_not_in(conn, institute_id, confirmed_link_ids=[])
+    storage.mark_institute_link_seen(conn, link_id, "t2")
+    link = storage.get_institute_link(conn, link_id)
+    assert link.is_stale is False
+    assert link.last_seen_at == "t2"
+    assert json.loads(link.group_names_json) == ["A"]
+
+
+def test_mark_stale_links_not_in_preserves_confirmed_ones(conn):
+    institute_id = _make_institute(conn)
+    kept = storage.create_institute_link(conn, institute_id=institute_id, pdf_url="u1", group_names=["A"], raw_label="A", last_seen_at="t")
+    dropped = storage.create_institute_link(conn, institute_id=institute_id, pdf_url="u2", group_names=["B"], raw_label="B", last_seen_at="t")
+    storage.mark_stale_links_not_in(conn, institute_id, confirmed_link_ids=[kept])
+    assert storage.get_institute_link(conn, kept).is_stale is False
+    assert storage.get_institute_link(conn, dropped).is_stale is True

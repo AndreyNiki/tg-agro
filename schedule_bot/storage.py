@@ -1,4 +1,5 @@
 import sqlite3
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -344,17 +345,106 @@ def set_institute_last_catalog_sync_at(conn: sqlite3.Connection, institute_id: i
     conn.commit()
 
 
+@dataclass
+class InstituteLinkRow:
+    id: int
+    institute_id: int
+    pdf_url: str
+    group_names_json: str
+    raw_label: str
+    is_stale: bool
+    last_seen_at: str
+    created_at: str
+
+
+_INSTITUTE_LINK_COLUMNS = (
+    "id, institute_id, pdf_url, group_names_json, raw_label, is_stale, last_seen_at, created_at"
+)
+
+
+def _institute_link_row_from_tuple(row) -> InstituteLinkRow:
+    *rest, is_stale, last_seen_at, created_at = row
+    return InstituteLinkRow(*rest, bool(is_stale), last_seen_at, created_at)
+
+
 def create_institute_link(
-    conn: sqlite3.Connection,
-    *,
-    institute_id: int,
-    pdf_url: str,
-    group_names: list[str],
-    raw_label: str,
-    last_seen_at: str,
+    conn: sqlite3.Connection, *, institute_id: int, pdf_url: str,
+    group_names: list[str], raw_label: str, last_seen_at: str,
 ) -> int:
-    """Create an institute link (Task 2)."""
-    raise NotImplementedError("create_institute_link - Task 2")
+    cursor = conn.execute(
+        "INSERT INTO institute_links (institute_id, pdf_url, group_names_json, raw_label, "
+        "last_seen_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (institute_id, pdf_url, json.dumps(group_names), raw_label, last_seen_at,
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_institute_link(conn: sqlite3.Connection, link_id: int) -> InstituteLinkRow | None:
+    row = conn.execute(
+        f"SELECT {_INSTITUTE_LINK_COLUMNS} FROM institute_links WHERE id = ?", (link_id,)
+    ).fetchone()
+    return _institute_link_row_from_tuple(row) if row else None
+
+
+def get_institute_link_by_pdf_url(conn: sqlite3.Connection, institute_id: int, pdf_url: str) -> InstituteLinkRow | None:
+    row = conn.execute(
+        f"SELECT {_INSTITUTE_LINK_COLUMNS} FROM institute_links WHERE institute_id = ? AND pdf_url = ?",
+        (institute_id, pdf_url),
+    ).fetchone()
+    return _institute_link_row_from_tuple(row) if row else None
+
+
+def list_institute_links(conn: sqlite3.Connection, institute_id: int, *, include_stale: bool = True) -> list[InstituteLinkRow]:
+    if include_stale:
+        rows = conn.execute(
+            f"SELECT {_INSTITUTE_LINK_COLUMNS} FROM institute_links WHERE institute_id = ? ORDER BY id",
+            (institute_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT {_INSTITUTE_LINK_COLUMNS} FROM institute_links WHERE institute_id = ? AND is_stale = 0 ORDER BY id",
+            (institute_id,),
+        ).fetchall()
+    return [_institute_link_row_from_tuple(row) for row in rows]
+
+
+def update_institute_link_group_names(
+    conn: sqlite3.Connection, link_id: int, *, group_names: list[str], raw_label: str, last_seen_at: str
+) -> None:
+    conn.execute(
+        "UPDATE institute_links SET group_names_json = ?, raw_label = ?, last_seen_at = ?, is_stale = 0 WHERE id = ?",
+        (json.dumps(group_names), raw_label, last_seen_at, link_id),
+    )
+    conn.commit()
+
+
+def update_institute_link_pdf_url(conn: sqlite3.Connection, link_id: int, pdf_url: str) -> None:
+    conn.execute("UPDATE institute_links SET pdf_url = ? WHERE id = ?", (pdf_url, link_id))
+    conn.commit()
+
+
+def mark_institute_link_seen(conn: sqlite3.Connection, link_id: int, last_seen_at: str) -> None:
+    conn.execute(
+        "UPDATE institute_links SET last_seen_at = ?, is_stale = 0 WHERE id = ?", (last_seen_at, link_id)
+    )
+    conn.commit()
+
+
+def mark_stale_links_not_in(conn: sqlite3.Connection, institute_id: int, confirmed_link_ids: list[int]) -> None:
+    if not confirmed_link_ids:
+        conn.execute(
+            "UPDATE institute_links SET is_stale = 1 WHERE institute_id = ?",
+            (institute_id,),
+        )
+    else:
+        placeholders = ",".join("?" * len(confirmed_link_ids))
+        conn.execute(
+            f"UPDATE institute_links SET is_stale = 1 WHERE institute_id = ? AND id NOT IN ({placeholders})",
+            (institute_id, *confirmed_link_ids),
+        )
+    conn.commit()
 
 
 def get_group(conn: sqlite3.Connection, group_id: int) -> GroupRow | None:
