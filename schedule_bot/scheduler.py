@@ -260,6 +260,24 @@ def reschedule_institute_jobs(scheduler, conn, config, bot, institute_id: int, w
         schedule_link_jobs(scheduler, conn, config, bot, institute_link, institute, week_formula_holder, link_lock)
 
 
+def reschedule_group_jobs(*args, **kwargs):
+    """Deprecated placeholder, kept only so that `main.py` — not yet
+    rewired to call `reschedule_institute_link_jobs`/`reschedule_institute_jobs`
+    at the link/institute level — still imports successfully. This task
+    (Task 14) replaces the group-level scheduler API entirely; `main.py`'s
+    own rewiring (and deletion of this shim) is Task 18, a later task in
+    this plan (same precedent as `sync.check_and_apply_diff`, kept as a
+    stub by Task 12 for the same reason). Must never actually be invoked
+    for real — only present so the module-level import in `main.py` does
+    not raise `ImportError` and abort the whole test suite at collection
+    time before Task 18 rewires the call site.
+    """
+    raise NotImplementedError(
+        "reschedule_group_jobs is superseded by reschedule_institute_link_jobs/"
+        "reschedule_institute_jobs (Task 14); main.py's call site is rewired in Task 18"
+    )
+
+
 def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder, locks: dict | None = None) -> AsyncIOScheduler:
     if locks is None:
         locks = {}
