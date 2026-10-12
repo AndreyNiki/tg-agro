@@ -1,0 +1,227 @@
+import json
+import sqlite3
+
+import pytest
+
+from schedule_bot import storage
+from schedule_bot.group_links import looks_like_group_name, refresh_institute_catalog
+
+
+@pytest.fixture
+def conn():
+    connection = sqlite3.connect(":memory:")
+    storage.init_db(connection)
+    return connection
+
+
+def _make_institute(conn):
+    return storage.create_institute(
+        conn, name="ИТ", catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
+    )
+
+
+def test_looks_like_group_name_accepts_letter_dash_digits():
+    assert looks_like_group_name("Б-А-301") is True
+    assert looks_like_group_name("Б-Мв-101") is True
+
+
+def test_looks_like_group_name_rejects_free_text():
+    assert looks_like_group_name("Приказ №12 от 01.09") is False
+    assert looks_like_group_name("1 курс БЭ, БМ оз") is False
+
+
+def test_refresh_institute_catalog_creates_links_and_groups(conn, monkeypatch):
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    html = '<a href="/a.pdf">Б-А-301,302</a>'
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: html)
+
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+
+    links = storage.list_institute_links(conn, institute_id)
+    assert len(links) == 1
+    assert json.loads(links[0].group_names_json) == ["Б-А-301", "Б-А-302"]
+    groups = storage.list_groups_for_link(conn, links[0].id)
+    assert {g.name for g in groups} == {"Б-А-301", "Б-А-302"}
+    assert storage.get_institute(conn, institute_id).last_catalog_sync_at is not None
+
+
+def test_refresh_institute_catalog_dedups_same_pdf_url_two_labels_in_one_scan(conn, monkeypatch):
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    html = '<a href="/a.pdf">Б-А-301</a><a href="/a.pdf">Б-А-302</a>'
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: html)
+
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+
+    links = storage.list_institute_links(conn, institute_id)
+    assert len(links) == 1
+    assert set(json.loads(links[0].group_names_json)) == {"Б-А-301", "Б-А-302"}
+
+
+def test_refresh_institute_catalog_same_pdf_url_second_scan_updates_names(conn, monkeypatch):
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: '<a href="/a.pdf">Б-А-301</a>')
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+    first_link_id = storage.list_institute_links(conn, institute_id)[0].id
+
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: '<a href="/a.pdf">Б-А-301,302</a>')
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+
+    links = storage.list_institute_links(conn, institute_id)
+    assert len(links) == 1
+    assert links[0].id == first_link_id
+    assert set(json.loads(links[0].group_names_json)) == {"Б-А-301", "Б-А-302"}
+
+
+def test_refresh_institute_catalog_new_pdf_url_same_names_is_treated_as_moved_link(conn, monkeypatch):
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: '<a href="/old.pdf">Б-А-301</a>')
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+    first_link_id = storage.list_institute_links(conn, institute_id)[0].id
+    group_id = storage.list_groups_for_link(conn, first_link_id)[0].id
+
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: '<a href="/new.pdf">Б-А-301</a>')
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+
+    links = storage.list_institute_links(conn, institute_id)
+    assert len(links) == 1
+    assert links[0].id == first_link_id  # same row, pdf_url updated in place
+    assert links[0].pdf_url == "https://example.com/new.pdf"
+    assert storage.get_group(conn, group_id).institute_link_id == first_link_id  # group binding untouched
+
+
+def test_refresh_institute_catalog_marks_unconfirmed_links_stale_and_alerts_once(conn, monkeypatch):
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: '<a href="/a.pdf">Б-А-301</a>')
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+    link_id = storage.list_institute_links(conn, institute_id)[0].id
+    group_id = storage.list_groups_for_link(conn, link_id)[0].id
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+
+    # NOTE: deviates from the brief's literal html here — the brief used
+    # "<html></html>" (zero PDF links total), which is indistinguishable
+    # from the "catalog page broken" scenario covered by the zero-links
+    # safety test below, and the two tests' expectations directly
+    # contradict each other on that exact input (stale=True here vs.
+    # "don't touch the DB at all" there). Using an unrelated PDF link
+    # that IS present keeps raw_entries non-empty, so this test genuinely
+    # represents "this one link disappeared from an otherwise-working
+    # catalog", which is what per-link stale-marking is for.
+    alerts = []
+    monkeypatch.setattr(
+        group_links_module, "fetch_source_page_html", lambda url: '<a href="/unrelated.pdf">Z-Z-999</a>'
+    )
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=alerts.append)
+
+    assert storage.get_institute_link(conn, link_id).is_stale is True
+    assert len(alerts) == 1
+    assert str(institute_id) in alerts[0] or "пропала из каталога" in alerts[0]
+
+
+def test_refresh_institute_catalog_zero_links_does_not_touch_existing_data_but_alerts(conn, monkeypatch):
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: '<a href="/a.pdf">Б-А-301</a>')
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+
+    alerts = []
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: "<html>empty, no pdfs</html>")
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=alerts.append)
+
+    links = storage.list_institute_links(conn, institute_id)
+    assert len(links) == 1
+    assert links[0].is_stale is False  # nothing was touched
+    assert any("0 ссылок" in alert for alert in alerts)
+
+
+def test_refresh_institute_catalog_filters_out_non_group_looking_labels(conn, monkeypatch):
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    html = '<a href="/a.pdf">1 курс БЭ, БМ оз</a>'
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: html)
+
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+
+    # no valid group-looking fragment in this label -> no groups created,
+    # but the link itself IS still recorded with an empty group list, so
+    # /institute_links can show it as "0 groups" (spec, section 2).
+    links = storage.list_institute_links(conn, institute_id)
+    assert len(links) == 1
+    assert json.loads(links[0].group_names_json) == []
+    assert storage.list_groups_for_link(conn, links[0].id) == []
+
+
+def test_refresh_institute_catalog_conflict_keeps_existing_binding(conn, monkeypatch):
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    html = '<a href="/a.pdf">Б-А-301</a><a href="/b.pdf">Б-А-301</a>'
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: html)
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+
+    link_a = storage.get_institute_link_by_pdf_url(conn, institute_id, "https://example.com/a.pdf")
+    group = storage.get_group_by_name(conn, institute_id, "Б-А-301")
+    assert group.institute_link_id == link_a.id  # first link by page order wins, and is stable on rescans
+
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+    group_after = storage.get_group_by_name(conn, institute_id, "Б-А-301")
+    assert group_after.institute_link_id == link_a.id  # unchanged — binding isn't re-decided every scan
+
+
+def test_refresh_institute_catalog_does_not_mutate_db_on_zero_links(conn, monkeypatch):
+    """Explicit safety test required by review focus: a catalog scan that
+    returns 0 links must not call any storage mutation function at all —
+    not mark_stale_links_not_in, not set_institute_last_catalog_sync_at.
+    """
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: '<a href="/a.pdf">Б-А-301</a>')
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+
+    before = storage.get_institute(conn, institute_id)
+    before_links = storage.list_institute_links(conn, institute_id)
+
+    alerts = []
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", lambda url: "<html>no links here</html>")
+
+    called = {"mark_stale": False, "sync_at": False}
+    original_mark_stale = storage.mark_stale_links_not_in
+    original_sync_at = storage.set_institute_last_catalog_sync_at
+
+    def _tracked_mark_stale(*args, **kwargs):
+        called["mark_stale"] = True
+        return original_mark_stale(*args, **kwargs)
+
+    def _tracked_sync_at(*args, **kwargs):
+        called["sync_at"] = True
+        return original_sync_at(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "mark_stale_links_not_in", _tracked_mark_stale)
+    monkeypatch.setattr(storage, "set_institute_last_catalog_sync_at", _tracked_sync_at)
+    monkeypatch.setattr(group_links_module.storage, "mark_stale_links_not_in", _tracked_mark_stale)
+    monkeypatch.setattr(group_links_module.storage, "set_institute_last_catalog_sync_at", _tracked_sync_at)
+
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=alerts.append)
+
+    assert called["mark_stale"] is False
+    assert called["sync_at"] is False
+    assert len(alerts) == 1
+    after = storage.get_institute(conn, institute_id)
+    after_links = storage.list_institute_links(conn, institute_id)
+    assert after.last_catalog_sync_at == before.last_catalog_sync_at
+    assert len(after_links) == len(before_links)
+    assert after_links[0].is_stale == before_links[0].is_stale
