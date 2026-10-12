@@ -3,6 +3,7 @@ import pytest
 from schedule_bot.group_links import (
     GroupLinkNotFoundError,
     SourcePageUnreachableError,
+    expand_group_names,
     list_pdf_links,
     resolve_group_pdf_source,
     resolve_pdf_link,
@@ -98,3 +99,23 @@ def test_list_pdf_links_collapses_internal_whitespace_but_keeps_case():
     html = '<a href="/x.pdf">Б-А-301,\xa0 302</a>'
     links = list_pdf_links(html, "https://example.com/catalog")
     assert links == [("https://example.com/x.pdf", "Б-А-301, 302")]
+
+
+def test_expand_group_names_fills_prefix_for_trailing_digit_fragments():
+    assert expand_group_names("Б-А-301,302,303") == ["Б-А-301", "Б-А-302", "Б-А-303"]
+
+
+def test_expand_group_names_keeps_full_names_as_is():
+    assert expand_group_names("Б-Эв-101, Б-Мв-101") == ["Б-Эв-101", "Б-Мв-101"]
+
+
+def test_expand_group_names_mixes_prefix_fill_and_full_names():
+    assert expand_group_names("Б-А-301,302, Б-Мв-101") == ["Б-А-301", "Б-А-302", "Б-Мв-101"]
+
+
+def test_expand_group_names_returns_empty_for_leading_number_with_no_prefix():
+    assert expand_group_names("301,302") == []
+
+
+def test_expand_group_names_ignores_surrounding_whitespace_around_commas():
+    assert expand_group_names(" Б-А-301 , 302 ") == ["Б-А-301", "Б-А-302"]
