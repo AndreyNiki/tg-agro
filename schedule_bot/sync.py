@@ -36,24 +36,6 @@ class SyncResult:
     changes: list[str] = field(default_factory=list)
 
 
-async def check_and_apply_diff(conn, group, pdf_cache_dir: str, notify: Notifier):
-    """Deprecated placeholder, kept only so that `schedule_bot/scheduler.py`
-    and `main.py` — not yet rewired to call `sync_institute_link` at the
-    link level — still import successfully. Task 12 replaces the group-
-    level sync pipeline entirely; those two modules' own rewiring (and
-    deletion of this shim) is a later task in this plan (see the plan's
-    Phase 7/8 continuation note). `group` here no longer even carries the
-    `pdf_source_url`/`source_page_url` fields the old implementation read
-    (those moved to `institute_links`/`institutes`), so this must never
-    actually be invoked for real — only monkeypatched/stubbed in tests
-    that predate the link-level model, which is all current call sites do.
-    """
-    raise NotImplementedError(
-        "check_and_apply_diff is superseded by sync_institute_link (Task 12); "
-        "scheduler.py/main.py call sites are rewired in a later task"
-    )
-
-
 def _safe_segment(value: str) -> str:
     # Group/link identifiers end up as path segments below — sanitize so a
     # stray "/" or ".." can't be interpreted as a path separator/traversal.

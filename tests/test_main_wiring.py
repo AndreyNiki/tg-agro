@@ -61,7 +61,7 @@ def _patch_week_formula(monkeypatch):
 
 _test_group_counter = 0
 
-def _make_test_group(conn, name="Б-Мв-101"):
+def _make_test_group(conn, name="Б-Мв-101", pdf_url="https://example.com/test.pdf"):
     """Helper to create a test group with dummy institute and link (for test_main_wiring).
     Creates a unique institute per call to avoid UNIQUE(name) constraint violations."""
     global _test_group_counter
@@ -83,7 +83,7 @@ def _make_test_group(conn, name="Б-Мв-101"):
     cursor = conn.execute(
         "INSERT INTO institute_links (institute_id, pdf_url, group_names_json, raw_label, last_seen_at, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (institute_id, "https://example.com/test.pdf", f'["{name}"]', name, datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
+        (institute_id, pdf_url, f'["{name}"]', name, datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     institute_link_id = cursor.lastrowid
@@ -106,10 +106,15 @@ def test_build_application_registers_all_expected_handlers(conn, config, monkeyp
 
     assert {
         "start", "subscribe", "unsubscribe", "schedule", "help",
-        "set_pdf_source", "set_send_time", "set_check_interval", "refresh", "alert",
+        "add_institute", "set_institute_catalog_url", "set_institute_check_interval",
+        "set_institute_send_time", "set_institute_catalog_interval",
+        "refresh_institute_links", "institute_links", "refresh", "alert",
     }.issubset(command_names)
     assert "stop" not in command_names
     assert "set_group" not in command_names
+    assert "set_pdf_source" not in command_names
+    assert "set_send_time" not in command_names
+    assert "set_check_interval" not in command_names
 
 
 def test_build_application_seeds_only_weektype_url_default(conn, config, monkeypatch):
@@ -126,7 +131,7 @@ def test_build_application_does_not_create_a_group_on_fresh_install(conn, config
 
     build_application(config, conn)
 
-    assert storage.count_groups(conn) == 0
+    assert storage.list_institutes(conn) == []
 
 
 def test_build_application_week_formula_reflects_later_holder_updates(conn, config, monkeypatch):
@@ -220,12 +225,14 @@ async def test_day_callback_through_real_bot_data_replies_with_schedule_when_act
     config.pdf_cache_dir = str(tmp_path)
 
     application = build_application(config, conn)
-    group_id = _make_test_group(conn, "Б-Мв-101")
+    group_id = _make_test_group(conn, "Б-Мв-101", pdf_url=fixture_pdf)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
 
-    sync_fn = application.bot_data["sync_fn"]
-    result = await sync_fn(group_id)
-    assert result.status == "initial"
+    group = storage.get_group(conn, group_id)
+    sync_institute_link_fn = application.bot_data["sync_institute_link_fn"]
+    results = await sync_institute_link_fn(group.institute_link_id)
+    own_result = next(r for r in results if r.group_id == group_id)
+    assert own_result.status == "initial"
 
     update = MagicMock()
     update.effective_chat.id = 111
@@ -302,46 +309,45 @@ async def test_post_init_backfill_isolates_per_chat_failures(conn, config, monke
 
 
 @pytest.mark.asyncio
-async def test_build_application_shares_one_lock_per_group_between_refresh_and_scheduled_jobs(
+async def test_build_application_shares_one_lock_per_link_between_refresh_and_scheduled_jobs(
     conn, config, monkeypatch, tmp_path
 ):
-    """Regression test for the Task 12 review's Critical finding: a
-    manual /refresh (sync_fn) and that SAME group's own scheduled
+    """Regression test for the Task 12 review's Critical finding, re-
+    targeted to the link-level model (Task 14/18): a manual /refresh
+    (sync_institute_link_fn) and that SAME link's own scheduled
     hourly/daily job used to lock on two DIFFERENT asyncio.Lock objects —
-    build_scheduler kept its own internal {group_id: Lock} dict, separate
-    from main.py's single module-wide sync_lock — so they could run
-    check_and_apply_diff concurrently for this group (double-apply,
+    build_scheduler kept its own internal {link_id: Lock} dict, separate
+    from main.py's single module-wide lock dict — so they could run
+    sync_institute_link concurrently for this link (double-apply,
     double-broadcast, cache-file race). They must now share the exact
-    same Lock object for a group that already exists when
-    build_application/build_scheduler runs at startup.
+    same Lock object for a link that already exists when
+    build_application/build_scheduler runs at startup. Per spec,
+    locking happens at the LINK level, not the institute or group level.
 
-    This creates the group BEFORE build_application so it's picked up by
-    build_scheduler's own startup loop (not by a later
-    reschedule_group_jobs_cb call) — that startup path is exactly where
-    the bug lived.
+    This creates the group/link BEFORE build_application so it's picked
+    up by build_scheduler's own startup loop (not by a later
+    reschedule_institute_link_jobs_cb call) — that startup path is
+    exactly where the bug lived.
 
-    check_and_apply_diff is stubbed out (fast AsyncMock) so the only
-    thing that can make sync_fn block is lock contention itself — a real
-    PDF parse call would also take long enough to look "blocked" within
-    a short sleep() window even on a DIFFERENT, unlocked Lock object,
-    which would make this test pass for the wrong reason (confirmed by
-    temporarily reverting the fix with a real PDF parse: the test still
-    passed, a false negative) and defeat the point of the regression
-    test."""
+    sync_institute_link is stubbed out (fast AsyncMock) so the only
+    thing that can make sync_institute_link_fn block is lock contention
+    itself — a real PDF parse call would also take long enough to look
+    "blocked" within a short sleep() window even on a DIFFERENT, unlocked
+    Lock object, which would make this test pass for the wrong reason and
+    defeat the point of the regression test."""
     _patch_week_formula(monkeypatch)
 
     group_id = _make_test_group(conn, "Б-Мв-101")
+    institute_link_id = storage.get_group(conn, group_id).institute_link_id
 
     application = build_application(config, conn)
     scheduler = application.bot_data["_scheduler"]
-    sync_fn = application.bot_data["sync_fn"]
+    sync_institute_link_fn = application.bot_data["sync_institute_link_fn"]
 
-    from schedule_bot.sync import SyncResult
+    stub = AsyncMock(return_value=[])
+    monkeypatch.setattr("main.sync_institute_link", stub)
 
-    stub = AsyncMock(return_value=SyncResult(status="no_changes"))
-    monkeypatch.setattr("main.check_and_apply_diff", stub)
-
-    job_lock = scheduler.get_job(f"hourly_check_{group_id}").args[-1]
+    job_lock = scheduler.get_job(f"link_check_{institute_link_id}").args[-2]
     assert isinstance(job_lock, asyncio.Lock)
 
     # Acquire the scheduled job's lock first (uncontended acquire on an
@@ -349,13 +355,13 @@ async def test_build_application_shares_one_lock_per_group_between_refresh_and_s
     # is guaranteed to win before any background scheduler job runs).
     await job_lock.acquire()
     try:
-        task = asyncio.ensure_future(sync_fn(group_id))
+        task = asyncio.ensure_future(sync_institute_link_fn(institute_link_id))
         await asyncio.sleep(0.05)
-        # If sync_fn used a DIFFERENT lock object, the stubbed
-        # check_and_apply_diff (near-instant) would have already run
-        # while job_lock is held — proving the bug. With the fix, sync_fn
-        # must still be blocked waiting on the identical lock object, so
-        # the stub must not have been called yet.
+        # If sync_institute_link_fn used a DIFFERENT lock object, the
+        # stubbed sync_institute_link (near-instant) would have already
+        # run while job_lock is held — proving the bug. With the fix,
+        # sync_institute_link_fn must still be blocked waiting on the
+        # identical lock object, so the stub must not have been called yet.
         assert not task.done()
         stub.assert_not_awaited()
     finally:
@@ -367,21 +373,23 @@ async def test_build_application_shares_one_lock_per_group_between_refresh_and_s
     scheduler.shutdown(wait=False)
 
 
-def test_build_application_still_gives_different_groups_independent_locks(conn, config, monkeypatch):
+def test_build_application_still_gives_different_links_independent_locks(conn, config, monkeypatch):
     """Guard against re-introducing Task 11's original bug while fixing
-    the above: group_locks must still hand out a DISTINCT Lock per
-    group_id — a single shared lock across ALL groups would defeat the
-    whole point of per-group job isolation."""
+    the above: link_locks must still hand out a DISTINCT Lock per
+    institute_link_id — a single shared lock across ALL links would
+    defeat the whole point of per-link job isolation."""
     _patch_week_formula(monkeypatch)
 
     group_a = _make_test_group(conn, "A")
     group_b = _make_test_group(conn, "B")
+    link_a = storage.get_group(conn, group_a).institute_link_id
+    link_b = storage.get_group(conn, group_b).institute_link_id
 
     application = build_application(config, conn)
     scheduler = application.bot_data["_scheduler"]
 
-    lock_a = scheduler.get_job(f"hourly_check_{group_a}").args[-1]
-    lock_b = scheduler.get_job(f"hourly_check_{group_b}").args[-1]
+    lock_a = scheduler.get_job(f"link_check_{link_a}").args[-2]
+    lock_b = scheduler.get_job(f"link_check_{link_b}").args[-2]
     assert lock_a is not lock_b
 
     scheduler.shutdown(wait=False)
@@ -473,6 +481,19 @@ def test_build_application_registers_menu_handlers(conn, config, monkeypatch):
     assert r"^menu:" in callback_patterns or any(p.startswith("^menu:") for p in callback_patterns)
     assert len(message_handlers) >= 1
 
+    application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+def test_build_application_wires_institute_bot_data_callbacks(conn, config, monkeypatch):
+    _patch_week_formula(monkeypatch)
+
+    application = build_application(config, conn)
+
+    assert "sync_institute_link_fn" in application.bot_data
+    assert "reschedule_institute_link_jobs" in application.bot_data
+    assert "reschedule_institute_jobs" in application.bot_data
+    assert "reschedule_group_jobs" not in application.bot_data
+    assert "sync_fn" not in application.bot_data
     application.bot_data["_scheduler"].shutdown(wait=False)
 
 

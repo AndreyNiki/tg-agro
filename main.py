@@ -21,9 +21,6 @@ from schedule_bot.bot import (
     refresh_command,
     schedule_command,
     remove_starosta_command,
-    set_check_interval_command,
-    set_pdf_source_command,
-    set_send_time_command,
     set_starosta_command,
 )
 from schedule_bot.classmates import classmates_command, exclude_abort_callback, exclude_confirm_callback, exclude_select_callback
@@ -53,10 +50,20 @@ from schedule_bot.group_commands import (
     subscribe_command,
     unsubscribe_command,
 )
+from schedule_bot.institute_commands import (
+    add_institute_command,
+    institute_links_command,
+    refresh_institute_links_command,
+    set_institute_catalog_interval_command,
+    set_institute_catalog_url_command,
+    set_institute_check_interval_command,
+    set_institute_send_time_command,
+)
 from schedule_bot.scheduler import (
     WeekFormulaHolder,
     build_scheduler,
-    reschedule_group_jobs,
+    reschedule_institute_jobs,
+    reschedule_institute_link_jobs,
 )
 from schedule_bot.starosta_candidates import (
     abort_callback as starcand_abort_callback,
@@ -72,7 +79,7 @@ from schedule_bot.starosta_commands import (
     starosta_command,
     votes_command,
 )
-from schedule_bot.sync import check_and_apply_diff
+from schedule_bot.sync import sync_institute_link
 from schedule_bot.telegram_utils import send_with_retry
 from schedule_bot.weektype import WeekFormula, fetch_week_formula, load_week_formula, save_week_formula
 
@@ -128,46 +135,52 @@ def build_application(config: Config, conn) -> Application:
     application.bot_data["active_schedule_getter"] = lambda group_id: _load_active_schedule(conn, group_id)
     application.bot_data["active_pdf_path_getter"] = lambda group_id: _load_active_pdf_path(conn, group_id)
 
-    # One Lock per group_id, lazily created and shared by EVERY call site
-    # that can run check_and_apply_diff for that group: manual /refresh
-    # (sync_fn, below), the scheduler's own hourly_check_job/daily_send_job
-    # (via the SAME dict object passed into build_scheduler), and any job
-    # scheduled for a brand-new group via reschedule_group_jobs_cb. Using
-    # one shared dict (rather than each call site creating its own lock)
-    # is what guarantees a manual /refresh and that group's own scheduled
-    # sync can never run check_and_apply_diff concurrently — a
-    # per-call-site lock would only coincidentally overlap, and previously
-    # didn't: build_scheduler used to keep its own separate locks dict,
-    # so a startup-scheduled job and /refresh for the same group used
-    # different lock objects and could race (double-apply, double-
-    # broadcast, and a cache-file read/unlink race). Different group_ids
-    # still get independent locks from each other via setdefault, so
-    # unrelated groups' syncs are never serialized against one another.
-    group_locks: dict[int, asyncio.Lock] = {}
+    # One Lock per institute_link_id — shared by the scheduler's own
+    # link_check_job/link_daily_send_job (via the SAME dict passed into
+    # build_scheduler) AND manual /refresh (sync_institute_link_fn,
+    # below). This is what guarantees a manual /refresh for a group and
+    # that group's link's own scheduled sync never run sync_institute_link
+    # concurrently for the SAME link — mirrors the pre-institutes
+    # group_locks pattern, just re-keyed to institute_link_id (the new
+    # unit of sync work; see scheduler.py). Spec: "Планировщик заводит
+    # job'ы на уровне ссылки, не института" — locking stays at the link
+    # level, never institute- or group-level.
+    link_locks: dict[int, asyncio.Lock] = {}
+    catalog_refreshed_this_cycle: set[int] = set()
 
-    async def sync_fn(group_id: int):
-        group = storage.get_group(conn, group_id)
-        if group is None:
-            raise ValueError(f"Group {group_id} not found")
+    async def sync_institute_link_fn(institute_link_id: int):
+        institute_link = storage.get_institute_link(conn, institute_link_id)
+        if institute_link is None:
+            raise ValueError(f"Institute link {institute_link_id} not found")
+        institute = storage.get_institute(conn, institute_link.institute_id)
 
         async def notify(chat_id, text):
             await send_with_retry(lambda: application.bot.send_message(chat_id=chat_id, text=text))
 
-        lock = group_locks.setdefault(group_id, asyncio.Lock())
+        lock = link_locks.setdefault(institute_link_id, asyncio.Lock())
         async with lock:
-            return await check_and_apply_diff(conn, group, config.pdf_cache_dir, notify)
+            return await sync_institute_link(
+                conn, institute_link, institute, config.pdf_cache_dir, notify,
+                catalog_refreshed_this_cycle=catalog_refreshed_this_cycle,
+            )
 
-    application.bot_data["sync_fn"] = sync_fn
+    application.bot_data["sync_institute_link_fn"] = sync_institute_link_fn
 
     scheduler_holder: dict = {}
 
-    def reschedule_group_jobs_cb(group_id: int) -> None:
-        lock = group_locks.setdefault(group_id, asyncio.Lock())
-        reschedule_group_jobs(
-            scheduler_holder["scheduler"], conn, config, application.bot, group_id, week_formula_holder, lock
+    def reschedule_institute_link_jobs_cb(institute_link_id: int) -> None:
+        lock = link_locks.setdefault(institute_link_id, asyncio.Lock())
+        reschedule_institute_link_jobs(
+            scheduler_holder["scheduler"], conn, config, application.bot, institute_link_id, week_formula_holder, lock
         )
 
-    application.bot_data["reschedule_group_jobs"] = reschedule_group_jobs_cb
+    def reschedule_institute_jobs_cb(institute_id: int) -> None:
+        reschedule_institute_jobs(
+            scheduler_holder["scheduler"], conn, config, application.bot, institute_id, week_formula_holder, link_locks
+        )
+
+    application.bot_data["reschedule_institute_link_jobs"] = reschedule_institute_link_jobs_cb
+    application.bot_data["reschedule_institute_jobs"] = reschedule_institute_jobs_cb
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("subscribe", subscribe_command))
@@ -181,9 +194,13 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CallbackQueryHandler(institute_page_callback, pattern=INSTITUTE_PAGE_CALLBACK_PATTERN))
     application.add_handler(CallbackQueryHandler(group_select_callback, pattern=SELECT_CALLBACK_PATTERN))
     application.add_handler(CallbackQueryHandler(group_page_callback, pattern=PAGE_CALLBACK_PATTERN))
-    application.add_handler(CommandHandler("set_pdf_source", set_pdf_source_command))
-    application.add_handler(CommandHandler("set_send_time", set_send_time_command))
-    application.add_handler(CommandHandler("set_check_interval", set_check_interval_command))
+    application.add_handler(CommandHandler("add_institute", add_institute_command))
+    application.add_handler(CommandHandler("set_institute_catalog_url", set_institute_catalog_url_command))
+    application.add_handler(CommandHandler("set_institute_check_interval", set_institute_check_interval_command))
+    application.add_handler(CommandHandler("set_institute_send_time", set_institute_send_time_command))
+    application.add_handler(CommandHandler("set_institute_catalog_interval", set_institute_catalog_interval_command))
+    application.add_handler(CommandHandler("refresh_institute_links", refresh_institute_links_command))
+    application.add_handler(CommandHandler("institute_links", institute_links_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("alert", alert_command))
 
@@ -225,12 +242,13 @@ def build_application(config: Config, conn) -> Application:
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, pending_action_followup))
 
-    # Pass the SAME group_locks dict used by sync_fn/reschedule_group_jobs_cb
-    # above, so every group that already exists at startup gets its
-    # scheduled jobs wired to the identical Lock object a manual /refresh
-    # for that group will use — not a separate, internally-created lock.
+    # Pass the SAME link_locks dict used by sync_institute_link_fn/
+    # reschedule_institute_link_jobs_cb above, so every link that already
+    # exists at startup gets its scheduled jobs wired to the identical
+    # Lock object a manual /refresh for that link will use — not a
+    # separate, internally-created lock.
     scheduler_holder["scheduler"] = build_scheduler(
-        conn, config, application.bot, week_formula_holder, locks=group_locks
+        conn, config, application.bot, week_formula_holder, locks=link_locks
     )
     application.bot_data["_scheduler"] = scheduler_holder["scheduler"]
 

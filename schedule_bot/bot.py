@@ -195,43 +195,6 @@ def _resolve_admin_group(conn, group_id_str: str):
     return storage.get_group(conn, int(group_id_str))
 
 
-async def set_pdf_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Deprecated placeholder, kept only so that `main.py` — not yet
-    rewired to register institute-level admin commands instead
-    (`institute_commands.py`, Task 15; rewiring is Task 19) — still
-    imports and registers this name successfully. PDF-source configuration
-    moved to the institute level (`/set_institute_catalog_url`); this
-    handler must never actually be invoked for real.
-    """
-    raise NotImplementedError(
-        "set_pdf_source_command is removed (Task 16); configure the "
-        "catalog URL at the institute level via /set_institute_catalog_url "
-        "(institute_commands.py, Task 15/19)"
-    )
-
-
-async def set_send_time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Deprecated placeholder — see `set_pdf_source_command`'s docstring.
-    Send-time configuration moved to the institute level
-    (`/set_institute_send_time`)."""
-    raise NotImplementedError(
-        "set_send_time_command is removed (Task 16); configure send time "
-        "at the institute level via /set_institute_send_time "
-        "(institute_commands.py, Task 15/19)"
-    )
-
-
-async def set_check_interval_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Deprecated placeholder — see `set_pdf_source_command`'s docstring.
-    Check-interval configuration moved to the institute level
-    (`/set_institute_check_interval`)."""
-    raise NotImplementedError(
-        "set_check_interval_command is removed (Task 16); configure the "
-        "check interval at the institute level via "
-        "/set_institute_check_interval (institute_commands.py, Task 15/19)"
-    )
-
-
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("bot: /refresh from chat_id=%s args=%s", update.effective_chat.id, context.args)
     if not is_admin(update, context):
