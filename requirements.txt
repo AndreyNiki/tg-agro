@@ -4,5 +4,6 @@ pymupdf==1.24.11
 APScheduler==3.10.4
 requests==2.32.3
 curl_cffi==0.16.3
+reportlab==5.0.1
 pytest==8.3.3
 pytest-asyncio==0.24.0
