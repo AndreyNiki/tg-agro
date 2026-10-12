@@ -97,13 +97,7 @@ async def _backfill_member_profiles(conn, bot) -> None:
 
 
 def build_application(config: Config, conn) -> Application:
-    # Only weektype_url stays a bot-wide setting (Global Constraints) —
-    # group_name/pdf_source/daily_send_time/check_interval_minutes/timezone
-    # must NOT be re-seeded here: doing so would make
-    # migrate_legacy_single_group think a fresh install has legacy data
-    # to migrate, auto-creating an unwanted group every time.
     storage.ensure_default_settings(conn, {"weektype_url": config.default_weektype_url})
-    storage.migrate_legacy_single_group(conn, config.legacy_group_source_page_url)
 
     week_formula = _fetch_week_formula_or_fallback(conn, storage.get_setting(conn, "weektype_url"))
     week_formula_holder = WeekFormulaHolder(formula=week_formula)

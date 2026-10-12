@@ -11,11 +11,55 @@ def conn():
     connection.close()
 
 
-def _make_group(conn, name="Б-Мв-101"):
-    return storage.create_group(
-        conn, name=name, source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+def _make_institute(conn, name="ИТ"):
+    return storage.create_institute(
+        conn, name=name, catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
     )
+
+
+def _make_link(conn, institute_id, pdf_url="https://example.com/a.pdf", group_names=None):
+    return storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url=pdf_url,
+        group_names=group_names or ["Б-Мв-101"], raw_label="Б-Мв-101", last_seen_at="t",
+    )
+
+
+def _make_group(conn, name="Б-Мв-101", institute_id=None, institute_link_id=None):
+    if institute_id is None:
+        institute_id = _make_institute(conn)
+    if institute_link_id is None:
+        institute_link_id = _make_link(conn, institute_id, group_names=[name])
+    return storage.create_group(conn, institute_id=institute_id, institute_link_id=institute_link_id, name=name)
+
+
+def test_init_db_rebuilds_old_shape_groups_table(tmp_path):
+    db_path = tmp_path / "test.db"
+    connection = sqlite3.connect(str(db_path))
+    connection.executescript(
+        """
+        CREATE TABLE groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            source_page_url TEXT NOT NULL,
+            pdf_source_url TEXT NOT NULL,
+            send_time TEXT NOT NULL,
+            check_interval_minutes INTEGER NOT NULL,
+            timezone TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO groups (name, source_page_url, pdf_source_url, send_time, check_interval_minutes, timezone, created_at)
+        VALUES ('old-group', 'u', 'p', '09:00', 60, 'Europe/Moscow', 't');
+        """
+    )
+    connection.commit()
+
+    storage.init_db(connection)
+
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(groups)").fetchall()}
+    assert "institute_id" in columns
+    assert connection.execute("SELECT COUNT(*) FROM groups").fetchone()[0] == 0
 
 
 def test_ensure_default_settings_only_fills_missing_keys(conn):
@@ -123,38 +167,15 @@ def test_list_groups_orders_alphabetically_and_paginates(conn):
 def test_list_all_groups_returns_every_group_unpaginated(conn):
     for i in range(10):
         storage.create_group(
-            conn, name=f"Группа-{i}", source_page_url="u", pdf_source_url="p",
-            send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+            conn, institute_id=_make_institute(conn, f"ИТ-{i}"),
+            institute_link_id=_make_link(conn, _make_institute(conn, f"ИТ-{i}"), group_names=[f"Группа-{i}"]),
+            name=f"Группа-{i}",
         )
     assert len(storage.list_all_groups(conn)) == 10
 
 
-def test_update_group_pdf_source_url(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="old.pdf",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
-    storage.update_group_pdf_source_url(conn, group_id, "new.pdf")
-    assert storage.get_group(conn, group_id).pdf_source_url == "new.pdf"
-
-
-def test_update_group_send_time_and_check_interval(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
-    storage.update_group_send_time(conn, group_id, "07:30")
-    storage.update_group_check_interval(conn, group_id, 30)
-    group = storage.get_group(conn, group_id)
-    assert group.send_time == "07:30"
-    assert group.check_interval_minutes == 30
-
-
 def test_set_group_last_sync_failed_at(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.set_group_last_sync_failed_at(conn, group_id, "2026-10-08T00:00:00+00:00")
     assert storage.get_group(conn, group_id).last_sync_failed_at == "2026-10-08T00:00:00+00:00"
     storage.set_group_last_sync_failed_at(conn, group_id, "")
@@ -224,143 +245,6 @@ def test_list_all_member_chat_ids_spans_every_group(conn):
     storage.upsert_member(conn, 111, group_a, joined_at="t")
     storage.upsert_member(conn, 222, group_b, joined_at="t", subscribed=False)
     assert sorted(storage.list_all_member_chat_ids(conn)) == [111, 222]
-
-
-def _seed_legacy_single_group_db(conn, *, with_schedule_version=False):
-    """Recreates the pre-multi-group state this migration must handle:
-    a `settings`-driven single group plus old-shape `subscribers` rows,
-    and optionally an old-shape `schedule_versions` row that predates the
-    group_id column (simulating an un-migrated production database)."""
-    storage.set_setting(conn, "group_name", "Б-Мв-101")
-    storage.set_setting(conn, "pdf_source", "https://example.com/101.pdf")
-    storage.set_setting(conn, "daily_send_time", "09:00")
-    storage.set_setting(conn, "check_interval_minutes", "60")
-    storage.set_setting(conn, "timezone", "Europe/Moscow")
-    conn.execute(
-        "INSERT INTO subscribers (chat_id, group_name, joined_at) VALUES (?, ?, ?)",
-        (111, "Б-Мв-101", "2026-09-16T00:00:00"),
-    )
-    conn.execute(
-        "INSERT INTO subscribers (chat_id, group_name, joined_at) VALUES (?, ?, ?)",
-        (222, "Б-Мв-101", "2026-09-16T00:00:00"),
-    )
-    conn.commit()
-    if with_schedule_version:
-        # Simulate a database created before Task 3's schema change: no
-        # group_id column exists yet on schedule_versions.
-        conn.execute("DROP TABLE schedule_versions")
-        conn.execute(
-            "CREATE TABLE schedule_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "group_name TEXT NOT NULL, payload_json TEXT NOT NULL, pdf_cache_path TEXT NOT NULL, "
-            "parsed_at TEXT NOT NULL, status TEXT NOT NULL)"
-        )
-        conn.execute(
-            "INSERT INTO schedule_versions (group_name, payload_json, pdf_cache_path, parsed_at, status) "
-            "VALUES ('Б-Мв-101', '{\"a\": 1}', '/v1.pdf', '2026-09-16T00:00:00', 'active')"
-        )
-        conn.commit()
-
-
-def test_migrate_legacy_single_group_creates_group_from_settings(conn):
-    _seed_legacy_single_group_db(conn)
-    group_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
-    group = storage.get_group(conn, group_id)
-    assert group.name == "Б-Мв-101"
-    assert group.source_page_url == "https://example.com/schedules"
-    assert group.pdf_source_url == "https://example.com/101.pdf"
-    assert group.send_time == "09:00"
-    assert group.check_interval_minutes == 60
-    assert group.timezone == "Europe/Moscow"
-
-
-def test_migrate_legacy_single_group_moves_subscribers_to_members(conn):
-    _seed_legacy_single_group_db(conn)
-    group_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
-    assert sorted(storage.list_group_members(conn, group_id)) == [111, 222]
-
-
-def test_migrate_legacy_single_group_requires_source_page_url(conn):
-    _seed_legacy_single_group_db(conn)
-    with pytest.raises(ValueError):
-        storage.migrate_legacy_single_group(conn, None)
-
-
-def test_migrate_legacy_single_group_is_noop_on_fresh_install(conn):
-    assert storage.migrate_legacy_single_group(conn, None) is None
-    assert storage.count_groups(conn) == 0
-
-
-def test_migrate_legacy_single_group_is_noop_when_already_migrated(conn):
-    _seed_legacy_single_group_db(conn)
-    first_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
-    second_result = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
-    assert second_result is None
-    assert storage.count_groups(conn) == 1
-    assert first_id is not None
-
-
-def test_migrate_legacy_single_group_backfills_group_id_on_old_schedule_versions(conn):
-    _seed_legacy_single_group_db(conn, with_schedule_version=True)
-    group_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
-    active = storage.get_active_version(conn, group_id)
-    assert active is not None
-    assert active.payload_json == '{"a": 1}'
-
-
-def test_migrate_legacy_single_group_rebuilds_schedule_versions_so_inserts_work(conn):
-    # Regression test for the critical bug: on a real pre-existing database,
-    # the old group_name TEXT NOT NULL column survived a naive ALTER TABLE
-    # ADD COLUMN migration, so the first insert_new_version call after
-    # migration (i.e. the first time the schedule actually changes) raised
-    # sqlite3.IntegrityError: NOT NULL constraint failed: schedule_versions.group_name.
-    _seed_legacy_single_group_db(conn, with_schedule_version=True)
-    group_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
-
-    new_id = storage.insert_new_version(conn, group_id, '{"a": 2}', "/v2.pdf", "2026-10-09T00:00:00")
-
-    assert new_id is not None
-    active = storage.get_active_version(conn, group_id)
-    assert active is not None
-    assert active.payload_json == '{"a": 2}'
-    assert active.pdf_cache_path == "/v2.pdf"
-
-    # The old 'active' row from the legacy seed must now be superseded —
-    # there must be exactly one active row left for this group_id.
-    active_rows = conn.execute(
-        "SELECT COUNT(*) FROM schedule_versions WHERE group_id = ? AND status = 'active'",
-        (group_id,),
-    ).fetchone()[0]
-    assert active_rows == 1
-
-    # The schedule_versions table must no longer have a group_name column
-    # at all — it should match the current, final schema.
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(schedule_versions)").fetchall()}
-    assert "group_name" not in columns
-    assert "group_id" in columns
-
-
-def test_migrate_legacy_single_group_dedups_multiple_active_rows_onto_latest(conn):
-    _seed_legacy_single_group_db(conn, with_schedule_version=True)
-    # Simulate a second, older-shaped 'active' row that also predates the
-    # group_id column (e.g. a stale row left behind by some historical bug)
-    # so that after migration two rows would both claim status='active'
-    # for the same group_id if not deduped.
-    conn.execute(
-        "INSERT INTO schedule_versions (group_name, payload_json, pdf_cache_path, parsed_at, status) "
-        "VALUES ('Б-Мв-101', '{\"a\": 0}', '/v0.pdf', '2026-09-15T00:00:00', 'active')"
-    )
-    conn.commit()
-
-    group_id = storage.migrate_legacy_single_group(conn, "https://example.com/schedules")
-
-    active_rows = conn.execute(
-        "SELECT payload_json FROM schedule_versions WHERE group_id = ? AND status = 'active'",
-        (group_id,),
-    ).fetchall()
-    assert len(active_rows) == 1
-    # The row with the later parsed_at ('2026-09-16...') must be the one
-    # that stayed active.
-    assert active_rows[0][0] == '{"a": 1}'
 
 
 def test_create_group_starosta_fields_default_to_none(conn):

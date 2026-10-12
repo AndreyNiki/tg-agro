@@ -3,16 +3,76 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 
-def init_db(conn: sqlite3.Connection) -> None:
-    # REFERENCES groups(id) on members/schedule_versions is otherwise purely
-    # decorative — sqlite3 does not enforce foreign keys unless this pragma
-    # is set per-connection.
-    conn.execute("PRAGMA foreign_keys = ON")
+def _needs_institute_schema_rebuild(conn: sqlite3.Connection) -> bool:
+    info = conn.execute("PRAGMA table_info(groups)").fetchall()
+    if not info:
+        return False  # table doesn't exist yet; CREATE TABLE IF NOT EXISTS below handles it
+    columns = {row[1] for row in info}
+    return "institute_id" not in columns
+
+
+def _rebuild_groups_members_schedule_versions(conn: sqlite3.Connection) -> None:
+    # FK-safe drop order: schedule_versions/members reference groups(id).
     conn.executescript(
         """
-        CREATE TABLE IF NOT EXISTS subscribers (
+        DROP TABLE IF EXISTS schedule_versions;
+        DROP TABLE IF EXISTS members;
+        DROP TABLE IF EXISTS groups;
+        """
+    )
+    conn.commit()
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA foreign_keys = ON")
+    if _needs_institute_schema_rebuild(conn):
+        _rebuild_groups_members_schedule_versions(conn)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS institutes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            catalog_url TEXT NOT NULL,
+            check_interval_minutes INTEGER NOT NULL,
+            send_time TEXT NOT NULL,
+            timezone TEXT NOT NULL,
+            catalog_refresh_interval_minutes INTEGER NOT NULL,
+            last_catalog_sync_at TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS institute_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            institute_id INTEGER NOT NULL REFERENCES institutes(id) ON DELETE RESTRICT,
+            pdf_url TEXT NOT NULL,
+            group_names_json TEXT NOT NULL,
+            raw_label TEXT NOT NULL,
+            is_stale INTEGER NOT NULL DEFAULT 0,
+            last_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(institute_id, pdf_url)
+        );
+
+        CREATE TABLE IF NOT EXISTS groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            institute_id INTEGER NOT NULL REFERENCES institutes(id) ON DELETE RESTRICT,
+            institute_link_id INTEGER NOT NULL REFERENCES institute_links(id) ON DELETE RESTRICT,
+            name TEXT NOT NULL,
+            is_verified INTEGER NOT NULL DEFAULT 0,
+            starosta_chat_id INTEGER,
+            last_starosta_change_at TEXT,
+            is_closed INTEGER NOT NULL DEFAULT 0,
+            last_sync_failed_at TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(institute_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS members (
             chat_id INTEGER PRIMARY KEY,
-            group_name TEXT NOT NULL,
+            group_id INTEGER NOT NULL REFERENCES groups(id),
+            telegram_username TEXT,
+            display_name TEXT,
+            subscribed INTEGER NOT NULL DEFAULT 1,
             joined_at TEXT NOT NULL
         );
 
@@ -28,27 +88,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS groups (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            source_page_url TEXT NOT NULL,
-            pdf_source_url TEXT NOT NULL,
-            send_time TEXT NOT NULL,
-            check_interval_minutes INTEGER NOT NULL,
-            timezone TEXT NOT NULL,
-            last_sync_failed_at TEXT,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS members (
-            chat_id INTEGER PRIMARY KEY,
-            group_id INTEGER NOT NULL REFERENCES groups(id),
-            telegram_username TEXT,
-            display_name TEXT,
-            subscribed INTEGER NOT NULL DEFAULT 1,
-            joined_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS elections (
@@ -88,9 +127,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
-    _ensure_column(conn, "groups", "starosta_chat_id", "INTEGER")
-    _ensure_column(conn, "groups", "last_starosta_change_at", "TEXT")
-    _ensure_column(conn, "groups", "is_closed", "INTEGER NOT NULL DEFAULT 0")
     _migrate_group_change_requests_nullable_from_group(conn)
 
 
@@ -185,56 +221,90 @@ def insert_new_version(
 @dataclass
 class GroupRow:
     id: int
+    institute_id: int
+    institute_link_id: int
     name: str
-    source_page_url: str
-    pdf_source_url: str
-    send_time: str
-    check_interval_minutes: int
-    timezone: str
-    last_sync_failed_at: str | None
-    created_at: str
+    is_verified: bool
     starosta_chat_id: int | None
     last_starosta_change_at: str | None
     is_closed: bool
+    last_sync_failed_at: str | None
+    created_at: str
+    # Legacy fields for backwards compatibility (will be populated by institute/link in new schema)
+    source_page_url: str = ""
+    pdf_source_url: str = ""
+    send_time: str = ""
+    check_interval_minutes: int = 0
+    timezone: str = ""
 
 
 _GROUP_COLUMNS = (
-    "id, name, source_page_url, pdf_source_url, send_time, "
-    "check_interval_minutes, timezone, last_sync_failed_at, created_at, "
-    "starosta_chat_id, last_starosta_change_at, is_closed"
+    "id, institute_id, institute_link_id, name, is_verified, "
+    "starosta_chat_id, last_starosta_change_at, is_closed, last_sync_failed_at, created_at"
 )
 
 
 def _group_row_from_tuple(row) -> GroupRow:
-    *rest, is_closed = row
-    return GroupRow(*rest, bool(is_closed))
+    id_, institute_id, institute_link_id, name, is_verified, starosta_chat_id, last_starosta_change_at, is_closed, last_sync_failed_at, created_at = row
+    return GroupRow(
+        id=id_,
+        institute_id=institute_id,
+        institute_link_id=institute_link_id,
+        name=name,
+        is_verified=bool(is_verified),
+        starosta_chat_id=starosta_chat_id,
+        last_starosta_change_at=last_starosta_change_at,
+        is_closed=bool(is_closed),
+        last_sync_failed_at=last_sync_failed_at,
+        created_at=created_at,
+    )
 
 
 def create_group(
     conn: sqlite3.Connection,
     *,
+    institute_id: int,
+    institute_link_id: int,
     name: str,
-    source_page_url: str,
-    pdf_source_url: str,
-    send_time: str,
-    check_interval_minutes: int,
-    tz_name: str,
 ) -> int:
     cursor = conn.execute(
-        "INSERT INTO groups (name, source_page_url, pdf_source_url, send_time, "
-        "check_interval_minutes, timezone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO groups (institute_id, institute_link_id, name, created_at) VALUES (?, ?, ?, ?)",
         (
+            institute_id,
+            institute_link_id,
             name,
-            source_page_url,
-            pdf_source_url,
-            send_time,
-            check_interval_minutes,
-            tz_name,
             datetime.now(timezone.utc).isoformat(),
         ),
     )
     conn.commit()
     return cursor.lastrowid
+
+
+def create_institute(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    catalog_url: str,
+    check_interval_minutes: int,
+    send_time: str,
+    tz_name: str,
+    catalog_refresh_interval_minutes: int,
+) -> int:
+    """Create an institute (Task 2)."""
+    raise NotImplementedError("create_institute - Task 2")
+
+
+def create_institute_link(
+    conn: sqlite3.Connection,
+    *,
+    institute_id: int,
+    pdf_url: str,
+    group_names: list[str],
+    raw_label: str,
+    last_seen_at: str,
+) -> int:
+    """Create an institute link (Task 2)."""
+    raise NotImplementedError("create_institute_link - Task 2")
 
 
 def get_group(conn: sqlite3.Connection, group_id: int) -> GroupRow | None:
@@ -392,112 +462,6 @@ def list_all_member_chat_ids(conn: sqlite3.Connection) -> list[int]:
     return [row[0] for row in rows]
 
 
-def migrate_legacy_single_group(conn: sqlite3.Connection, legacy_source_page_url: str | None) -> int | None:
-    """One-time upgrade from the pre-multi-group schema (a single global
-    group tracked via settings.group_name/pdf_source/...) to the groups/
-    members tables. Returns the new group's id, or None if there was
-    nothing to migrate (fresh install, or already migrated — detected by
-    `groups` already having a row)."""
-    if count_groups(conn) > 0:
-        return None
-
-    legacy_group_name = get_setting(conn, "group_name")
-    if not legacy_group_name:
-        return None  # fresh install, nothing to migrate
-
-    if not legacy_source_page_url:
-        raise ValueError(
-            "Existing legacy group_name setting found but "
-            "LEGACY_GROUP_SOURCE_PAGE_URL is not set — cannot migrate without "
-            "a source page URL for 404 link rediscovery."
-        )
-
-    group_id = create_group(
-        conn,
-        name=legacy_group_name,
-        source_page_url=legacy_source_page_url,
-        pdf_source_url=get_setting(conn, "pdf_source") or "",
-        send_time=get_setting(conn, "daily_send_time") or "09:00",
-        check_interval_minutes=int(get_setting(conn, "check_interval_minutes") or "60"),
-        tz_name=get_setting(conn, "timezone") or "Europe/Moscow",
-    )
-
-    for chat_id, joined_at in conn.execute("SELECT chat_id, joined_at FROM subscribers").fetchall():
-        upsert_member(conn, chat_id, group_id, joined_at=joined_at, subscribed=True)
-
-    _rebuild_schedule_versions_for_migration(conn, group_id)
-    conn.commit()
-    return group_id
-
-
-def _rebuild_schedule_versions_for_migration(conn: sqlite3.Connection, group_id: int) -> None:
-    """Rebuilds `schedule_versions` into the current, final shape
-    (group_id NOT NULL, no group_name column) and backfills every
-    pre-existing row onto `group_id`. A simple `ALTER TABLE ADD COLUMN`
-    is not enough here: on a real pre-multi-group database the old
-    `group_name TEXT NOT NULL` column (no default) is still present
-    alongside the newly-added nullable `group_id`, so the very next
-    `insert_new_version` call — which no longer supplies `group_name` —
-    fails with a NOT NULL constraint violation. Rebuilding the table is
-    the standard SQLite pattern for dropping/retyping a column.
-
-    Also deduplicates `status = 'active'` down to at most one row per
-    group_id (keeping the one with the latest parsed_at), since legacy
-    data could in principle have had more than one old group_name
-    collapse onto the same migrated group_id — `get_active_version`'s
-    bare `fetchone()` has no ORDER BY/tiebreak, so more than one active
-    row would make the result arbitrary."""
-    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(schedule_versions)").fetchall()}
-    group_id_select = "group_id" if "group_id" in existing_columns else "NULL"
-    old_rows = conn.execute(
-        f"SELECT id, {group_id_select}, payload_json, pdf_cache_path, parsed_at, status "
-        "FROM schedule_versions"
-    ).fetchall()
-
-    conn.execute("DROP TABLE schedule_versions")
-    conn.execute(
-        """
-        CREATE TABLE schedule_versions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id INTEGER NOT NULL REFERENCES groups(id),
-            payload_json TEXT NOT NULL,
-            pdf_cache_path TEXT NOT NULL,
-            parsed_at TEXT NOT NULL,
-            status TEXT NOT NULL
-        )
-        """
-    )
-
-    # Dedup active rows per (backfilled) group_id: only the one with the
-    # latest parsed_at stays active, the rest become superseded.
-    latest_active_parsed_at: dict[int, str] = {}
-    for _id, row_group_id, _payload, _cache, parsed_at, status in old_rows:
-        effective_group_id = row_group_id if row_group_id is not None else group_id
-        if status == "active":
-            current = latest_active_parsed_at.get(effective_group_id)
-            if current is None or parsed_at > current:
-                latest_active_parsed_at[effective_group_id] = parsed_at
-
-    for old_id, row_group_id, payload_json, pdf_cache_path, parsed_at, status in old_rows:
-        effective_group_id = row_group_id if row_group_id is not None else group_id
-        if status == "active" and parsed_at != latest_active_parsed_at.get(effective_group_id):
-            status = "superseded"
-        conn.execute(
-            "INSERT INTO schedule_versions (id, group_id, payload_json, pdf_cache_path, parsed_at, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (old_id, effective_group_id, payload_json, pdf_cache_path, parsed_at, status),
-        )
-
-
-def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    return column in columns
-
-
-def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl_type: str) -> None:
-    if not _column_exists(conn, table, column):
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
-        conn.commit()
 
 
 @dataclass

@@ -12,7 +12,7 @@ class Config:
     default_daily_send_time: str
     default_check_interval_minutes: int
     default_timezone: str
-    legacy_group_source_page_url: str | None = None
+    default_catalog_refresh_interval_minutes: int
 
 
 def load_config(env: Mapping[str, str]) -> Config:
@@ -33,5 +33,7 @@ def load_config(env: Mapping[str, str]) -> Config:
         default_daily_send_time=env.get("DAILY_SEND_TIME", "09:00"),
         default_check_interval_minutes=int(env.get("CHECK_INTERVAL_MINUTES", "60")),
         default_timezone=env.get("TIMEZONE", "Europe/Moscow"),
-        legacy_group_source_page_url=env.get("LEGACY_GROUP_SOURCE_PAGE_URL"),
+        default_catalog_refresh_interval_minutes=int(
+            env.get("CATALOG_REFRESH_INTERVAL_MINUTES", "10080")  # 1 week
+        ),
     )

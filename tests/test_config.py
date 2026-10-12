@@ -27,13 +27,6 @@ def test_load_config_raises_on_missing_required_var():
         load_config({"ADMIN_CHAT_ID": "42"})
 
 
-def test_load_config_reads_legacy_group_source_page_url_when_present():
-    env = _base_env()
-    env["LEGACY_GROUP_SOURCE_PAGE_URL"] = "https://example.com/schedules"
-    config = load_config(env)
-    assert config.legacy_group_source_page_url == "https://example.com/schedules"
-
-
-def test_load_config_defaults_legacy_group_source_page_url_to_none():
+def test_load_config_defaults_catalog_refresh_interval_to_one_week():
     config = load_config(_base_env())
-    assert config.legacy_group_source_page_url is None
+    assert config.default_catalog_refresh_interval_minutes == 10080

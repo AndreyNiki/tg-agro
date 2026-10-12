@@ -49,13 +49,40 @@ def config():
         default_daily_send_time="09:00",
         default_check_interval_minutes=60,
         default_timezone="Europe/Moscow",
-        legacy_group_source_page_url=None,
+        default_catalog_refresh_interval_minutes=10080,
     )
 
 
 def _patch_week_formula(monkeypatch):
     monkeypatch.setattr(
         "main.fetch_week_formula", lambda url: WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
+    )
+
+
+def _make_test_group(conn, name="Б-Мв-101"):
+    """Helper to create a test group with dummy institute and link (for test_main_wiring)."""
+    # Create a dummy institute (minimal Task 2 implementation for testing)
+    from datetime import datetime, timezone
+    cursor = conn.execute(
+        "INSERT INTO institutes (name, catalog_url, check_interval_minutes, send_time, timezone, "
+        "catalog_refresh_interval_minutes, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("test-institute", "https://example.com/catalog", 60, "09:00", "Europe/Moscow", 10080, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    institute_id = cursor.lastrowid
+
+    # Create a dummy link (minimal Task 2 implementation for testing)
+    cursor = conn.execute(
+        "INSERT INTO institute_links (institute_id, pdf_url, group_names_json, raw_label, last_seen_at, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (institute_id, "https://example.com/test.pdf", f'["{name}"]', name, datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    institute_link_id = cursor.lastrowid
+
+    return storage.create_group(
+        conn, institute_id=institute_id, institute_link_id=institute_link_id, name=name
     )
 
 
@@ -93,28 +120,6 @@ def test_build_application_does_not_create_a_group_on_fresh_install(conn, config
     build_application(config, conn)
 
     assert storage.count_groups(conn) == 0
-
-
-def test_build_application_migrates_legacy_single_group_database(conn, config, monkeypatch):
-    _patch_week_formula(monkeypatch)
-    storage.set_setting(conn, "group_name", "Б-Мв-101")
-    storage.set_setting(conn, "pdf_source", "https://example.com/101.pdf")
-    storage.set_setting(conn, "daily_send_time", "09:00")
-    storage.set_setting(conn, "check_interval_minutes", "60")
-    storage.set_setting(conn, "timezone", "Europe/Moscow")
-    conn.execute(
-        "INSERT INTO subscribers (chat_id, group_name, joined_at) VALUES (111, 'Б-Мв-101', '2026-09-16T00:00:00')"
-    )
-    conn.commit()
-    config.legacy_group_source_page_url = "https://example.com/schedules"
-
-    application = build_application(config, conn)
-
-    assert storage.count_groups(conn) == 1
-    group = storage.list_all_groups(conn)[0]
-    assert group.name == "Б-Мв-101"
-    assert storage.get_member(conn, 111).group_id == group.id
-    application.bot_data["_scheduler"].shutdown(wait=False)
 
 
 def test_build_application_week_formula_reflects_later_holder_updates(conn, config, monkeypatch):
@@ -176,10 +181,7 @@ async def test_day_callback_through_real_bot_data_replies_gracefully_without_act
     _patch_week_formula(monkeypatch)
 
     application = build_application(config, conn)
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_test_group(conn, "Б-Мв-101")
     storage.upsert_member(conn, 111, group_id, joined_at="t")
 
     update = MagicMock()
@@ -211,10 +213,7 @@ async def test_day_callback_through_real_bot_data_replies_with_schedule_when_act
     config.pdf_cache_dir = str(tmp_path)
 
     application = build_application(config, conn)
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url=fixture_pdf,
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_test_group(conn, "Б-Мв-101")
     storage.upsert_member(conn, 111, group_id, joined_at="t")
 
     sync_fn = application.bot_data["sync_fn"]
@@ -247,10 +246,7 @@ async def test_post_init_backfills_missing_member_profiles(conn, config, monkeyp
     _patch_week_formula(monkeypatch)
 
     application = build_application(config, conn)
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_test_group(conn, "Б-Мв-101")
     storage.upsert_member(conn, 111, group_id, joined_at="t")
 
     # application.bot is a real (frozen) ExtBot instance — TelegramObject
@@ -278,10 +274,7 @@ async def test_post_init_backfill_isolates_per_chat_failures(conn, config, monke
     _patch_week_formula(monkeypatch)
 
     application = build_application(config, conn)
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_test_group(conn, "Б-Мв-101")
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.upsert_member(conn, 222, group_id, joined_at="t")
 
@@ -330,10 +323,7 @@ async def test_build_application_shares_one_lock_per_group_between_refresh_and_s
     test."""
     _patch_week_formula(monkeypatch)
 
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_test_group(conn, "Б-Мв-101")
 
     application = build_application(config, conn)
     scheduler = application.bot_data["_scheduler"]
@@ -377,14 +367,8 @@ def test_build_application_still_gives_different_groups_independent_locks(conn, 
     whole point of per-group job isolation."""
     _patch_week_formula(monkeypatch)
 
-    group_a = storage.create_group(
-        conn, name="A", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
-    group_b = storage.create_group(
-        conn, name="B", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_a = _make_test_group(conn, "A")
+    group_b = _make_test_group(conn, "B")
 
     application = build_application(config, conn)
     scheduler = application.bot_data["_scheduler"]
