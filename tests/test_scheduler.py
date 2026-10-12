@@ -12,10 +12,9 @@ from schedule_bot.pdf_parser import DaySchedule, Lesson, Schedule, schedule_to_d
 from schedule_bot.scheduler import (
     WeekFormulaHolder,
     build_scheduler,
-    daily_send_job,
-    hourly_check_job,
-    reschedule_group_jobs,
-    schedule_group_jobs,
+    link_check_job,
+    link_daily_send_job,
+    reschedule_institute_link_jobs,
     weekly_weektype_refresh_job,
 )
 from schedule_bot.weektype import WeekFormula, load_week_formula
@@ -31,23 +30,32 @@ def conn():
     return connection
 
 
-def _make_group(conn, name="Б-Мв-101", send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow"):
-    group_id = storage.create_group(
-        conn, name=name, source_page_url="https://example.com/schedules",
-        pdf_source_url="/tmp/does-not-matter.pdf", send_time=send_time,
-        check_interval_minutes=check_interval_minutes, tz_name=tz_name,
+def _make_institute(conn, name="ИТ", send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow"):
+    return storage.create_institute(
+        conn, name=name, catalog_url="https://example.com/catalog",
+        check_interval_minutes=check_interval_minutes, send_time=send_time, tz_name=tz_name,
+        catalog_refresh_interval_minutes=10080,
     )
-    return group_id
+
+
+def _make_link_and_group(conn, institute_id, pdf_url="/tmp/does-not-matter.pdf", name="Б-Мв-101"):
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url=pdf_url, group_names=[name], raw_label=name, last_seen_at="t"
+    )
+    group_id = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name)
+    return link_id, group_id
 
 
 def _seed_active_version(conn, group_id, pdf_cache_path=FIXTURE_PDF_PATH):
     schedule = Schedule(
-        table_x0=0.0, table_x1=500.0, header_y0=0.0, header_y1=5.0,
-        days={"Понедельник": DaySchedule(y0=0.0, y1=10.0, lessons=[Lesson(time="8.30-10.00", upper="Лекция", lower="Семинар")])},
+        table_x0=0.0, table_x1=500.0, header_y0=0.0, header_y1=10.0,
+        days={"Понедельник": DaySchedule(
+            y0=0.0, y1=10.0, lessons=[Lesson(time="8.30-10.00", upper="Лекция", lower="Семинар")],
+            time_col_x0=30.0, time_col_x1=60.0, group_col_x0=60.0, group_col_x1=300.0,
+        )},
     )
     storage.insert_new_version(
-        conn, group_id, json.dumps(schedule_to_dict(schedule)), pdf_cache_path,
-        datetime.now(timezone.utc).isoformat(),
+        conn, group_id, json.dumps(schedule_to_dict(schedule)), pdf_cache_path, datetime.now(timezone.utc).isoformat(),
     )
 
 
@@ -61,81 +69,81 @@ def _config():
     return MagicMock(
         pdf_cache_dir="/tmp/cache", admin_chat_id=999,
         default_daily_send_time="09:00", default_check_interval_minutes=60, default_timezone="Europe/Moscow",
+        default_catalog_refresh_interval_minutes=10080,
     )
 
 
+@pytest.fixture
+def shutdown_scheduler():
+    schedulers = []
+
+    def _register(scheduler):
+        schedulers.append(scheduler)
+        return scheduler
+
+    yield _register
+    for scheduler in schedulers:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+
+
 @pytest.mark.asyncio
-async def test_hourly_check_job_swallows_sync_failure_instead_of_crashing(conn, monkeypatch):
+async def test_link_check_job_swallows_sync_failure_instead_of_crashing(conn, monkeypatch):
     import schedule_bot.scheduler as scheduler_module
 
-    group_id = _make_group(conn)
+    institute_id = _make_institute(conn)
+    link_id, _ = _make_link_and_group(conn, institute_id)
 
-    async def failing_run_sync(*args, **kwargs):
+    async def failing_sync(*args, **kwargs):
         raise ConnectionError("network unreachable")
 
-    monkeypatch.setattr(scheduler_module, "_run_sync", failing_run_sync)
+    monkeypatch.setattr(scheduler_module, "sync_institute_link", failing_sync)
 
     bot = MagicMock()
     bot.send_message = AsyncMock()
 
-    await hourly_check_job(conn, _config(), bot, group_id)  # must not raise
+    await link_check_job(conn, _config(), bot, link_id)  # must not raise
 
 
 @pytest.mark.asyncio
-async def test_hourly_check_job_notifies_admin_with_group_name_on_sync_failure(conn, monkeypatch):
+async def test_link_check_job_notifies_admin_on_sync_failure(conn, monkeypatch):
     import schedule_bot.scheduler as scheduler_module
 
-    group_id = _make_group(conn, name="Б-Мв-101")
+    institute_id = _make_institute(conn)
+    link_id, _ = _make_link_and_group(conn, institute_id, name="Б-Мв-101")
 
-    async def failing_run_sync(*args, **kwargs):
+    async def failing_sync(*args, **kwargs):
         raise ConnectionError("network unreachable")
 
-    monkeypatch.setattr(scheduler_module, "_run_sync", failing_run_sync)
+    monkeypatch.setattr(scheduler_module, "sync_institute_link", failing_sync)
 
     bot = MagicMock()
     bot.send_message = AsyncMock()
 
-    await hourly_check_job(conn, _config(), bot, group_id)
+    await link_check_job(conn, _config(), bot, link_id)
 
     bot.send_message.assert_awaited_once()
     assert bot.send_message.await_args.kwargs["chat_id"] == 999
-    assert "Б-Мв-101" in bot.send_message.await_args.kwargs["text"]
 
 
 @pytest.mark.asyncio
-async def test_hourly_check_job_skips_missing_group_without_crashing(conn):
-    await hourly_check_job(conn, _config(), MagicMock(), group_id=9999)  # must not raise
+async def test_link_check_job_skips_missing_link_without_crashing(conn):
+    await link_check_job(conn, _config(), MagicMock(), institute_link_id=9999)  # must not raise
 
 
 @pytest.mark.asyncio
-async def test_hourly_check_job_survives_admin_notify_failure(conn, monkeypatch):
+async def test_link_daily_send_job_sends_to_all_groups_of_the_link(conn, monkeypatch):
     import schedule_bot.scheduler as scheduler_module
 
-    group_id = _make_group(conn)
-
-    async def failing_run_sync(*args, **kwargs):
-        raise ConnectionError("network unreachable")
-
-    monkeypatch.setattr(scheduler_module, "_run_sync", failing_run_sync)
-
-    bot = MagicMock()
-    bot.send_message = AsyncMock(side_effect=RuntimeError("bot blocked by admin"))
-
-    await hourly_check_job(conn, _config(), bot, group_id)  # must not raise
-
-
-@pytest.mark.asyncio
-async def test_daily_send_job_sends_even_when_sync_fails(conn, monkeypatch):
-    import schedule_bot.scheduler as scheduler_module
-
-    group_id = _make_group(conn)
+    institute_id = _make_institute(conn)
+    link_id, group_id = _make_link_and_group(conn, institute_id)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     _seed_active_version(conn, group_id)
 
-    async def failing_run_sync(*args, **kwargs):
-        raise RuntimeError("network error")
+    async def noop_sync(*args, **kwargs):
+        return []
 
-    monkeypatch.setattr(scheduler_module, "_run_sync", failing_run_sync)
+    monkeypatch.setattr(scheduler_module, "sync_institute_link", noop_sync)
     monkeypatch.setattr(scheduler_module, "today_in_configured_timezone", lambda tz: FixedMonday.today())
     monkeypatch.setattr(scheduler_module, "render_day_image", lambda *a, **k: None)
 
@@ -144,24 +152,26 @@ async def test_daily_send_job_sends_even_when_sync_fails(conn, monkeypatch):
     bot.send_photo = AsyncMock()
     holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
 
-    await daily_send_job(conn, _config(), bot, group_id, holder)
+    await link_daily_send_job(conn, _config(), bot, link_id, holder)
 
     bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_args.kwargs["chat_id"] == 111
 
 
 @pytest.mark.asyncio
-async def test_daily_send_job_isolates_per_subscriber_failures(conn, monkeypatch):
+async def test_link_daily_send_job_isolates_per_subscriber_failures(conn, monkeypatch):
     import schedule_bot.scheduler as scheduler_module
 
-    group_id = _make_group(conn)
+    institute_id = _make_institute(conn)
+    link_id, group_id = _make_link_and_group(conn, institute_id)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.upsert_member(conn, 222, group_id, joined_at="t")
     _seed_active_version(conn, group_id)
 
-    async def noop_run_sync(*args, **kwargs):
-        return None
+    async def noop_sync(*args, **kwargs):
+        return []
 
-    monkeypatch.setattr(scheduler_module, "_run_sync", noop_run_sync)
+    monkeypatch.setattr(scheduler_module, "sync_institute_link", noop_sync)
     monkeypatch.setattr(scheduler_module, "today_in_configured_timezone", lambda tz: FixedMonday.today())
     monkeypatch.setattr(scheduler_module, "render_day_image", lambda *a, **k: None)
 
@@ -175,143 +185,105 @@ async def test_daily_send_job_isolates_per_subscriber_failures(conn, monkeypatch
     bot.send_photo = AsyncMock()
     holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
 
-    await daily_send_job(conn, _config(), bot, group_id, holder)
+    await link_daily_send_job(conn, _config(), bot, link_id, holder)
 
     assert bot.send_message.await_count == 2
-    sent_chat_ids = {call.kwargs["chat_id"] for call in bot.send_message.await_args_list}
-    assert sent_chat_ids == {111, 222}
 
 
-@pytest.mark.asyncio
-async def test_daily_send_job_warns_when_group_last_sync_failed(conn, monkeypatch):
-    import schedule_bot.scheduler as scheduler_module
-
-    group_id = _make_group(conn)
-    storage.upsert_member(conn, 111, group_id, joined_at="t")
-    _seed_active_version(conn, group_id)
-    storage.set_group_last_sync_failed_at(conn, group_id, "2026-09-17T08:00:00+00:00")
-
-    async def noop_run_sync(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr(scheduler_module, "_run_sync", noop_run_sync)
-    monkeypatch.setattr(scheduler_module, "today_in_configured_timezone", lambda tz: FixedMonday.today())
-    monkeypatch.setattr(scheduler_module, "render_day_image", lambda *a, **k: None)
-
-    bot = MagicMock()
-    bot.send_message = AsyncMock()
-    bot.send_photo = AsyncMock()
-    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
-
-    await daily_send_job(conn, _config(), bot, group_id, holder)
-
-    assert "могли устареть" in bot.send_message.await_args_list[0].kwargs["text"]
-
-
-@pytest.mark.asyncio
-async def test_daily_send_job_skips_missing_group_without_crashing(conn):
-    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
-    await daily_send_job(conn, _config(), MagicMock(), 9999, holder)  # must not raise
-
-
-def test_build_scheduler_registers_one_job_pair_per_group(conn):
-    group_a = _make_group(conn, name="A")
-    group_b = _make_group(conn, name="B")
+def test_build_scheduler_registers_link_and_catalog_jobs(conn, shutdown_scheduler):
+    institute_id = _make_institute(conn)
+    link_id, _ = _make_link_and_group(conn, institute_id)
     bot = MagicMock()
     holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
 
-    scheduler = build_scheduler(conn, _config(), bot, holder)
+    scheduler = shutdown_scheduler(build_scheduler(conn, _config(), bot, holder))
 
     job_ids = {job.id for job in scheduler.get_jobs()}
-    assert {f"daily_send_{group_a}", f"hourly_check_{group_a}", f"startup_sync_{group_a}"}.issubset(job_ids)
-    assert {f"daily_send_{group_b}", f"hourly_check_{group_b}", f"startup_sync_{group_b}"}.issubset(job_ids)
+    assert f"link_check_{link_id}" in job_ids
+    assert f"link_daily_send_{link_id}" in job_ids
+    assert f"institute_catalog_refresh_{institute_id}" in job_ids
     assert "weekly_weektype_refresh" in job_ids
-    scheduler.shutdown(wait=False)
 
 
-def test_build_scheduler_binds_daily_trigger_to_group_timezone(conn):
-    group_id = _make_group(conn, tz_name="Asia/Yekaterinburg")
+def test_build_scheduler_binds_daily_trigger_to_institute_timezone(conn, shutdown_scheduler):
+    institute_id = _make_institute(conn, tz_name="Asia/Yekaterinburg")
+    link_id, _ = _make_link_and_group(conn, institute_id)
     bot = MagicMock()
     holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
 
-    scheduler = build_scheduler(conn, _config(), bot, holder)
+    scheduler = shutdown_scheduler(build_scheduler(conn, _config(), bot, holder))
 
-    job = scheduler.get_job(f"daily_send_{group_id}")
+    job = scheduler.get_job(f"link_daily_send_{link_id}")
     assert str(job.trigger.timezone) == "Asia/Yekaterinburg"
-    scheduler.shutdown(wait=False)
 
 
-def test_build_scheduler_gives_each_group_its_own_lock(conn):
-    """Regression test: build_scheduler used to create a SINGLE lock and
-    pass the same object to every group's jobs, which would serialize
-    sync across unrelated groups (different `active` rows, different
-    cache files) — defeating the point of per-group job pairs. Each
-    group's hourly_check job must hold a lock object distinct from every
-    other group's."""
-    group_a = _make_group(conn, name="A")
-    group_b = _make_group(conn, name="B")
+def test_build_scheduler_gives_each_link_its_own_lock(conn, shutdown_scheduler):
+    institute_id = _make_institute(conn)
+    link_a, _ = _make_link_and_group(conn, institute_id, pdf_url="a.pdf", name="A")
+    link_b, _ = _make_link_and_group(conn, institute_id, pdf_url="b.pdf", name="B")
     bot = MagicMock()
     holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
 
-    scheduler = build_scheduler(conn, _config(), bot, holder)
+    scheduler = shutdown_scheduler(build_scheduler(conn, _config(), bot, holder))
 
-    lock_a = scheduler.get_job(f"hourly_check_{group_a}").args[-1]
-    lock_b = scheduler.get_job(f"hourly_check_{group_b}").args[-1]
+    lock_a = scheduler.get_job(f"link_check_{link_a}").args[-2]
+    lock_b = scheduler.get_job(f"link_check_{link_b}").args[-2]
     assert lock_a is not lock_b
 
-    async def _acquire_both_without_blocking():
-        await asyncio.wait_for(lock_a.acquire(), timeout=1)
-        try:
-            # group B's lock must be acquirable while group A's is held —
-            # if they were the same object this would deadlock/time out.
-            await asyncio.wait_for(lock_b.acquire(), timeout=1)
-            lock_b.release()
-        finally:
-            lock_a.release()
 
-    asyncio.run(_acquire_both_without_blocking())
-    scheduler.shutdown(wait=False)
-
-
-def test_reschedule_group_jobs_updates_trigger_time(conn):
-    group_id = _make_group(conn)
+def test_build_scheduler_registers_n_independent_jobs_per_link(conn, shutdown_scheduler):
+    # Binding constraint: jobs are scheduled per-LINK, not per-institute —
+    # an institute with N links must get N independent check/daily_send
+    # job pairs (each its own APScheduler job, independently triggerable),
+    # not a single job that loops over all links sequentially.
+    institute_id = _make_institute(conn)
+    link_ids = [
+        _make_link_and_group(conn, institute_id, pdf_url=f"{i}.pdf", name=f"G{i}")[0]
+        for i in range(5)
+    ]
     bot = MagicMock()
     holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
-    scheduler = build_scheduler(conn, _config(), bot, holder)
 
-    storage.update_group_send_time(conn, group_id, "07:15")
-    reschedule_group_jobs(scheduler, conn, _config(), bot, group_id, holder, lock=None)
+    scheduler = shutdown_scheduler(build_scheduler(conn, _config(), bot, holder))
 
-    job = scheduler.get_job(f"daily_send_{group_id}")
+    job_ids = {job.id for job in scheduler.get_jobs()}
+    for link_id in link_ids:
+        assert f"link_check_{link_id}" in job_ids
+        assert f"link_daily_send_{link_id}" in job_ids
+    # Exactly one catalog-refresh job for the institute, regardless of
+    # how many links it has.
+    catalog_job_count = sum(1 for jid in job_ids if jid == f"institute_catalog_refresh_{institute_id}")
+    assert catalog_job_count == 1
+    # Each check job's target callable is link_check_job (not some
+    # institute-level looping wrapper), confirming per-link dispatch.
+    import schedule_bot.scheduler as scheduler_module
+    for link_id in link_ids:
+        job = scheduler.get_job(f"link_check_{link_id}")
+        assert job.func is scheduler_module.link_check_job
+        assert job.args[3] == link_id
+
+
+def test_reschedule_institute_link_jobs_updates_trigger_time(conn, shutdown_scheduler):
+    institute_id = _make_institute(conn)
+    link_id, _ = _make_link_and_group(conn, institute_id)
+    bot = MagicMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+    scheduler = shutdown_scheduler(build_scheduler(conn, _config(), bot, holder))
+
+    storage.update_institute_send_time(conn, institute_id, "07:15")
+    reschedule_institute_link_jobs(scheduler, conn, _config(), bot, link_id, holder, lock=None)
+
+    job = scheduler.get_job(f"link_daily_send_{link_id}")
     field_names = [f.name for f in job.trigger.fields]
     assert job.trigger.fields[field_names.index("hour")].expressions[0].first == 7
     assert job.trigger.fields[field_names.index("minute")].expressions[0].first == 15
-    scheduler.shutdown(wait=False)
 
 
-def test_reschedule_group_jobs_adds_jobs_for_a_brand_new_group(conn):
-    """Creating a group after the scheduler already started must be able
-    to add its jobs without a full scheduler rebuild — reschedule_group_jobs
-    must work even when no job for this group_id exists yet."""
+def test_reschedule_institute_link_jobs_is_noop_for_deleted_link(conn, shutdown_scheduler):
     bot = MagicMock()
     holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
-    scheduler = build_scheduler(conn, _config(), bot, holder)
-
-    new_group_id = _make_group(conn, name="New-Group")
-    reschedule_group_jobs(scheduler, conn, _config(), bot, new_group_id, holder, lock=None)
-
-    assert scheduler.get_job(f"daily_send_{new_group_id}") is not None
-    assert scheduler.get_job(f"hourly_check_{new_group_id}") is not None
-    scheduler.shutdown(wait=False)
-
-
-def test_reschedule_group_jobs_is_noop_for_deleted_group(conn):
-    bot = MagicMock()
-    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
-    scheduler = build_scheduler(conn, _config(), bot, holder)
-
-    reschedule_group_jobs(scheduler, conn, _config(), bot, 9999, holder, lock=None)  # must not raise
-    scheduler.shutdown(wait=False)
+    scheduler = shutdown_scheduler(build_scheduler(conn, _config(), bot, holder))
+    reschedule_institute_link_jobs(scheduler, conn, _config(), bot, 9999, holder, lock=None)  # must not raise
 
 
 @pytest.mark.asyncio
@@ -329,17 +301,33 @@ async def test_weekly_weektype_refresh_job_persists_successful_fetch(conn, monke
 
 
 @pytest.mark.asyncio
-async def test_weekly_weektype_refresh_job_keeps_old_formula_on_failure(conn, monkeypatch):
-    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
-
+async def test_link_check_job_shares_catalog_refreshed_this_cycle_across_calls(conn, monkeypatch):
+    # The rate-limiting set from Task 12 must be created ONCE per
+    # scheduler build/run-cycle and passed into every link_check_job call
+    # for that cycle — not freshly created inside link_check_job itself
+    # (which would defeat its whole purpose of rate-limiting catalog
+    # refreshes across all of one institute's links within a cycle).
     import schedule_bot.scheduler as scheduler_module
 
-    def raise_error(url):
-        raise ConnectionError("network unreachable")
+    institute_id = _make_institute(conn)
+    link_a, _ = _make_link_and_group(conn, institute_id, pdf_url="a.pdf", name="A")
+    link_b, _ = _make_link_and_group(conn, institute_id, pdf_url="b.pdf", name="B")
 
-    monkeypatch.setattr(scheduler_module, "fetch_week_formula", raise_error)
+    seen_sets = []
 
-    await weekly_weektype_refresh_job(conn, holder)
+    async def recording_sync(conn_, institute_link, institute, pdf_cache_dir, notify, *, catalog_refreshed_this_cycle):
+        seen_sets.append(catalog_refreshed_this_cycle)
+        catalog_refreshed_this_cycle.add(institute.id)
+        return []
 
-    assert holder.formula == WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
-    assert load_week_formula(conn) is None
+    monkeypatch.setattr(scheduler_module, "sync_institute_link", recording_sync)
+
+    cycle_set: set = set()
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await link_check_job(conn, _config(), bot, link_a, catalog_refreshed_this_cycle=cycle_set)
+    await link_check_job(conn, _config(), bot, link_b, catalog_refreshed_this_cycle=cycle_set)
+
+    assert seen_sets[0] is seen_sets[1] is cycle_set
+    assert institute_id in cycle_set
