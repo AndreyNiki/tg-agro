@@ -42,7 +42,7 @@ def _make_group(conn, name="Б-Мв-101", send_time="09:00", check_interval_minu
 
 def _seed_active_version(conn, group_id, pdf_cache_path=FIXTURE_PDF_PATH):
     schedule = Schedule(
-        table_x0=0.0, table_x1=500.0,
+        table_x0=0.0, table_x1=500.0, header_y0=0.0, header_y1=5.0,
         days={"Понедельник": DaySchedule(y0=0.0, y1=10.0, lessons=[Lesson(time="8.30-10.00", upper="Лекция", lower="Семинар")])},
     )
     storage.insert_new_version(

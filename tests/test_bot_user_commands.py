@@ -91,6 +91,8 @@ def sample_schedule():
     return Schedule(
         table_x0=0.0,
         table_x1=500.0,
+        header_y0=0.0,
+        header_y1=5.0,
         days={
             "Среда": DaySchedule(
                 y0=0.0, y1=10.0, lessons=[Lesson(time="8.30-10.00", upper="Лекция", lower="Семинар")]
@@ -272,6 +274,8 @@ async def test_day_callback_uses_exact_picked_date_not_today(conn):
     schedule = Schedule(
         table_x0=0.0,
         table_x1=500.0,
+        header_y0=0.0,
+        header_y1=5.0,
         days={
             "Понедельник": DaySchedule(
                 y0=0.0, y1=10.0, lessons=[Lesson(time="8.30-10.00", upper="Лекция", lower="Семинар")]

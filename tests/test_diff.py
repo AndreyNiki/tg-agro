@@ -7,7 +7,7 @@ def make_schedule(**days_lessons):
         day: DaySchedule(y0=0.0, y1=10.0, lessons=lessons)
         for day, lessons in days_lessons.items()
     }
-    return Schedule(table_x0=0.0, table_x1=500.0, days=days)
+    return Schedule(table_x0=0.0, table_x1=500.0, header_y0=0.0, header_y1=5.0, days=days)
 
 
 def test_no_changes_returns_empty_list():

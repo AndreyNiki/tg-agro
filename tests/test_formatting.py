@@ -8,6 +8,8 @@ def make_schedule():
     return Schedule(
         table_x0=0.0,
         table_x1=500.0,
+        header_y0=0.0,
+        header_y1=5.0,
         days={
             "Среда": DaySchedule(
                 y0=0.0,
@@ -35,6 +37,8 @@ def test_format_shows_no_lesson_when_neither_week_has_one():
     schedule = Schedule(
         table_x0=0.0,
         table_x1=500.0,
+        header_y0=0.0,
+        header_y1=5.0,
         days={
             "Среда": DaySchedule(
                 y0=0.0, y1=10.0, lessons=[Lesson(time="8.30-10.00", upper=None, lower=None)]

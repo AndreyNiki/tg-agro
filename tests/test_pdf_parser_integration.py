@@ -1,7 +1,12 @@
 from pathlib import Path
 import json
 import pytest
-from schedule_bot.pdf_parser import parse_schedule, schedule_to_dict, schedule_from_dict
+from schedule_bot.pdf_parser import (
+    parse_schedule,
+    parse_schedules_for_groups,
+    schedule_to_dict,
+    schedule_from_dict,
+)
 
 FIXTURE_PATH = str(Path(__file__).parent / "fixtures" / "schedule_sample.pdf")
 
@@ -54,3 +59,47 @@ def test_schedule_round_trips_through_json(schedule):
     assert restored.table_x0 == schedule.table_x0
     assert restored.table_x1 == schedule.table_x1
     assert restored.days["Среда"].lessons == schedule.days["Среда"].lessons
+
+
+def test_parse_schedule_includes_header_y_bounds():
+    schedule = parse_schedule(FIXTURE_PATH, "Б-Мв-101")
+    assert schedule.header_y0 is not None
+    assert schedule.header_y1 is not None
+    assert schedule.header_y1 > schedule.header_y0
+
+
+def test_schedule_round_trip_preserves_header_bounds():
+    schedule = parse_schedule(FIXTURE_PATH, "Б-Мв-101")
+    restored = schedule_from_dict(schedule_to_dict(schedule))
+    assert restored.header_y0 == schedule.header_y0
+    assert restored.header_y1 == schedule.header_y1
+    restored_day = restored.days["Среда"]
+    original_day = schedule.days["Среда"]
+    assert restored_day.time_col_x0 == original_day.time_col_x0
+    assert restored_day.group_col_x1 == original_day.group_col_x1
+
+
+def test_parse_schedules_for_groups_extracts_raw_rows_exactly_once(monkeypatch):
+    import schedule_bot.pdf_parser as pdf_parser_module
+
+    call_count = 0
+    real_extract = pdf_parser_module.extract_raw_rows
+
+    def counting_extract(source):
+        nonlocal call_count
+        call_count += 1
+        return real_extract(source)
+
+    monkeypatch.setattr(pdf_parser_module, "extract_raw_rows", counting_extract)
+
+    results = parse_schedules_for_groups(FIXTURE_PATH, ["Б-Мв-101", "Б-Эв-101"])
+
+    assert call_count == 1
+    assert results["Б-Мв-101"] is not None
+    assert isinstance(results["Б-Мв-101"], pdf_parser_module.Schedule)
+
+
+def test_parse_schedules_for_groups_returns_none_for_unknown_group():
+    results = parse_schedules_for_groups(FIXTURE_PATH, ["Б-Мв-101", "НЕТ-ТАКОЙ-ГРУППЫ"])
+    assert results["Б-Мв-101"] is not None
+    assert results["НЕТ-ТАКОЙ-ГРУППЫ"] is None
