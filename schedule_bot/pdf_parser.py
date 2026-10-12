@@ -101,18 +101,34 @@ class DaySchedule:
     y0: float
     y1: float
     lessons: list[Lesson]
+    time_col_x0: float | None = None
+    time_col_x1: float | None = None
+    group_col_x0: float | None = None
+    group_col_x1: float | None = None
 
 
 class _DayAccumulator:
     def __init__(self) -> None:
         self.y0: float | None = None
         self.y1: float | None = None
+        self.time_col_x0: float | None = None
+        self.time_col_x1: float | None = None
+        self.group_col_x0: float | None = None
+        self.group_col_x1: float | None = None
         self._slots: dict[str, list[str | None]] = {}
         self._order: list[str] = []
 
     def touch_bounds(self, y0: float, y1: float) -> None:
         self.y0 = y0 if self.y0 is None else min(self.y0, y0)
         self.y1 = y1 if self.y1 is None else max(self.y1, y1)
+
+    def touch_time_col_bounds(self, x0: float, x1: float) -> None:
+        self.time_col_x0 = x0 if self.time_col_x0 is None else min(self.time_col_x0, x0)
+        self.time_col_x1 = x1 if self.time_col_x1 is None else max(self.time_col_x1, x1)
+
+    def touch_group_col_bounds(self, x0: float, x1: float) -> None:
+        self.group_col_x0 = x0 if self.group_col_x0 is None else min(self.group_col_x0, x0)
+        self.group_col_x1 = x1 if self.group_col_x1 is None else max(self.group_col_x1, x1)
 
     def add_value(self, time_label: str, text: str | None) -> None:
         if time_label not in self._slots:
@@ -129,13 +145,18 @@ class _DayAccumulator:
             upper = values[0]
             lower = values[1] if len(values) > 1 else values[0]
             lessons.append(Lesson(time=time_label, upper=upper, lower=lower))
-        return DaySchedule(y0=self.y0 or 0.0, y1=self.y1 or 0.0, lessons=lessons)
+        return DaySchedule(
+            y0=self.y0 or 0.0, y1=self.y1 or 0.0, lessons=lessons,
+            time_col_x0=self.time_col_x0, time_col_x1=self.time_col_x1,
+            group_col_x0=self.group_col_x0, group_col_x1=self.group_col_x1,
+        )
 
 
 def build_schedule(
     rows: list[RawRow],
     group_column_index: int,
     table_x1: float,
+    time_column_index: int = 1,
     epsilon: float = 2.0,
 ) -> dict[str, DaySchedule]:
     day_names = iter(DAY_ORDER)
@@ -164,16 +185,22 @@ def build_schedule(
         if current_time is None:
             continue
 
+        time_cell = row.cells[time_column_index] if time_column_index < len(row.cells) else None
+        if time_cell is not None:
+            accumulators[current_day].touch_time_col_bounds(time_cell.x0, time_cell.x1)
+
         cell = row.cells[group_column_index] if group_column_index < len(row.cells) else None
 
         if cell is not None:
             text = cell.text or None
+            accumulators[current_day].touch_group_col_bounds(cell.x0, cell.x1)
         else:
             text = None
             found = False
             for other in row.cells[:group_column_index]:
                 if other is not None and other.text and other.x1 >= table_x1 - epsilon:
                     text = other.text
+                    accumulators[current_day].touch_group_col_bounds(other.x0, other.x1)
                     found = True
                     break
             if not found:

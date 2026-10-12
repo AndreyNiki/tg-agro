@@ -126,3 +126,42 @@ def test_find_header_column_index_raises_when_not_in_header_zone():
     ]
     with pytest.raises(ValueError):
         find_header_column_index(rows, "Б-А-301")
+
+
+def test_day_schedule_records_time_and_group_column_x_bounds():
+    rows = [
+        day_row(None, [Cell("Пн", 0, 30), None, None], day_marker=True, y0=0, y1=10),
+        day_row("8.30-10.00", [None, Cell("8.30-10.00", 30, 60), Cell("Матан", 300, 500)], y0=0, y1=10),
+    ]
+    schedule = build_schedule(rows, GROUP_COL, TABLE_X1)
+    day = schedule["Понедельник"]
+    assert day.time_col_x0 == 30
+    assert day.time_col_x1 == 60
+    assert day.group_col_x0 == 300
+    assert day.group_col_x1 == 500
+
+
+def test_day_schedule_group_col_bounds_use_merge_cell_when_own_cell_is_none():
+    group_col = 3
+    rows = [
+        day_row(None, [Cell("Пн", 0, 30), None, None, None], day_marker=True, y0=0, y1=20),
+        day_row("12.00-13.30", [None, Cell("12.00-13.30", 30, 60), None, None], y0=0, y1=10),
+        day_row(None, [None, None, Cell("Общая пара", 60, 500), None], y0=10, y1=20),
+    ]
+    schedule = build_schedule(rows, group_col, TABLE_X1)
+    day = schedule["Понедельник"]
+    assert day.group_col_x0 == 60  # min across both the own (empty) cell and the merge cell
+    assert day.group_col_x1 == 500
+
+
+def test_day_schedule_x_bounds_are_none_when_no_lesson_found():
+    rows = [
+        day_row(None, [Cell("Пн", 0, 30), None, None], day_marker=True, y0=0, y1=20),
+        day_row("8.30-10.00", [None, Cell("8.30-10.00", 30, 60), None], y0=0, y1=10),
+    ]
+    schedule = build_schedule(rows, GROUP_COL, TABLE_X1)
+    day = schedule["Понедельник"]
+    assert day.group_col_x0 is None
+    assert day.group_col_x1 is None
+    assert day.y0 == 0  # y bounds still touched even with no lesson found (spec 5.2)
+    assert day.y1 == 20
