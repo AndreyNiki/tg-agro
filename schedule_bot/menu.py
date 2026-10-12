@@ -168,9 +168,16 @@ def _admin_root_keyboard() -> InlineKeyboardMarkup:
 
 
 def _build_admin_group_picker(conn, pick_action: str, page: int = 0) -> InlineKeyboardMarkup:
+    # This picker is deliberately cross-institute (admin group settings/
+    # starosta/closed-toggle/requests apply per-group, not per-institute),
+    # unlike group_commands.py's build_group_picker_keyboard which is
+    # institute-scoped for the subscriber-facing flow. storage.list_groups/
+    # count_groups now require an institute_id, so we use the unpaginated
+    # list_all_groups and paginate in Python instead.
+    all_groups = storage.list_all_groups(conn)
+    total = len(all_groups)
     offset = page * GROUPS_PER_MENU_PAGE
-    groups = storage.list_groups(conn, limit=GROUPS_PER_MENU_PAGE, offset=offset)
-    total = storage.count_groups(conn)
+    groups = all_groups[offset : offset + GROUPS_PER_MENU_PAGE]
     rows = [[InlineKeyboardButton(g.name, callback_data=f"menu:{pick_action}:{g.id}")] for g in groups]
     nav_row = []
     if page > 0:

@@ -16,11 +16,21 @@ def conn():
     return connection
 
 
-def _make_group(conn, name="Б-Мв-101"):
-    return storage.create_group(
-        conn, name=name, source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+def _make_institute(conn, name="ИТ"):
+    return storage.create_institute(
+        conn, name=name, catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
     )
+
+
+def _make_group(conn, name="Б-Мв-101"):
+    institute_id = _make_institute(conn, f"ИТ-{name}")
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url=f"https://example.com/{name}.pdf",
+        group_names=[name], raw_label=name, last_seen_at="t",
+    )
+    return storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name)
 
 
 def test_format_report_message_with_known_reporter_and_group(conn):

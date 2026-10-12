@@ -22,11 +22,25 @@ def conn():
     return connection
 
 
-def _make_group_with_members(conn, count):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+def _make_institute(conn, name="ИТ"):
+    return storage.create_institute(
+        conn, name=name, catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
     )
+
+
+def _make_group(conn, name="Б-Мв-101"):
+    institute_id = _make_institute(conn, f"ИТ-{name}")
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url=f"https://example.com/{name}.pdf",
+        group_names=[name], raw_label=name, last_seen_at="t",
+    )
+    return storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name)
+
+
+def _make_group_with_members(conn, count):
+    group_id = _make_group(conn)
     for i in range(count):
         storage.upsert_member(conn, 100 + i, group_id, joined_at="t", subscribed=True)
         storage.update_member_profile(conn, 100 + i, telegram_username=f"user{i}", display_name=None)
@@ -125,10 +139,7 @@ async def test_confirm_callback_refuses_when_vote_already_started_meanwhile(conn
 async def test_confirm_callback_refuses_when_membership_shrinks_below_minimum(conn):
     group_id = _make_group_with_members(conn, 3)
     storage.update_group_starosta(conn, group_id, 100)
-    other_group_id = storage.create_group(
-        conn, name="Б-Мв-102", source_page_url="u2", pdf_source_url="p2",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    other_group_id = _make_group(conn, "Б-Мв-102")
     # Move members away so the original group drops below the minimum size
     # required for a vote, simulating a shrink that happens between showing
     # the candidate keyboard and the user clicking confirm.
@@ -183,10 +194,7 @@ async def test_confirm_callback_refuses_when_candidate_left_the_group(conn):
     # be a current member of the caller's group.
     group_id = _make_group_with_members(conn, 3)
     storage.update_group_starosta(conn, group_id, 102)
-    other_group_id = storage.create_group(
-        conn, name="Б-Мв-103", source_page_url="u3", pdf_source_url="p3",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    other_group_id = _make_group(conn, "Б-Мв-103")
     storage.upsert_member(conn, 101, other_group_id, joined_at="t", subscribed=True)
     update = make_callback_update(100, "starcand:confirm:101")
     context = make_context(conn)

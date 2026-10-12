@@ -54,6 +54,23 @@ def conn():
     return connection
 
 
+def _make_institute(conn, name="ИТ"):
+    return storage.create_institute(
+        conn, name=name, catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
+    )
+
+
+def _make_group(conn, name="Б-Мв-101"):
+    institute_id = _make_institute(conn, f"ИТ-{name}")
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url=f"https://example.com/{name}.pdf",
+        group_names=[name], raw_label=name, last_seen_at="t",
+    )
+    return storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name)
+
+
 def make_update(chat_id):
     update = MagicMock()
     update.effective_chat.id = chat_id
@@ -79,10 +96,7 @@ async def test_classmates_command_without_group_prompts_start(conn):
 
 @pytest.mark.asyncio
 async def test_classmates_command_lists_sorted_members_with_starosta_mark_and_legend(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.update_member_profile(conn, 111, telegram_username="boris", display_name=None)
     storage.upsert_member(conn, 222, group_id, joined_at="t")
@@ -103,10 +117,7 @@ async def test_classmates_command_lists_sorted_members_with_starosta_mark_and_le
 
 @pytest.mark.asyncio
 async def test_classmates_command_no_legend_when_no_starosta(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.update_member_profile(conn, 111, telegram_username="boris", display_name=None)
 
@@ -121,10 +132,7 @@ async def test_classmates_command_no_legend_when_no_starosta(conn):
 
 @pytest.mark.asyncio
 async def test_classmates_command_includes_unsubscribed_members(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t", subscribed=True)
     storage.update_member_profile(conn, 111, telegram_username="boris", display_name=None)
     storage.upsert_member(conn, 222, group_id, joined_at="t", subscribed=False)
@@ -163,10 +171,7 @@ def make_context_with_admin(conn, admin_chat_id=ADMIN_CHAT_ID):
 
 @pytest.mark.asyncio
 async def test_classmates_command_shows_exclude_buttons_for_starosta(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.update_group_starosta(conn, group_id, 111)
     storage.upsert_member(conn, 222, group_id, joined_at="t")
@@ -184,10 +189,7 @@ async def test_classmates_command_shows_exclude_buttons_for_starosta(conn):
 
 @pytest.mark.asyncio
 async def test_classmates_command_no_exclude_buttons_for_plain_member(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.upsert_member(conn, 222, group_id, joined_at="t")
 
@@ -202,10 +204,7 @@ async def test_classmates_command_no_exclude_buttons_for_plain_member(conn):
 
 @pytest.mark.asyncio
 async def test_exclude_confirm_callback_removes_member_and_records_exclusion(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.update_group_starosta(conn, group_id, 111)
     storage.upsert_member(conn, 222, group_id, joined_at="t")
@@ -223,10 +222,7 @@ async def test_exclude_confirm_callback_removes_member_and_records_exclusion(con
 
 @pytest.mark.asyncio
 async def test_exclude_confirm_callback_rejects_self_exclusion_even_if_called_directly(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.update_group_starosta(conn, group_id, 111)
 
@@ -241,10 +237,7 @@ async def test_exclude_confirm_callback_rejects_self_exclusion_even_if_called_di
 
 @pytest.mark.asyncio
 async def test_exclude_confirm_callback_rejects_unauthorized_caller(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.update_group_starosta(conn, group_id, 111)
     storage.upsert_member(conn, 222, group_id, joined_at="t")
@@ -260,10 +253,7 @@ async def test_exclude_confirm_callback_rejects_unauthorized_caller(conn):
 
 @pytest.mark.asyncio
 async def test_exclude_select_callback_shows_confirmation(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.update_group_starosta(conn, group_id, 111)
     storage.upsert_member(conn, 222, group_id, joined_at="t")
@@ -290,10 +280,7 @@ async def test_exclude_select_callback_rejects_self_selection(conn):
 
 @pytest.mark.asyncio
 async def test_exclude_select_callback_rejects_unauthorized_caller_without_disclosing_label(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.update_group_starosta(conn, group_id, 111)
     storage.upsert_member(conn, 222, group_id, joined_at="t")
@@ -312,10 +299,7 @@ async def test_exclude_select_callback_rejects_unauthorized_caller_without_discl
 
 @pytest.mark.asyncio
 async def test_exclude_confirm_callback_clears_starosta_vacancy_when_excluding_starosta(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+    group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.upsert_member(conn, 222, group_id, joined_at="t")
     storage.update_group_starosta(conn, group_id, 222)  # 222 is the starosta being excluded
