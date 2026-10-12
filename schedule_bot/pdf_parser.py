@@ -66,6 +66,26 @@ def find_group_column_index(rows: list[RawRow], group_name: str) -> tuple[int, i
     raise ValueError(f"Column for group {group_name!r} not found in table header")
 
 
+def _first_day_marker_index(rows: list[RawRow]) -> int:
+    for index, row in enumerate(rows):
+        if not row.day_marker:
+            return index
+    return len(rows)
+
+
+def find_header_column_index(rows: list[RawRow], group_name: str) -> tuple[int, int]:
+    """Like find_group_column_index, but the search is restricted to
+    rows[:first_day_marker_index] — the header zone. find_group_column_index
+    scans the WHOLE table and returns the first substring match anywhere,
+    which can land on a body row ("совм. с Б-А-301" in a lesson cell of
+    another group) instead of the actual header — fatal for header-crop
+    geometry (design spec, section 5.1). The same column index is valid
+    for the whole table (fixed column layout), so this is only a
+    narrower SEARCH, not a different RESULT shape."""
+    header_zone = rows[: _first_day_marker_index(rows)]
+    return find_group_column_index(header_zone, group_name)
+
+
 DAY_ORDER = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"]
 
 

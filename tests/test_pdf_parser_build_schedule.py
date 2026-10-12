@@ -1,4 +1,6 @@
-from schedule_bot.pdf_parser import Cell, RawRow, Lesson, build_schedule
+import pytest
+
+from schedule_bot.pdf_parser import Cell, RawRow, Lesson, build_schedule, find_header_column_index
 
 GROUP_COL = 2  # small synthetic tables use 3 columns: day, time, target group
 TABLE_X1 = 500.0
@@ -105,3 +107,22 @@ def test_stops_after_sixth_day_marker_ignoring_footer_row():
     assert set(schedule.keys()) == {
         "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"
     }
+
+
+def test_find_header_column_index_ignores_group_name_appearing_in_body_text():
+    rows = [
+        day_row(None, [Cell("Пн", 0, 30), None, None, Cell("Б-А-301", 300, 500)], day_marker=True, y0=0, y1=10),
+        day_row("8.30-10.00", [None, Cell("8.30-10.00", 30, 60), Cell("совм. с Б-А-301", 60, 300), Cell("Матан", 300, 500)], y0=10, y1=20),
+    ]
+    header_idx, col_idx = find_header_column_index(rows, "Б-А-301")
+    assert header_idx == 0
+    assert col_idx == 3
+
+
+def test_find_header_column_index_raises_when_not_in_header_zone():
+    rows = [
+        day_row(None, [Cell("Пн", 0, 30), None, None], day_marker=True, y0=0, y1=10),
+        day_row("8.30-10.00", [None, Cell("8.30-10.00", 30, 60), Cell("совм. с Б-А-301", 60, 300)], y0=10, y1=20),
+    ]
+    with pytest.raises(ValueError):
+        find_header_column_index(rows, "Б-А-301")
