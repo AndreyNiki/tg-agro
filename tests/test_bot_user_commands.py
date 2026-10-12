@@ -70,11 +70,31 @@ def make_context(conn, group_id=None, week_formula=None, active_schedule=None, p
     return context
 
 
-def _make_group_and_member(conn, chat_id=111, name="Б-Мв-101"):
-    group_id = storage.create_group(
-        conn, name=name, source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+_group_counter = [0]
+
+
+def _make_institute(conn, name=None, tz_name="Europe/Moscow"):
+    _group_counter[0] += 1
+    if name is None:
+        name = f"ИТ-{_group_counter[0]}"
+    return storage.create_institute(
+        conn, name=name, catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name=tz_name,
+        catalog_refresh_interval_minutes=10080,
     )
+
+
+def _make_link_and_group(conn, institute_id, name="Б-Мв-101", pdf_url="https://example.com/schedule.pdf"):
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url=pdf_url, group_names=[name], raw_label=name, last_seen_at="t",
+    )
+    group_id = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name)
+    return link_id, group_id
+
+
+def _make_group_and_member(conn, chat_id=111, name="Б-Мв-101"):
+    institute_id = _make_institute(conn)
+    _, group_id = _make_link_and_group(conn, institute_id, name=name)
     storage.upsert_member(conn, chat_id, group_id, joined_at="t", subscribed=True)
     return group_id
 
@@ -131,6 +151,29 @@ async def test_schedule_command_warns_when_last_sync_failed(conn, sample_schedul
 
     sent_text = update.message.reply_text.call_args[0][0]
     assert "могли устареть" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_schedule_command_uses_institute_timezone(conn, monkeypatch):
+    institute_id = _make_institute(conn, tz_name="Asia/Yekaterinburg")
+    _, group_id = _make_link_and_group(conn, institute_id)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+
+    captured_tz = []
+    import schedule_bot.bot as bot_module
+    monkeypatch.setattr(
+        bot_module, "today_in_configured_timezone",
+        lambda tz: captured_tz.append(tz) or date(2026, 9, 14),
+    )
+
+    update = MagicMock()
+    update.effective_chat.id = 111
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    await schedule_command(update, context)
+
+    assert captured_tz == ["Asia/Yekaterinburg"]
 
 
 @pytest.mark.asyncio

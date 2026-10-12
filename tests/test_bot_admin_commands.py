@@ -9,9 +9,6 @@ from schedule_bot.bot import (
     USER_COMMANDS,
     help_command,
     is_admin,
-    set_pdf_source_command,
-    set_send_time_command,
-    set_check_interval_command,
     refresh_command,
     alert_command,
 )
@@ -26,11 +23,30 @@ def conn():
     return connection
 
 
-def _make_group(conn, name="Б-Мв-101"):
-    return storage.create_group(
-        conn, name=name, source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+def _make_institute(conn, name="ИТ"):
+    return storage.create_institute(
+        conn, name=name, catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
     )
+
+
+def _make_link_and_group(conn, institute_id, name="Б-Мв-101", pdf_url="https://example.com/schedule.pdf"):
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url=pdf_url, group_names=[name], raw_label=name, last_seen_at="t",
+    )
+    group_id = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name)
+    return link_id, group_id
+
+
+_group_counter = [0]
+
+
+def _make_group(conn, name="Б-Мв-101"):
+    _group_counter[0] += 1
+    institute_id = _make_institute(conn, name=f"ИТ-{_group_counter[0]}")
+    _, group_id = _make_link_and_group(conn, institute_id, name=name)
+    return group_id
 
 
 def make_context(conn, **extra):
@@ -93,130 +109,23 @@ def test_requests_registered_in_admin_commands():
 
 
 @pytest.mark.asyncio
-async def test_set_pdf_source_rejects_non_admin(conn):
-    group_id = _make_group(conn)
-    update = make_update(12345)
-    context = make_context(conn)
-    context.args = [str(group_id), "https://example.com/new.pdf"]
+async def test_refresh_command_resolves_institute_link_and_calls_sync_fn(conn):
+    institute_id = _make_institute(conn)
+    link_id, group_id = _make_link_and_group(conn, institute_id)
+    sync_calls = []
 
-    await set_pdf_source_command(update, context)
-
-    assert storage.get_group(conn, group_id).pdf_source_url == "p"
-
-
-@pytest.mark.asyncio
-async def test_set_pdf_source_updates_group_for_admin(conn):
-    group_id = _make_group(conn)
-    update = make_update(ADMIN_CHAT_ID)
-    context = make_context(conn)
-    context.args = [str(group_id), "https://example.com/new.pdf"]
-
-    await set_pdf_source_command(update, context)
-
-    assert storage.get_group(conn, group_id).pdf_source_url == "https://example.com/new.pdf"
-
-
-@pytest.mark.asyncio
-async def test_set_pdf_source_rejects_disallowed_scheme(conn):
-    group_id = _make_group(conn)
-    update = make_update(ADMIN_CHAT_ID)
-    context = make_context(conn)
-    context.args = [str(group_id), "file:///etc/passwd"]
-
-    await set_pdf_source_command(update, context)
-
-    assert storage.get_group(conn, group_id).pdf_source_url == "p"
-
-
-@pytest.mark.asyncio
-async def test_set_pdf_source_accepts_local_path(conn):
-    group_id = _make_group(conn)
-    update = make_update(ADMIN_CHAT_ID)
-    context = make_context(conn)
-    context.args = [str(group_id), "/data/schedule.pdf"]
-
-    await set_pdf_source_command(update, context)
-
-    assert storage.get_group(conn, group_id).pdf_source_url == "/data/schedule.pdf"
-
-
-@pytest.mark.asyncio
-async def test_set_pdf_source_rejects_unknown_group_id(conn):
-    update = make_update(ADMIN_CHAT_ID)
-    context = make_context(conn)
-    context.args = ["9999", "https://example.com/new.pdf"]
-
-    await set_pdf_source_command(update, context)
-
-    update.message.reply_text.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_set_send_time_reschedules_group_jobs(conn):
-    group_id = _make_group(conn)
-    update = make_update(ADMIN_CHAT_ID)
-    context = make_context(conn)
-    context.args = [str(group_id), "07:30"]
-
-    await set_send_time_command(update, context)
-
-    assert storage.get_group(conn, group_id).send_time == "07:30"
-    context.bot_data["reschedule_group_jobs"].assert_called_once_with(group_id)
-
-
-@pytest.mark.asyncio
-async def test_set_check_interval_reschedules_group_jobs(conn):
-    group_id = _make_group(conn)
-    update = make_update(ADMIN_CHAT_ID)
-    context = make_context(conn)
-    context.args = [str(group_id), "30"]
-
-    await set_check_interval_command(update, context)
-
-    assert storage.get_group(conn, group_id).check_interval_minutes == 30
-    context.bot_data["reschedule_group_jobs"].assert_called_once_with(group_id)
-
-
-@pytest.mark.asyncio
-async def test_set_send_time_rejects_malformed_value_without_writing(conn):
-    group_id = _make_group(conn)
-    update = make_update(ADMIN_CHAT_ID)
-    context = make_context(conn)
-    context.args = [str(group_id), "9h30"]
-
-    await set_send_time_command(update, context)
-
-    assert storage.get_group(conn, group_id).send_time == "09:00"
-    context.bot_data["reschedule_group_jobs"].assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_set_check_interval_rejects_non_numeric_value_without_writing(conn):
-    group_id = _make_group(conn)
-    update = make_update(ADMIN_CHAT_ID)
-    context = make_context(conn)
-    context.args = [str(group_id), "abc"]
-
-    await set_check_interval_command(update, context)
-
-    assert storage.get_group(conn, group_id).check_interval_minutes == 60
-    context.bot_data["reschedule_group_jobs"].assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_refresh_command_reports_result(conn):
-    group_id = _make_group(conn)
-
-    async def fake_sync(group_id_arg):
+    async def fake_sync_institute_link_fn(institute_link_id):
+        sync_calls.append(institute_link_id)
         from schedule_bot.sync import SyncResult
-        return SyncResult(status="no_changes")
+        return [SyncResult(group_id=group_id, status="no_changes")]
 
     update = make_update(ADMIN_CHAT_ID)
-    context = make_context(conn, sync_fn=fake_sync)
+    context = make_context(conn, sync_institute_link_fn=fake_sync_institute_link_fn)
     context.args = [str(group_id)]
 
     await refresh_command(update, context)
 
+    assert sync_calls == [link_id]
     assert "Изменений нет" in update.message.reply_text.call_args[0][0]
 
 
@@ -224,16 +133,45 @@ async def test_refresh_command_reports_result(conn):
 async def test_refresh_command_reports_sync_error_without_crashing(conn):
     group_id = _make_group(conn)
 
-    async def failing_sync(group_id_arg):
+    async def failing_sync(institute_link_id):
         raise ConnectionError("network unreachable")
 
     update = make_update(ADMIN_CHAT_ID)
-    context = make_context(conn, sync_fn=failing_sync)
+    context = make_context(conn, sync_institute_link_fn=failing_sync)
     context.args = [str(group_id)]
 
     await refresh_command(update, context)
 
     assert "не удал" in update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_refresh_command_reports_own_group_result_when_other_groups_also_synced(conn):
+    """The institute link may be shared by several groups — /refresh for
+    one group_id must report THAT group's own result, not just the first
+    result in the list."""
+    institute_id = _make_institute(conn)
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url="https://example.com/s.pdf",
+        group_names=["A", "B"], raw_label="A,B", last_seen_at="t",
+    )
+    group_a = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="A")
+    group_b = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="B")
+
+    async def fake_sync_institute_link_fn(institute_link_id):
+        from schedule_bot.sync import SyncResult
+        return [
+            SyncResult(group_id=group_a, status="changed"),
+            SyncResult(group_id=group_b, status="no_changes"),
+        ]
+
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn, sync_institute_link_fn=fake_sync_institute_link_fn)
+    context.args = [str(group_b)]
+
+    await refresh_command(update, context)
+
+    assert "Изменений нет" in update.message.reply_text.call_args[0][0]
 
 
 @pytest.mark.asyncio
@@ -474,45 +412,8 @@ from schedule_bot.bot import (
     _apply_alert,
     _apply_notify,
     _apply_remove_starosta,
-    _apply_set_check_interval,
-    _apply_set_pdf_source,
-    _apply_set_send_time,
     _apply_set_starosta,
 )
-
-
-def test_apply_set_pdf_source_updates_and_returns_confirmation(conn):
-    group_id = _make_group(conn)
-    group = storage.get_group(conn, group_id)
-    text = _apply_set_pdf_source(conn, group, "https://example.com/new.pdf")
-    assert "обновлён" in text
-    assert storage.get_group(conn, group_id).pdf_source_url == "https://example.com/new.pdf"
-
-
-def test_apply_set_pdf_source_rejects_bad_scheme(conn):
-    group_id = _make_group(conn)
-    group = storage.get_group(conn, group_id)
-    text = _apply_set_pdf_source(conn, group, "file:///etc/passwd")
-    assert "Неверный источник" in text
-    assert storage.get_group(conn, group_id).pdf_source_url == "p"
-
-
-def test_apply_set_send_time_calls_reschedule(conn):
-    group_id = _make_group(conn)
-    group = storage.get_group(conn, group_id)
-    reschedule_fn = MagicMock()
-    text = _apply_set_send_time(conn, group, "07:30", reschedule_fn)
-    assert "обновлено" in text
-    reschedule_fn.assert_called_once_with(group_id)
-
-
-def test_apply_set_check_interval_rejects_malformed(conn):
-    group_id = _make_group(conn)
-    group = storage.get_group(conn, group_id)
-    reschedule_fn = MagicMock()
-    text = _apply_set_check_interval(conn, group, "abc", reschedule_fn)
-    assert "Неверное значение" in text
-    reschedule_fn.assert_not_called()
 
 
 @pytest.mark.asyncio

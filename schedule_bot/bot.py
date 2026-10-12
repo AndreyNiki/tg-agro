@@ -2,7 +2,6 @@ import asyncio
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
-from urllib.parse import urlparse
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -33,10 +32,14 @@ USER_COMMANDS = [
 ]
 
 ADMIN_COMMANDS = [
-    ("set_pdf_source", "Изменить источник PDF группы: <group_id> <url_или_путь>"),
-    ("set_send_time", "Изменить время ежедневной рассылки группы: <group_id> <HH:MM>"),
-    ("set_check_interval", "Изменить интервал проверки группы: <group_id> <минуты>"),
-    ("refresh", "Принудительно проверить и разослать обновления группы: <group_id>"),
+    ("add_institute", "Добавить институт: <название> <url_каталога>"),
+    ("set_institute_catalog_url", "Изменить url каталога института: <institute_id> <url>"),
+    ("set_institute_check_interval", "Изменить интервал проверки института: <institute_id> <минуты>"),
+    ("set_institute_send_time", "Изменить время рассылки института: <institute_id> <HH:MM>"),
+    ("set_institute_catalog_interval", "Изменить интервал сканирования каталога: <institute_id> <минуты>"),
+    ("refresh_institute_links", "Пересканировать каталог института: <institute_id>"),
+    ("institute_links", "Диагностика ссылок института: <institute_id>"),
+    ("refresh", "Принудительно проверить и разослать обновления по ссылке группы: <group_id>"),
     ("alert", "Разослать объявление всем пользователям бота: <текст>"),
     ("set_starosta", "Назначить старосту группы: <group_id> <chat_id>"),
     ("remove_starosta", "Снять старосту группы: <group_id>"),
@@ -109,7 +112,8 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     group = storage.get_group(conn, member.group_id)
     text = _stale_warning_prefix(group) + "Выберите день недели:"
-    today = today_in_configured_timezone(group.timezone if group else None)
+    institute = storage.get_institute(conn, group.institute_id) if group else None
+    today = today_in_configured_timezone(institute.timezone if institute else None)
     await reply(update, text, reply_markup=build_day_keyboard(today))
 
 
@@ -171,42 +175,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("\n".join(lines))
 
 
-_ALLOWED_PDF_SOURCE_SCHEMES = {"http", "https", ""}  # "" covers a bare local path
-
-
-def _is_valid_pdf_source(value: str) -> bool:
-    return urlparse(value).scheme in _ALLOWED_PDF_SOURCE_SCHEMES
-
-
-def _resolve_admin_group(conn, group_id_str: str):
-    if not group_id_str.isdigit():
-        return None
-    return storage.get_group(conn, int(group_id_str))
-
-
-def _apply_set_pdf_source(conn, group, value: str) -> str:
-    if not _is_valid_pdf_source(value):
-        return "Неверный источник: разрешены только http(s)-адреса или локальный путь."
-    storage.update_group_pdf_source_url(conn, group.id, value)
-    return f"Источник PDF группы «{group.name}» обновлён: {value}"
-
-
-async def set_pdf_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("bot: /set_pdf_source from chat_id=%s args=%s", update.effective_chat.id, context.args)
-    if not is_admin(update, context):
-        await update.message.reply_text("Недостаточно прав.")
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Использование: /set_pdf_source <group_id> <url_или_путь>")
-        return
-    conn = context.bot_data["conn"]
-    group = _resolve_admin_group(conn, context.args[0])
-    if group is None:
-        await update.message.reply_text("Группа с таким id не найдена.")
-        return
-    await update.message.reply_text(_apply_set_pdf_source(conn, group, context.args[1]))
-
-
 _HH_MM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]?\d)$")
 
 
@@ -221,54 +189,78 @@ def _is_valid_positive_int(value: str) -> bool:
         return False
 
 
+def _resolve_admin_group(conn, group_id_str: str):
+    if not group_id_str.isdigit():
+        return None
+    return storage.get_group(conn, int(group_id_str))
+
+
+def _apply_set_pdf_source(conn, group, value: str) -> str:
+    """Deprecated placeholder, kept only so that `schedule_bot/menu.py` —
+    not yet rewired to the institute-level admin flow (Task 15/19) — still
+    imports and calls this name successfully. PDF-source configuration
+    moved to the institute level (`/set_institute_catalog_url`); this must
+    never actually be invoked for real."""
+    raise NotImplementedError(
+        "_apply_set_pdf_source is removed (Task 16); configure the "
+        "catalog URL at the institute level via /set_institute_catalog_url "
+        "(institute_commands.py, Task 15/19)"
+    )
+
+
 def _apply_set_send_time(conn, group, value: str, reschedule_fn) -> str:
-    if not _is_valid_hh_mm(value):
-        return "Неверный формат времени, используйте HH:MM."
-    storage.update_group_send_time(conn, group.id, value)
-    reschedule_fn(group.id)
-    return f"Время ежедневной рассылки группы «{group.name}» обновлено: {value}"
-
-
-async def set_send_time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("bot: /set_send_time from chat_id=%s args=%s", update.effective_chat.id, context.args)
-    if not is_admin(update, context):
-        await update.message.reply_text("Недостаточно прав.")
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Использование: /set_send_time <group_id> <HH:MM>")
-        return
-    conn = context.bot_data["conn"]
-    group = _resolve_admin_group(conn, context.args[0])
-    if group is None:
-        await update.message.reply_text("Группа с таким id не найдена.")
-        return
-    text = _apply_set_send_time(conn, group, context.args[1], context.bot_data["reschedule_group_jobs"])
-    await update.message.reply_text(text)
+    """Deprecated placeholder — see `_apply_set_pdf_source`'s docstring."""
+    raise NotImplementedError(
+        "_apply_set_send_time is removed (Task 16); configure send time "
+        "at the institute level via /set_institute_send_time "
+        "(institute_commands.py, Task 15/19)"
+    )
 
 
 def _apply_set_check_interval(conn, group, value: str, reschedule_fn) -> str:
-    if not _is_valid_positive_int(value):
-        return "Неверное значение интервала, укажите положительное целое число минут."
-    storage.update_group_check_interval(conn, group.id, int(value))
-    reschedule_fn(group.id)
-    return f"Интервал проверки группы «{group.name}» обновлён: {value} мин."
+    """Deprecated placeholder — see `_apply_set_pdf_source`'s docstring."""
+    raise NotImplementedError(
+        "_apply_set_check_interval is removed (Task 16); configure the "
+        "check interval at the institute level via "
+        "/set_institute_check_interval (institute_commands.py, Task 15/19)"
+    )
+
+
+async def set_pdf_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Deprecated placeholder, kept only so that `main.py` — not yet
+    rewired to register institute-level admin commands instead
+    (`institute_commands.py`, Task 15; rewiring is Task 19) — still
+    imports and registers this name successfully. PDF-source configuration
+    moved to the institute level (`/set_institute_catalog_url`); this
+    handler must never actually be invoked for real.
+    """
+    raise NotImplementedError(
+        "set_pdf_source_command is removed (Task 16); configure the "
+        "catalog URL at the institute level via /set_institute_catalog_url "
+        "(institute_commands.py, Task 15/19)"
+    )
+
+
+async def set_send_time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Deprecated placeholder — see `set_pdf_source_command`'s docstring.
+    Send-time configuration moved to the institute level
+    (`/set_institute_send_time`)."""
+    raise NotImplementedError(
+        "set_send_time_command is removed (Task 16); configure send time "
+        "at the institute level via /set_institute_send_time "
+        "(institute_commands.py, Task 15/19)"
+    )
 
 
 async def set_check_interval_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("bot: /set_check_interval from chat_id=%s args=%s", update.effective_chat.id, context.args)
-    if not is_admin(update, context):
-        await update.message.reply_text("Недостаточно прав.")
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Использование: /set_check_interval <group_id> <минуты>")
-        return
-    conn = context.bot_data["conn"]
-    group = _resolve_admin_group(conn, context.args[0])
-    if group is None:
-        await update.message.reply_text("Группа с таким id не найдена.")
-        return
-    text = _apply_set_check_interval(conn, group, context.args[1], context.bot_data["reschedule_group_jobs"])
-    await update.message.reply_text(text)
+    """Deprecated placeholder — see `set_pdf_source_command`'s docstring.
+    Check-interval configuration moved to the institute level
+    (`/set_institute_check_interval`)."""
+    raise NotImplementedError(
+        "set_check_interval_command is removed (Task 16); configure the "
+        "check interval at the institute level via "
+        "/set_institute_check_interval (institute_commands.py, Task 15/19)"
+    )
 
 
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -284,19 +276,22 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if group is None:
         await update.message.reply_text("Группа с таким id не найдена.")
         return
-    sync_fn = context.bot_data["sync_fn"]
+    sync_institute_link_fn = context.bot_data["sync_institute_link_fn"]
     try:
-        result = await sync_fn(group.id)
+        results = await sync_institute_link_fn(group.institute_link_id)
     except Exception as error:
         logger.warning("bot: /refresh sync failed: %s", error)
-        await update.message.reply_text(
-            f"Синхронизация не удалась: {error}. Расписание могло устареть."
-        )
+        await update.message.reply_text(f"Синхронизация не удалась: {error}. Расписание могло устареть.")
         return
-    if result.status == "no_changes":
+    own_result = next((r for r in results if r.group_id == group.id), None)
+    if own_result is None:
+        await update.message.reply_text("Группа не подписана ни на один чат — синхронизация не выполнялась.")
+    elif own_result.status == "no_changes":
         await update.message.reply_text("Изменений нет.")
-    elif result.status == "initial":
+    elif own_result.status == "initial":
         await update.message.reply_text("Расписание загружено впервые.")
+    elif own_result.status == "error":
+        await update.message.reply_text("Синхронизация для этой группы не удалась — колонка не найдена или сеть недоступна.")
     else:
         await update.message.reply_text("Расписание обновлено и разослано подписчикам.")
 
