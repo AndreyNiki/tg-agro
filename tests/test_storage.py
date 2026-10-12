@@ -29,9 +29,9 @@ def _make_link(conn, institute_id, pdf_url="https://example.com/a.pdf", group_na
 
 def _make_group(conn, name="Б-Мв-101", institute_id=None, institute_link_id=None):
     if institute_id is None:
-        institute_id = _make_institute(conn)
+        institute_id = _make_institute(conn, f"ИТ-{name}")
     if institute_link_id is None:
-        institute_link_id = _make_link(conn, institute_id, group_names=[name])
+        institute_link_id = _make_link(conn, institute_id, pdf_url=f"{name}.pdf", group_names=[name])
     return storage.create_group(conn, institute_id=institute_id, institute_link_id=institute_link_id, name=name)
 
 
@@ -114,64 +114,101 @@ def test_versions_are_scoped_by_group_id(conn):
 
 
 def test_create_group_returns_new_group_with_defaults(conn):
-    group_id = storage.create_group(
-        conn,
-        name="Б-Мв-101",
-        source_page_url="https://example.com/schedules",
-        pdf_source_url="https://example.com/101.pdf",
-        send_time="09:00",
-        check_interval_minutes=60,
-        tz_name="Europe/Moscow",
-    )
+    institute_id = _make_institute(conn)
+    link_id = _make_link(conn, institute_id)
+    group_id = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="Б-Мв-101")
     group = storage.get_group(conn, group_id)
     assert group.name == "Б-Мв-101"
-    assert group.pdf_source_url == "https://example.com/101.pdf"
-    assert group.send_time == "09:00"
-    assert group.check_interval_minutes == 60
-    assert group.timezone == "Europe/Moscow"
+    assert group.institute_id == institute_id
+    assert group.institute_link_id == link_id
+    assert group.is_verified == 0
     assert group.last_sync_failed_at is None
 
 
-def test_create_group_rejects_duplicate_name(conn):
-    storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
+def test_create_group_rejects_duplicate_name_within_institute(conn):
+    institute_id = _make_institute(conn)
+    link_id = _make_link(conn, institute_id)
+    storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="Б-Мв-101")
     with pytest.raises(sqlite3.IntegrityError):
-        storage.create_group(
-            conn, name="Б-Мв-101", source_page_url="u2", pdf_source_url="p2",
-            send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-        )
+        storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="Б-Мв-101")
+
+
+def test_create_group_allows_same_name_in_different_institutes(conn):
+    institute_a = _make_institute(conn, "А")
+    institute_b = _make_institute(conn, "Б")
+    link_a = _make_link(conn, institute_a)
+    link_b = _make_link(conn, institute_b)
+    storage.create_group(conn, institute_id=institute_a, institute_link_id=link_a, name="Б-Мв-101")
+    storage.create_group(conn, institute_id=institute_b, institute_link_id=link_b, name="Б-Мв-101")  # must not raise
 
 
 def test_get_group_returns_none_for_missing_id(conn):
     assert storage.get_group(conn, 999) is None
 
 
-def test_get_group_by_name_returns_none_when_absent(conn):
-    assert storage.get_group_by_name(conn, "Nope") is None
+def test_get_group_by_name_scoped_to_institute(conn):
+    institute_a = _make_institute(conn, "А")
+    institute_b = _make_institute(conn, "Б")
+    link_a = _make_link(conn, institute_a)
+    storage.create_group(conn, institute_id=institute_a, institute_link_id=link_a, name="Б-Мв-101")
+    assert storage.get_group_by_name(conn, institute_a, "Б-Мв-101") is not None
+    assert storage.get_group_by_name(conn, institute_b, "Б-Мв-101") is None
+
+
+def test_list_groups_for_link_returns_only_that_links_groups(conn):
+    institute_id = _make_institute(conn)
+    link_a = _make_link(conn, institute_id, pdf_url="a.pdf", group_names=["A"])
+    link_b = _make_link(conn, institute_id, pdf_url="b.pdf", group_names=["B"])
+    storage.create_group(conn, institute_id=institute_id, institute_link_id=link_a, name="A")
+    storage.create_group(conn, institute_id=institute_id, institute_link_id=link_b, name="B")
+    assert [g.name for g in storage.list_groups_for_link(conn, link_a)] == ["A"]
 
 
 def test_list_groups_orders_alphabetically_and_paginates(conn):
+    institute_id = _make_institute(conn)
     for name in ["В-группа", "А-группа", "Б-группа"]:
-        storage.create_group(
-            conn, name=name, source_page_url="u", pdf_source_url="p",
-            send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-        )
-    page1 = storage.list_groups(conn, limit=2, offset=0)
-    page2 = storage.list_groups(conn, limit=2, offset=2)
+        link_id = _make_link(conn, institute_id, pdf_url=f"{name}.pdf", group_names=[name])
+        storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name)
+    page1 = storage.list_groups(conn, institute_id, limit=2, offset=0)
+    page2 = storage.list_groups(conn, institute_id, limit=2, offset=2)
     assert [g.name for g in page1] == ["А-группа", "Б-группа"]
     assert [g.name for g in page2] == ["В-группа"]
-    assert storage.count_groups(conn) == 3
+    assert storage.count_groups(conn, institute_id) == 3
+
+
+def test_list_groups_excludes_unverified_minus_one_by_default(conn):
+    institute_id = _make_institute(conn)
+    link_id = _make_link(conn, institute_id)
+    good = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="Good")
+    bad = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="Bad")
+    storage.update_group_is_verified(conn, bad, -1)
+    names = [g.name for g in storage.list_groups(conn, institute_id, limit=10, offset=0)]
+    assert names == ["Good"]
+    assert storage.count_groups(conn, institute_id) == 1
+
+
+def test_update_group_is_verified(conn):
+    institute_id = _make_institute(conn)
+    link_id = _make_link(conn, institute_id)
+    group_id = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="A")
+    storage.update_group_is_verified(conn, group_id, 1)
+    assert storage.get_group(conn, group_id).is_verified == 1
+
+
+def test_update_group_institute_link_id_reassigns(conn):
+    institute_id = _make_institute(conn)
+    link_a = _make_link(conn, institute_id, pdf_url="a.pdf", group_names=["A"])
+    link_b = _make_link(conn, institute_id, pdf_url="b.pdf", group_names=["A"])
+    group_id = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_a, name="A")
+    storage.update_group_institute_link_id(conn, group_id, link_b)
+    assert storage.get_group(conn, group_id).institute_link_id == link_b
 
 
 def test_list_all_groups_returns_every_group_unpaginated(conn):
     for i in range(10):
-        storage.create_group(
-            conn, institute_id=_make_institute(conn, f"ИТ-{i}"),
-            institute_link_id=_make_link(conn, _make_institute(conn, f"ИТ-{i}"), group_names=[f"Группа-{i}"]),
-            name=f"Группа-{i}",
-        )
+        institute_id = _make_institute(conn, f"ИТ-{i}")
+        link_id = _make_link(conn, institute_id, pdf_url=f"{i}.pdf", group_names=[f"Группа-{i}"])
+        storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=f"Группа-{i}")
     assert len(storage.list_all_groups(conn)) == 10
 
 

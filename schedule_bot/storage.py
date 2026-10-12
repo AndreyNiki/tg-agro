@@ -225,7 +225,7 @@ class GroupRow:
     institute_id: int
     institute_link_id: int
     name: str
-    is_verified: bool
+    is_verified: int
     starosta_chat_id: int | None
     last_starosta_change_at: str | None
     is_closed: bool
@@ -246,7 +246,7 @@ def _group_row_from_tuple(row) -> GroupRow:
         institute_id=institute_id,
         institute_link_id=institute_link_id,
         name=name,
-        is_verified=bool(is_verified),
+        is_verified=is_verified,
         starosta_chat_id=starosta_chat_id,
         last_starosta_change_at=last_starosta_change_at,
         is_closed=bool(is_closed),
@@ -454,17 +454,28 @@ def get_group(conn: sqlite3.Connection, group_id: int) -> GroupRow | None:
     return _group_row_from_tuple(row) if row else None
 
 
-def get_group_by_name(conn: sqlite3.Connection, name: str) -> GroupRow | None:
+def get_group_by_name(conn: sqlite3.Connection, institute_id: int, name: str) -> GroupRow | None:
     row = conn.execute(
-        f"SELECT {_GROUP_COLUMNS} FROM groups WHERE name = ?", (name,)
+        f"SELECT {_GROUP_COLUMNS} FROM groups WHERE institute_id = ? AND name = ?", (institute_id, name)
     ).fetchone()
     return _group_row_from_tuple(row) if row else None
 
 
-def list_groups(conn: sqlite3.Connection, *, limit: int, offset: int) -> list[GroupRow]:
+def list_groups_for_link(conn: sqlite3.Connection, institute_link_id: int) -> list[GroupRow]:
     rows = conn.execute(
-        f"SELECT {_GROUP_COLUMNS} FROM groups ORDER BY name LIMIT ? OFFSET ?",
-        (limit, offset),
+        f"SELECT {_GROUP_COLUMNS} FROM groups WHERE institute_link_id = ? ORDER BY name", (institute_link_id,)
+    ).fetchall()
+    return [_group_row_from_tuple(row) for row in rows]
+
+
+def list_groups(
+    conn: sqlite3.Connection, institute_id: int, *, limit: int, offset: int, include_unverified: bool = False
+) -> list[GroupRow]:
+    verified_clause = "" if include_unverified else "AND is_verified != -1"
+    rows = conn.execute(
+        f"SELECT {_GROUP_COLUMNS} FROM groups WHERE institute_id = ? {verified_clause} "
+        "ORDER BY name LIMIT ? OFFSET ?",
+        (institute_id, limit, offset),
     ).fetchall()
     return [_group_row_from_tuple(row) for row in rows]
 
@@ -474,25 +485,20 @@ def list_all_groups(conn: sqlite3.Connection) -> list[GroupRow]:
     return [_group_row_from_tuple(row) for row in rows]
 
 
-def count_groups(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT COUNT(*) FROM groups").fetchone()[0]
+def count_groups(conn: sqlite3.Connection, institute_id: int, *, include_unverified: bool = False) -> int:
+    verified_clause = "" if include_unverified else "AND is_verified != -1"
+    return conn.execute(
+        f"SELECT COUNT(*) FROM groups WHERE institute_id = ? {verified_clause}", (institute_id,)
+    ).fetchone()[0]
 
 
-def update_group_pdf_source_url(conn: sqlite3.Connection, group_id: int, pdf_source_url: str) -> None:
-    conn.execute("UPDATE groups SET pdf_source_url = ? WHERE id = ?", (pdf_source_url, group_id))
+def update_group_is_verified(conn: sqlite3.Connection, group_id: int, value: int) -> None:
+    conn.execute("UPDATE groups SET is_verified = ? WHERE id = ?", (value, group_id))
     conn.commit()
 
 
-def update_group_send_time(conn: sqlite3.Connection, group_id: int, send_time: str) -> None:
-    conn.execute("UPDATE groups SET send_time = ? WHERE id = ?", (send_time, group_id))
-    conn.commit()
-
-
-def update_group_check_interval(conn: sqlite3.Connection, group_id: int, check_interval_minutes: int) -> None:
-    conn.execute(
-        "UPDATE groups SET check_interval_minutes = ? WHERE id = ?",
-        (check_interval_minutes, group_id),
-    )
+def update_group_institute_link_id(conn: sqlite3.Connection, group_id: int, institute_link_id: int) -> None:
+    conn.execute("UPDATE groups SET institute_link_id = ? WHERE id = ?", (institute_link_id, group_id))
     conn.commit()
 
 
