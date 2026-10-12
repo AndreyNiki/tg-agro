@@ -3,6 +3,7 @@ import pytest
 from schedule_bot.group_links import (
     GroupLinkNotFoundError,
     SourcePageUnreachableError,
+    list_pdf_links,
     resolve_group_pdf_source,
     resolve_pdf_link,
 )
@@ -79,3 +80,21 @@ def test_resolve_group_pdf_source_returns_resolved_link_on_success(monkeypatch):
 
     link = resolve_group_pdf_source("https://example.com/schedules", "БЭ")
     assert link == "https://example.com/files/1_kurs_BE_BM.pdf"
+
+
+def test_list_pdf_links_returns_every_pdf_link_with_normalized_label():
+    html = """
+    <a href="/files/a.pdf">  Б-А-301,302,303  </a>
+    <a href="/files/b.pdf">Б-Эв-101, Б-Мв-101</a>
+    """
+    links = list_pdf_links(html, "https://example.com/catalog")
+    assert links == [
+        ("https://example.com/files/a.pdf", "Б-А-301,302,303"),
+        ("https://example.com/files/b.pdf", "Б-Эв-101, Б-Мв-101"),
+    ]
+
+
+def test_list_pdf_links_collapses_internal_whitespace_but_keeps_case():
+    html = '<a href="/x.pdf">Б-А-301,\xa0 302</a>'
+    links = list_pdf_links(html, "https://example.com/catalog")
+    assert links == [("https://example.com/x.pdf", "Б-А-301, 302")]

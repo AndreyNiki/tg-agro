@@ -7,6 +7,7 @@ _PDF_LINK_RE = re.compile(
     r'<a\b[^>]*href=["\']([^"\']+\.pdf)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL
 )
 _TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"[\s\xa0]+")
 
 
 class SourcePageUnreachableError(Exception):
@@ -15,6 +16,25 @@ class SourcePageUnreachableError(Exception):
 
 class GroupLinkNotFoundError(Exception):
     pass
+
+
+def _normalize_label(raw_label: str) -> str:
+    """Normalize whitespace in label: collapse all whitespace sequences
+    (including non-breaking spaces) to single spaces and strip edges."""
+    return _WHITESPACE_RE.sub(" ", raw_label).strip()
+
+
+def list_pdf_links(html: str, base_url: str) -> list[tuple[str, str]]:
+    """Returns [(pdf_url, raw_label), ...] for every <a href="*.pdf"> on
+    html, without filtering by group name. raw_label is whitespace-
+    normalized (collapsed, stripped) but NOT casefolded — case must
+    survive to match PDF column headers later (see group_commands
+    validation)."""
+    results = []
+    for href, inner_html in _PDF_LINK_RE.findall(html):
+        visible_text = _TAG_RE.sub("", inner_html)
+        results.append((urljoin(base_url, href), _normalize_label(visible_text)))
+    return results
 
 
 def resolve_pdf_link(html: str, group_name: str, base_url: str) -> str | None:
