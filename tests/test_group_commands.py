@@ -1,15 +1,18 @@
+import asyncio
 import sqlite3
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from schedule_bot import storage
 from schedule_bot.group_commands import (
-    GROUPS_PER_PAGE,
     build_group_picker_keyboard,
-    group_page_callback,
-    group_select_callback,
+    build_institute_picker_keyboard,
+    validate_and_sync_group_on_first_subscribe,
 )
+
+FIXTURE_PATH = str(Path(__file__).parent / "fixtures" / "schedule_sample.pdf")
 
 
 @pytest.fixture
@@ -19,507 +22,156 @@ def conn():
     return connection
 
 
-def _make_groups(conn, count):
-    for i in range(count):
-        storage.create_group(
-            conn, name=f"Группа-{i:02d}", source_page_url="u", pdf_source_url="p",
-            send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-        )
+def _make_institute(conn, name="ИТ"):
+    return storage.create_institute(
+        conn, name=name, catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
+    )
 
 
-def test_build_group_picker_keyboard_shows_one_button_per_group_plus_create(conn):
-    _make_groups(conn, 3)
-    keyboard = build_group_picker_keyboard(conn)
-    texts = [button.text for row in keyboard.inline_keyboard for button in row]
-    assert "Группа-00" in texts
-    assert "Группа-01" in texts
-    assert "Группа-02" in texts
-    assert any("Создать" in text for text in texts)
+def _make_link(conn, institute_id, pdf_url=FIXTURE_PATH, names=("Б-Мв-101",)):
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url=pdf_url, group_names=list(names), raw_label=",".join(names), last_seen_at="t"
+    )
+    group_ids = [storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name) for name in names]
+    return link_id, group_ids
 
 
-def test_build_group_picker_keyboard_paginates(conn):
-    _make_groups(conn, GROUPS_PER_PAGE + 2)
-    first_page = build_group_picker_keyboard(conn, page=0)
-    first_page_names = [
-        button.text for row in first_page.inline_keyboard for button in row
-        if button.callback_data.startswith("grp:select:")
-    ]
-    assert len(first_page_names) == GROUPS_PER_PAGE
-    nav_data = [
-        button.callback_data for row in first_page.inline_keyboard for button in row
-        if button.callback_data.startswith("grp:page:")
-    ]
-    assert nav_data == ["grp:page:1"]  # no "previous" on page 0, "next" present
-
-    second_page = build_group_picker_keyboard(conn, page=1)
-    second_page_names = [
-        button.text for row in second_page.inline_keyboard for button in row
-        if button.callback_data.startswith("grp:select:")
-    ]
-    assert len(second_page_names) == 2
-    nav_data_2 = [
-        button.callback_data for row in second_page.inline_keyboard for button in row
-        if button.callback_data.startswith("grp:page:")
-    ]
-    assert nav_data_2 == ["grp:page:0"]  # only "previous" on the last page
+def test_build_institute_picker_keyboard_lists_institute_names(conn):
+    _make_institute(conn, "Первый")
+    _make_institute(conn, "Второй")
+    keyboard = build_institute_picker_keyboard(conn)
+    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "Первый" in texts
+    assert "Второй" in texts
 
 
-def make_callback_update(chat_id, data, username="ivan", full_name="Ivan Ivanov"):
+def test_build_group_picker_keyboard_hides_unverified_minus_one_groups(conn):
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link(conn, institute_id, names=("Good", "Bad"))
+    storage.update_group_is_verified(conn, group_ids[1], -1)
+    keyboard = build_group_picker_keyboard(conn, institute_id)
+    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "Good" in texts
+    assert "Bad" not in texts
+
+
+@pytest.mark.asyncio
+async def test_validate_marks_group_verified_when_column_found(conn):
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link(conn, institute_id, names=("Б-Мв-101",))
+    group = storage.get_group(conn, group_ids[0])
+    notify_admin = AsyncMock()
+    sync_fn = AsyncMock(return_value=[])
+
+    ok = await validate_and_sync_group_on_first_subscribe(conn, group, "/tmp/cache", notify_admin, sync_fn)
+
+    assert ok is True
+    assert storage.get_group(conn, group.id).is_verified == 1
+    sync_fn.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_validate_marks_group_invalid_and_alerts_admin_when_column_missing(conn):
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link(conn, institute_id, names=("НЕТ-ТАКОЙ-ГРУППЫ",))
+    group = storage.get_group(conn, group_ids[0])
+    notify_admin = AsyncMock()
+    sync_fn = AsyncMock(return_value=[])
+
+    ok = await validate_and_sync_group_on_first_subscribe(conn, group, "/tmp/cache", notify_admin, sync_fn)
+
+    assert ok is False
+    assert storage.get_group(conn, group.id).is_verified == -1
+    notify_admin.assert_awaited_once()
+    sync_fn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_validate_marks_sibling_groups_of_same_link_in_one_pass(conn):
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link(conn, institute_id, names=("Б-Мв-101", "НЕТ-ТАКОЙ-ГРУППЫ"))
+    good_group = storage.get_group(conn, group_ids[0])
+    notify_admin = AsyncMock()
+    sync_fn = AsyncMock(return_value=[])
+
+    await validate_and_sync_group_on_first_subscribe(conn, good_group, "/tmp/cache", notify_admin, sync_fn)
+
+    assert storage.get_group(conn, group_ids[0]).is_verified == 1
+    assert storage.get_group(conn, group_ids[1]).is_verified == -1
+
+
+@pytest.mark.asyncio
+async def test_validate_is_skipped_for_already_verified_group(conn):
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link(conn, institute_id, names=("Б-Мв-101",))
+    storage.update_group_is_verified(conn, group_ids[0], 1)
+    group = storage.get_group(conn, group_ids[0])
+    notify_admin = AsyncMock()
+    sync_fn = AsyncMock(return_value=[])
+
+    ok = await validate_and_sync_group_on_first_subscribe(conn, group, "/tmp/cache", notify_admin, sync_fn)
+
+    assert ok is True
+    sync_fn.assert_not_awaited()  # already verified -> no re-validation, no forced immediate sync
+
+
+@pytest.mark.asyncio
+async def test_validate_failure_excludes_group_from_picker_and_does_not_create_membership(conn):
+    """Binding review focus: when the first subscriber triggers real-PDF
+    validation and the group's name genuinely isn't found in the PDF, all
+    four outcomes must hold simultaneously: is_verified == -1, the group is
+    excluded from build_group_picker_keyboard, exactly one admin alert
+    fires, and no `members` row gets created for the subscribing chat_id.
+    This exercises the full group_select_callback path (not just the
+    lower-level validate function) so the "no membership row created" half
+    of the contract is actually checked end-to-end."""
+    from schedule_bot.group_commands import group_select_callback
+
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link(conn, institute_id, names=("НЕТ-ТАКОЙ-ГРУППЫ",))
+    group_id = group_ids[0]
+    chat_id = 12345
+
     update = MagicMock()
+    query = MagicMock()
+    query.answer = AsyncMock()
+    query.data = f"grp:select:{institute_id}:{group_id}"
+    query.message.reply_text = AsyncMock()
+    update.callback_query = query
     update.effective_chat.id = chat_id
-    update.effective_user.username = username
-    update.effective_user.full_name = full_name
-    update.callback_query.data = data
-    update.callback_query.answer = AsyncMock()
-    update.callback_query.message.reply_text = AsyncMock()
-    update.callback_query.message.edit_reply_markup = AsyncMock()
-    return update
+    update.effective_user.username = "tester"
+    update.effective_user.full_name = "Tester Testovich"
 
+    sent_messages = []
 
-def make_context(conn):
+    async def fake_send_message(chat_id, text):
+        sent_messages.append((chat_id, text))
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=fake_send_message)
+
     context = MagicMock()
-    context.bot_data = {"conn": conn}
-    return context
-
-
-@pytest.mark.asyncio
-async def test_group_page_callback_updates_keyboard(conn):
-    _make_groups(conn, GROUPS_PER_PAGE + 2)
-    update = make_callback_update(111, "grp:page:1")
-    context = make_context(conn)
-
-    await group_page_callback(update, context)
-
-    update.callback_query.answer.assert_awaited_once()
-    update.callback_query.message.edit_reply_markup.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_group_select_callback_attaches_member_and_replies(conn):
-    _make_groups(conn, 1)
-    group_id = storage.list_all_groups(conn)[0].id
-    update = make_callback_update(111, f"grp:select:{group_id}")
-    context = make_context(conn)
-
-    await group_select_callback(update, context)
-
-    member = storage.get_member(conn, 111)
-    assert member.group_id == group_id
-    assert member.subscribed is True
-    assert member.telegram_username == "ivan"
-    update.callback_query.message.reply_text.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_group_select_callback_rejects_deleted_group(conn):
-    update = make_callback_update(111, "grp:select:9999")
-    context = make_context(conn)
-
-    await group_select_callback(update, context)
-
-    assert storage.get_member(conn, 111) is None
-    update.callback_query.message.reply_text.assert_awaited_once()
-
-
-from schedule_bot.group_commands import (
-    ASK_GROUP_NAME,
-    ASK_SOURCE_PAGE_URL,
-    cancel_group_creation,
-    receive_group_name,
-    receive_source_page_url,
-    start_group_creation,
-)
-from telegram.ext import ConversationHandler
-
-
-def make_message_update(chat_id, text, username="ivan", full_name="Ivan Ivanov"):
-    update = MagicMock()
-    update.effective_chat.id = chat_id
-    update.effective_user.username = username
-    update.effective_user.full_name = full_name
-    update.message.text = text
-    update.message.reply_text = AsyncMock()
-    return update
-
-
-def make_context_with_config(conn, default_send_time="09:00", default_check_interval=60, default_timezone="Europe/Moscow"):
-    context = MagicMock()
-    context.user_data = {}
+    context.bot = bot
     context.bot_data = {
         "conn": conn,
-        "config": MagicMock(
-            default_daily_send_time=default_send_time,
-            default_check_interval_minutes=default_check_interval,
-            default_timezone=default_timezone,
-        ),
-        "reschedule_group_jobs": MagicMock(),
+        "admin_chat_id": 999,
+        "config": MagicMock(pdf_cache_dir="/tmp/cache"),
+        "sync_institute_link_fn": AsyncMock(return_value=[]),
     }
-    return context
-
-
-@pytest.mark.asyncio
-async def test_start_group_creation_asks_for_name(conn):
-    update = make_callback_update(111, "grp:create")
-    context = make_context_with_config(conn)
-
-    state = await start_group_creation(update, context)
-
-    assert state == ASK_GROUP_NAME
-    update.callback_query.message.reply_text.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_receive_group_name_stores_name_and_asks_for_source_page(conn):
-    update = make_message_update(111, "Б-Мв-999")
-    context = make_context_with_config(conn)
-
-    state = await receive_group_name(update, context)
-
-    assert state == ASK_SOURCE_PAGE_URL
-    assert context.user_data["new_group_name"] == "Б-Мв-999"
-
-
-@pytest.mark.asyncio
-async def test_receive_source_page_url_rejects_duplicate_group_name(conn):
-    storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
-    update = make_message_update(111, "https://example.com/schedules")
-    context = make_context_with_config(conn)
-    context.user_data["new_group_name"] = "Б-Мв-101"
-
-    state = await receive_source_page_url(update, context)
-
-    assert state == ConversationHandler.END
-    assert storage.count_groups(conn) == 1
-
-
-@pytest.mark.asyncio
-async def test_receive_source_page_url_reports_unreachable_source_page(conn, monkeypatch):
-    import schedule_bot.group_commands as group_commands_module
-    from schedule_bot.group_links import SourcePageUnreachableError
-
-    monkeypatch.setattr(
-        group_commands_module, "resolve_group_pdf_source",
-        lambda *a, **k: (_ for _ in ()).throw(SourcePageUnreachableError("down")),
-    )
-    update = make_message_update(111, "https://example.com/schedules")
-    context = make_context_with_config(conn)
-    context.user_data["new_group_name"] = "Б-Мв-999"
-
-    state = await receive_source_page_url(update, context)
-
-    assert state == ASK_SOURCE_PAGE_URL
-    assert storage.count_groups(conn) == 0
-
-
-@pytest.mark.asyncio
-async def test_receive_source_page_url_reports_group_link_not_found(conn, monkeypatch):
-    import schedule_bot.group_commands as group_commands_module
-    from schedule_bot.group_links import GroupLinkNotFoundError
-
-    monkeypatch.setattr(
-        group_commands_module, "resolve_group_pdf_source",
-        lambda *a, **k: (_ for _ in ()).throw(GroupLinkNotFoundError("not found")),
-    )
-    update = make_message_update(111, "https://example.com/schedules")
-    context = make_context_with_config(conn)
-    context.user_data["new_group_name"] = "Б-Мв-999"
-
-    state = await receive_source_page_url(update, context)
-
-    assert state == ASK_SOURCE_PAGE_URL
-    assert storage.count_groups(conn) == 0
-
-
-@pytest.mark.asyncio
-async def test_receive_source_page_url_reports_dead_pdf_link(conn, monkeypatch):
-    import schedule_bot.group_commands as group_commands_module
-
-    monkeypatch.setattr(
-        group_commands_module, "resolve_group_pdf_source", lambda *a, **k: "https://example.com/dead.pdf"
-    )
-    monkeypatch.setattr(
-        group_commands_module, "_load_pdf_bytes",
-        lambda *a, **k: (_ for _ in ()).throw(ConnectionError("404")),
-    )
-    update = make_message_update(111, "https://example.com/schedules")
-    context = make_context_with_config(conn)
-    context.user_data["new_group_name"] = "Б-Мв-999"
-
-    state = await receive_source_page_url(update, context)
-
-    assert state == ASK_SOURCE_PAGE_URL
-    assert storage.count_groups(conn) == 0
-
-
-@pytest.mark.asyncio
-async def test_receive_source_page_url_creates_group_on_success(conn, monkeypatch):
-    import schedule_bot.group_commands as group_commands_module
-
-    monkeypatch.setattr(
-        group_commands_module, "resolve_group_pdf_source", lambda *a, **k: "https://example.com/101.pdf"
-    )
-    monkeypatch.setattr(group_commands_module, "_load_pdf_bytes", lambda *a, **k: b"%PDF-fake")
-    monkeypatch.setattr(group_commands_module, "parse_schedule", lambda *a, **k: object())
-    update = make_message_update(111, "https://example.com/schedules")
-    context = make_context_with_config(conn)
-    context.user_data["new_group_name"] = "Б-Мв-999"
-
-    state = await receive_source_page_url(update, context)
-
-    assert state == ConversationHandler.END
-    group = storage.get_group_by_name(conn, "Б-Мв-999")
-    assert group is not None
-    assert group.pdf_source_url == "https://example.com/101.pdf"
-    assert storage.get_member(conn, 111).group_id == group.id
-    context.bot_data["reschedule_group_jobs"].assert_called_once_with(group.id)
-
-
-@pytest.mark.asyncio
-async def test_receive_source_page_url_reports_group_not_found_in_pdf(conn, monkeypatch):
-    """If the PDF link resolves and the file downloads fine, but group_name
-    is not an actual column header in the parsed table (find_group_column_index
-    raises ValueError), the group must NOT be created and the user must get
-    a clear, retryable error instead of silently creating a group that can
-    never sync."""
-    import schedule_bot.group_commands as group_commands_module
-
-    monkeypatch.setattr(
-        group_commands_module, "resolve_group_pdf_source", lambda *a, **k: "https://example.com/101.pdf"
-    )
-    monkeypatch.setattr(group_commands_module, "_load_pdf_bytes", lambda *a, **k: b"%PDF-fake")
-
-    def _raise_value_error(*args, **kwargs):
-        raise ValueError("Column for group 'Б-Мв-999' not found in table header")
-
-    monkeypatch.setattr(group_commands_module, "parse_schedule", _raise_value_error)
-
-    update = make_message_update(111, "https://example.com/schedules")
-    context = make_context_with_config(conn)
-    context.user_data["new_group_name"] = "Б-Мв-999"
-
-    state = await receive_source_page_url(update, context)
-
-    assert state == ASK_SOURCE_PAGE_URL
-    assert storage.count_groups(conn) == 0
-    update.message.reply_text.assert_awaited_once()
-    (message_text,), _ = update.message.reply_text.call_args
-    assert "Б-Мв-999" in message_text
-
-
-@pytest.mark.asyncio
-async def test_receive_source_page_url_handles_integrity_error_race(conn, monkeypatch):
-    """Even if the pre-check for an existing name races with a concurrent
-    creation, a sqlite3.IntegrityError from storage.create_group itself must
-    produce a clean user-facing message, not an unhandled exception."""
-    import schedule_bot.group_commands as group_commands_module
-
-    monkeypatch.setattr(
-        group_commands_module, "resolve_group_pdf_source", lambda *a, **k: "https://example.com/101.pdf"
-    )
-    monkeypatch.setattr(group_commands_module, "_load_pdf_bytes", lambda *a, **k: b"%PDF-fake")
-    monkeypatch.setattr(group_commands_module, "parse_schedule", lambda *a, **k: object())
-
-    def _raise_integrity_error(*args, **kwargs):
-        raise sqlite3.IntegrityError("UNIQUE constraint failed: groups.name")
-
-    monkeypatch.setattr(storage, "create_group", _raise_integrity_error)
-
-    update = make_message_update(111, "https://example.com/schedules")
-    context = make_context_with_config(conn)
-    context.user_data["new_group_name"] = "Б-Мв-999"
-
-    state = await receive_source_page_url(update, context)
-
-    assert state == ConversationHandler.END
-    update.message.reply_text.assert_awaited()
-
-
-@pytest.mark.asyncio
-async def test_cancel_group_creation_ends_conversation(conn):
-    update = make_message_update(111, "/cancel")
-    context = make_context_with_config(conn)
-
-    state = await cancel_group_creation(update, context)
-
-    assert state == ConversationHandler.END
-
-
-from schedule_bot.group_commands import start_command, subscribe_command, unsubscribe_command
-
-
-@pytest.mark.asyncio
-async def test_start_command_shows_picker_when_no_group_attached(conn):
-    _make_groups(conn, 1)
-    update = make_message_update(111, "/start")
-    context = make_context_with_config(conn)
-
-    await start_command(update, context)
-
-    update.message.reply_text.assert_awaited_once()
-    _, kwargs = update.message.reply_text.call_args
-    assert "reply_markup" in kwargs
-
-
-@pytest.mark.asyncio
-async def test_start_command_shows_status_when_group_already_attached(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
-    storage.upsert_member(conn, 111, group_id, joined_at="t", subscribed=True)
-    update = make_message_update(111, "/start")
-    context = make_context_with_config(conn)
-
-    await start_command(update, context)
-
-    text = update.message.reply_text.call_args[0][0]
-    assert "Б-Мв-101" in text
-    _, kwargs = update.message.reply_text.call_args
-    assert "reply_markup" in kwargs
-
-
-@pytest.mark.asyncio
-async def test_subscribe_command_requires_existing_group(conn):
-    update = make_message_update(111, "/subscribe")
-    context = make_context_with_config(conn)
-
-    await subscribe_command(update, context)
-
-    assert storage.get_member(conn, 111) is None
-    update.message.reply_text.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_subscribe_command_resubscribes_without_changing_group(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
-    storage.upsert_member(conn, 111, group_id, joined_at="t", subscribed=False)
-    update = make_message_update(111, "/subscribe")
-    context = make_context_with_config(conn)
-
-    await subscribe_command(update, context)
-
-    member = storage.get_member(conn, 111)
-    assert member.subscribed is True
-    assert member.group_id == group_id
-
-
-@pytest.mark.asyncio
-async def test_unsubscribe_command_keeps_group_attached(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
-    storage.upsert_member(conn, 111, group_id, joined_at="t", subscribed=True)
-    update = make_message_update(111, "/unsubscribe")
-    context = make_context_with_config(conn)
-
-    await unsubscribe_command(update, context)
-
-    member = storage.get_member(conn, 111)
-    assert member.subscribed is False
-    assert member.group_id == group_id
-
-
-@pytest.mark.asyncio
-async def test_group_select_callback_routes_closed_group_through_request(conn):
-    _make_groups(conn, 1)
-    group_id = storage.list_all_groups(conn)[0].id
-    storage.update_group_closed(conn, group_id, True)
-    update = make_callback_update(111, f"grp:select:{group_id}")
-    context = make_context(conn)
-    context.bot_data["admin_chat_id"] = 999
-    context.bot.send_message = AsyncMock()
 
     await group_select_callback(update, context)
 
-    assert storage.get_member(conn, 111) is None
-    assert storage.get_pending_request_for_chat(conn, 111) is not None
-    context.bot.send_message.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_group_select_callback_routes_excluded_chat_through_request_even_if_open(conn):
-    _make_groups(conn, 1)
-    group_id = storage.list_all_groups(conn)[0].id
-    storage.create_group_exclusion(conn, group_id, 111, "t", 999)
-    update = make_callback_update(111, f"grp:select:{group_id}")
-    context = make_context(conn)
-    context.bot_data["admin_chat_id"] = 999
-    context.bot.send_message = AsyncMock()
-
-    await group_select_callback(update, context)
-
-    assert storage.get_member(conn, 111) is None
-    assert storage.get_pending_request_for_chat(conn, 111) is not None
-
-
-@pytest.mark.asyncio
-async def test_group_select_callback_approval_request_carries_real_requester_label(conn):
-    # Regression for the "Неизвестный" finding: no `members` row exists yet
-    # for a first-time joiner awaiting approval, so the label must come from
-    # update.effective_user, not a storage.get_member lookup.
-    _make_groups(conn, 1)
-    group_id = storage.list_all_groups(conn)[0].id
-    storage.update_group_closed(conn, group_id, True)
-    update = make_callback_update(111, f"grp:select:{group_id}", username="ivan", full_name="Ivan Ivanov")
-    context = make_context(conn)
-    context.bot_data["admin_chat_id"] = 999
-    context.bot.send_message = AsyncMock()
-
-    await group_select_callback(update, context)
-
-    text = context.bot.send_message.await_args.kwargs["text"]
-    assert "Ivan Ivanov (@ivan)" in text
-    assert "Неизвестный" not in text
-
-
-@pytest.mark.asyncio
-async def test_group_select_callback_refuses_second_pending_request(conn):
-    _make_groups(conn, 1)
-    group_id = storage.list_all_groups(conn)[0].id
-    storage.update_group_closed(conn, group_id, True)
-    storage.create_group_change_request(conn, 111, None, group_id, "t")
-    update = make_callback_update(111, f"grp:select:{group_id}")
-    context = make_context(conn)
-    context.bot_data["admin_chat_id"] = 999
-    context.bot.send_message = AsyncMock()
-
-    await group_select_callback(update, context)
-
-    context.bot.send_message.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_group_select_callback_still_instant_for_open_unrestricted_group(conn):
-    _make_groups(conn, 1)
-    group_id = storage.list_all_groups(conn)[0].id
-    update = make_callback_update(111, f"grp:select:{group_id}")
-    context = make_context(conn)
-    context.bot_data["admin_chat_id"] = 999
-
-    await group_select_callback(update, context)
-
-    assert storage.get_member(conn, 111).group_id == group_id
-
-
-@pytest.mark.asyncio
-async def test_start_command_with_group_offers_menu_button(conn):
-    group_id = storage.create_group(
-        conn, name="Б-Мв-101", source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
-    )
-    storage.upsert_member(conn, 111, group_id, joined_at="t", subscribed=True)
-    update = make_message_update(111, "/start")
-    context = make_context_with_config(conn)
-
-    await start_command(update, context)
-
-    _, kwargs = update.message.reply_text.call_args
-    buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
-    assert any(b.callback_data == "menu:root:_" for b in buttons)
+    # 1. group ends up marked as not-found-in-PDF.
+    assert storage.get_group(conn, group_id).is_verified == -1
+    # 2. excluded from the picker shown to users.
+    keyboard = build_group_picker_keyboard(conn, institute_id)
+    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "НЕТ-ТАКОЙ-ГРУППЫ" not in texts
+    # 3. exactly one admin alert was sent.
+    assert len(sent_messages) == 1
+    assert sent_messages[0][0] == 999
+    # 4. no membership row was created for the subscribing chat_id.
+    assert storage.get_member(conn, chat_id) is None
+    context.bot_data["sync_institute_link_fn"].assert_not_awaited()

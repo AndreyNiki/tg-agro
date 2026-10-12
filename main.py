@@ -41,11 +41,14 @@ from schedule_bot.change_group_commands import (
 )
 from schedule_bot.config import Config, load_config
 from schedule_bot.group_commands import (
+    INSTITUTE_PAGE_CALLBACK_PATTERN,
+    INSTITUTE_SELECT_CALLBACK_PATTERN,
     PAGE_CALLBACK_PATTERN,
     SELECT_CALLBACK_PATTERN,
-    group_creation_handler,
     group_page_callback,
     group_select_callback,
+    institute_page_callback,
+    institute_select_callback,
     start_command,
     subscribe_command,
     unsubscribe_command,
@@ -174,9 +177,10 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(day_callback, pattern=r"^day:\d{4}-\d{2}-\d{2}$"))
     application.add_handler(CallbackQueryHandler(noop_callback, pattern=f"^{NOOP_CALLBACK_DATA}$"))
+    application.add_handler(CallbackQueryHandler(institute_select_callback, pattern=INSTITUTE_SELECT_CALLBACK_PATTERN))
+    application.add_handler(CallbackQueryHandler(institute_page_callback, pattern=INSTITUTE_PAGE_CALLBACK_PATTERN))
     application.add_handler(CallbackQueryHandler(group_select_callback, pattern=SELECT_CALLBACK_PATTERN))
     application.add_handler(CallbackQueryHandler(group_page_callback, pattern=PAGE_CALLBACK_PATTERN))
-    application.add_handler(group_creation_handler)
     application.add_handler(CommandHandler("set_pdf_source", set_pdf_source_command))
     application.add_handler(CommandHandler("set_send_time", set_send_time_command))
     application.add_handler(CommandHandler("set_check_interval", set_check_interval_command))
