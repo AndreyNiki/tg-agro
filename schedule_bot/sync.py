@@ -11,10 +11,10 @@ from typing import Awaitable, Callable
 
 from schedule_bot import storage
 from schedule_bot.diff import compute_diff
-from schedule_bot.group_links import resolve_group_pdf_source
+from schedule_bot.group_links import refresh_institute_catalog
 from schedule_bot.pdf_parser import (
     _load_pdf_bytes,
-    parse_schedule,
+    parse_schedules_for_groups,
     schedule_from_dict,
     schedule_to_dict,
 )
@@ -24,24 +24,44 @@ logger = logging.getLogger(__name__)
 
 Notifier = Callable[[int, str], Awaitable[None]]
 
-MAX_SYNC_ATTEMPTS = 3
-
-
-@dataclass
-class SyncResult:
-    status: str
-    changes: list[str] = field(default_factory=list)
-
+MAX_FETCH_ATTEMPTS = 3
 
 _UNSAFE_PATH_CHARS = re.compile(r"[^\w.-]")
 
 
-def _write_cache(pdf_bytes: bytes, pdf_cache_dir: str, group_name: str) -> str:
-    # group_name ultimately comes from admin-set config, not untrusted user
-    # input, but it's used as a path segment — sanitize it so a stray "/"
-    # or ".." can't be interpreted as a path separator/traversal.
-    safe_group_name = _UNSAFE_PATH_CHARS.sub("_", group_name)
-    cache_dir = Path(pdf_cache_dir) / safe_group_name
+@dataclass
+class SyncResult:
+    group_id: int
+    status: str
+    changes: list[str] = field(default_factory=list)
+
+
+async def check_and_apply_diff(conn, group, pdf_cache_dir: str, notify: Notifier):
+    """Deprecated placeholder, kept only so that `schedule_bot/scheduler.py`
+    and `main.py` — not yet rewired to call `sync_institute_link` at the
+    link level — still import successfully. Task 12 replaces the group-
+    level sync pipeline entirely; those two modules' own rewiring (and
+    deletion of this shim) is a later task in this plan (see the plan's
+    Phase 7/8 continuation note). `group` here no longer even carries the
+    `pdf_source_url`/`source_page_url` fields the old implementation read
+    (those moved to `institute_links`/`institutes`), so this must never
+    actually be invoked for real — only monkeypatched/stubbed in tests
+    that predate the link-level model, which is all current call sites do.
+    """
+    raise NotImplementedError(
+        "check_and_apply_diff is superseded by sync_institute_link (Task 12); "
+        "scheduler.py/main.py call sites are rewired in a later task"
+    )
+
+
+def _safe_segment(value: str) -> str:
+    # Group/link identifiers end up as path segments below — sanitize so a
+    # stray "/" or ".." can't be interpreted as a path separator/traversal.
+    return _UNSAFE_PATH_CHARS.sub("_", value)
+
+
+def _write_cache(pdf_bytes: bytes, pdf_cache_dir: str, institute_link_id: int, group_name: str) -> str:
+    cache_dir = Path(pdf_cache_dir) / f"link_{institute_link_id}" / _safe_segment(group_name)
     cache_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     destination = cache_dir / f"{timestamp}.pdf"
@@ -49,123 +69,152 @@ def _write_cache(pdf_bytes: bytes, pdf_cache_dir: str, group_name: str) -> str:
     return str(destination)
 
 
-def _fetch_and_parse_with_retries(
-    pdf_source: str, group_name: str, source_page_url: str | None
-) -> tuple[bytes | None, object | None, str, Exception | None]:
-    # I5: read the PDF exactly once per attempt. Retried up to
-    # MAX_SYNC_ATTEMPTS times since a fetch/parse failure is often a
-    # transient network blip — OR the institute renamed the PDF file
-    # (the motivating bug): on the first failure, try re-discovering the
-    # link once via source_page_url before burning the rest of the retry
-    # budget against a now-permanently-dead URL.
-    current_source = pdf_source
-    reconnect_attempted = False
-    pdf_bytes = None
-    new_schedule = None
+def _fetch_pdf_bytes_with_retries(pdf_source: str) -> tuple[bytes | None, Exception | None]:
     last_error: Exception | None = None
-    for attempt in range(MAX_SYNC_ATTEMPTS):
-        tmp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    for attempt in range(MAX_FETCH_ATTEMPTS):
         try:
-            pdf_bytes = _load_pdf_bytes(current_source)
-            tmp_file.write(pdf_bytes)
-            tmp_file.close()
-            new_schedule = parse_schedule(tmp_file.name, group_name)
-            last_error = None
-            break
+            return _load_pdf_bytes(pdf_source), None
         except Exception as exc:
             last_error = exc
             logger.warning(
-                "sync: attempt %d/%d failed for %r (group %r): %s",
-                attempt + 1, MAX_SYNC_ATTEMPTS, current_source, group_name, exc,
+                "sync: fetch attempt %d/%d failed for %r: %s",
+                attempt + 1, MAX_FETCH_ATTEMPTS, pdf_source, exc,
             )
-            if not reconnect_attempted and source_page_url:
-                reconnect_attempted = True
-                try:
-                    current_source = resolve_group_pdf_source(source_page_url, group_name)
-                    logger.info(
-                        "sync: re-discovered pdf link for group %r: %s", group_name, current_source
-                    )
-                except Exception as reconnect_error:
-                    logger.warning(
-                        "sync: 404-reconnect failed for group %r: %s", group_name, reconnect_error
-                    )
-        finally:
-            try:
-                os.unlink(tmp_file.name)
-            except OSError:
-                pass
-    return pdf_bytes, new_schedule, current_source, last_error
+    return None, last_error
 
 
-async def check_and_apply_diff(conn, group, pdf_cache_dir: str, notify: Notifier) -> SyncResult:
-    group_id, pdf_source, group_name = group.id, group.pdf_source_url, group.name
-    logger.info("sync: checking %r for group %r", pdf_source, group_name)
-    active = storage.get_active_version(conn, group_id)
-    old_schedule = schedule_from_dict(json.loads(active.payload_json)) if active else None
+def _fetch_and_parse_blocking(
+    pdf_source: str, group_names: list[str]
+) -> tuple[bytes | None, dict[str, object | None], Exception | None]:
+    # Blocking: network fetch (retried) + a single pdfplumber parse shared
+    # by every group name on this link (parse_schedules_for_groups calls
+    # extract_raw_rows exactly once regardless of len(group_names)). The
+    # PDF is read from a local temp-file copy, not re-fetched from the
+    # original URL, to avoid a TOCTOU bug if the remote file changes
+    # between two independent fetches.
+    pdf_bytes, error = _fetch_pdf_bytes_with_retries(pdf_source)
+    if pdf_bytes is None:
+        return None, {}, error
 
-    # Network fetch + pdfplumber parsing are blocking calls; running them
-    # directly here would freeze the whole asyncio event loop (including
-    # python-telegram-bot's own polling/HTTP traffic) for their entire
-    # duration. Offload to a worker thread so the loop stays responsive.
-    pdf_bytes, new_schedule, resolved_source, last_error = await asyncio.to_thread(
-        _fetch_and_parse_with_retries, pdf_source, group_name, group.source_page_url
+    tmp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    try:
+        tmp_file.write(pdf_bytes)
+        tmp_file.close()
+        schedules = parse_schedules_for_groups(tmp_file.name, group_names)
+        return pdf_bytes, schedules, None
+    finally:
+        try:
+            os.unlink(tmp_file.name)
+        except OSError:
+            pass
+
+
+async def sync_institute_link(
+    conn, institute_link, institute, pdf_cache_dir: str, notify: Notifier,
+    *, catalog_refreshed_this_cycle: set[int],
+) -> list[SyncResult]:
+    """Fetch + parse the link's PDF exactly once per call (deduplicated
+    across however many groups are subscribed to it, design spec 3.1/3.2),
+    then apply the parsed result to each active group individually so one
+    bad/missing group name doesn't abort the rest of the link's sync.
+
+    A stale link (`is_stale=1`) never triggers a network request — the
+    `institute_link.is_stale` check below runs before any fetch. A link
+    with no active groups (no member, pinned or subscribed) likewise never
+    fetches: there'd be nothing to apply the result to.
+    """
+    if institute_link.is_stale:
+        return []
+
+    groups = storage.list_groups_for_link(conn, institute_link.id)
+    active_groups = [
+        g for g in groups if storage.list_group_members(conn, g.id, subscribed_only=False)
+    ]
+    if not active_groups:
+        return []
+
+    group_names = [g.name for g in active_groups]
+    pdf_bytes, schedules, error = await asyncio.to_thread(
+        _fetch_and_parse_blocking, institute_link.pdf_url, group_names
     )
 
-    if last_error is not None:
-        storage.set_group_last_sync_failed_at(conn, group_id, datetime.now(timezone.utc).isoformat())
-        logger.error(
-            "sync: all %d attempts failed for %r (group %r): %s",
-            MAX_SYNC_ATTEMPTS, pdf_source, group_name, last_error,
-        )
-        raise last_error
+    if pdf_bytes is None:
+        # 404-style fallback: rate-limited to once per institute per
+        # scheduler cycle via the caller-owned catalog_refreshed_this_cycle
+        # set (design spec 3.3/3.4) — a dead link shouldn't trigger a full
+        # catalog re-scan once per subscribed link on every sync pass.
+        if institute.id not in catalog_refreshed_this_cycle:
+            catalog_refreshed_this_cycle.add(institute.id)
+            try:
+                refresh_institute_catalog(conn, institute, notify_admin=lambda text: None)
+            except Exception as refresh_error:
+                logger.warning(
+                    "sync: catalog refresh fallback failed for institute %r: %s",
+                    institute.name, refresh_error,
+                )
+            refreshed_link = storage.get_institute_link(conn, institute_link.id)
+            if refreshed_link is not None and refreshed_link.pdf_url != institute_link.pdf_url:
+                pdf_bytes, schedules, error = await asyncio.to_thread(
+                    _fetch_and_parse_blocking, refreshed_link.pdf_url, group_names
+                )
 
-    # Only persist a 404-reconnected link once the sync has actually
-    # succeeded against it — persisting an unproven replacement link on a
-    # failed sync would permanently overwrite a working pdf_source_url
-    # with a link that was never confirmed to work.
-    if resolved_source != pdf_source:
-        storage.update_group_pdf_source_url(conn, group_id, resolved_source)
+    if pdf_bytes is None:
+        now = datetime.now(timezone.utc).isoformat()
+        for group in active_groups:
+            storage.set_group_last_sync_failed_at(conn, group.id, now)
+        logger.error("sync: fetch failed for link %r: %s", institute_link.pdf_url, error)
+        return [SyncResult(group_id=group.id, status="error") for group in active_groups]
 
-    storage.set_group_last_sync_failed_at(conn, group_id, "")
+    results: list[SyncResult] = []
+    for group in active_groups:
+        new_schedule = schedules.get(group.name)
+        if new_schedule is None:
+            storage.set_group_last_sync_failed_at(conn, group.id, datetime.now(timezone.utc).isoformat())
+            results.append(SyncResult(group_id=group.id, status="error"))
+            continue
 
-    changes = compute_diff(old_schedule, new_schedule)
+        storage.set_group_last_sync_failed_at(conn, group.id, "")
+        active = storage.get_active_version(conn, group.id)
+        old_schedule = schedule_from_dict(json.loads(active.payload_json)) if active else None
+        changes = compute_diff(old_schedule, new_schedule)
 
-    if active is not None and not changes:
-        logger.info("sync: no changes for group %r", group_name)
-        return SyncResult(status="no_changes")
+        if active is not None and not changes:
+            results.append(SyncResult(group_id=group.id, status="no_changes"))
+            continue
 
-    cache_path = _write_cache(pdf_bytes, pdf_cache_dir, group_name)
-    payload_json = json.dumps(schedule_to_dict(new_schedule))
-    parsed_at = datetime.now(timezone.utc).isoformat()
-    storage.insert_new_version(conn, group_id, payload_json, cache_path, parsed_at)
+        cache_path = _write_cache(pdf_bytes, pdf_cache_dir, institute_link.id, group.name)
+        parsed_at = datetime.now(timezone.utc).isoformat()
+        storage.insert_new_version(conn, group.id, json.dumps(schedule_to_dict(new_schedule)), cache_path, parsed_at)
 
-    # I7: the previous active version has just been superseded; its
-    # cached PDF file is no longer referenced by any row.
-    if active is not None and active.pdf_cache_path:
-        try:
-            Path(active.pdf_cache_path).unlink(missing_ok=True)
-        except OSError as exc:
-            logger.warning(
-                "sync: failed to delete superseded cache file %r for group %r: %s",
-                active.pdf_cache_path, group_name, exc,
-            )
+        # The previous active version has just been superseded; its cached
+        # PDF file is no longer referenced by any row — this is the only
+        # cleanup mechanism for pdf_cache_dir.
+        if active is not None and active.pdf_cache_path:
+            try:
+                Path(active.pdf_cache_path).unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "sync: failed to delete superseded cache file %r: %s", active.pdf_cache_path, exc
+                )
 
-    if active is None:
-        logger.info("sync: initial schedule loaded for group %r", group_name)
-        return SyncResult(status="initial")
+        if active is None:
+            results.append(SyncResult(group_id=group.id, status="initial"))
+            continue
 
-    logger.info("sync: schedule changed for group %r: %s", group_name, changes)
-    message = "Расписание изменилось. Актуальную версию смотрите на сайте"
-    weektype_url = storage.get_setting(conn, "weektype_url")
-    if weektype_url:
-        message += ":\n" + weektype_url
-    for chat_id in storage.list_group_members(conn, group_id):
-        try:
-            await notify(chat_id, message)
-        except Exception as exc:
-            logger.warning(
-                "sync: failed to notify chat_id=%s for group %r: %s", chat_id, group_name, exc
-            )
-        await asyncio.sleep(SEND_PACING_SECONDS)
+        message = "Расписание изменилось. Актуальную версию смотрите на сайте"
+        weektype_url = storage.get_setting(conn, "weektype_url")
+        if weektype_url:
+            message += ":\n" + weektype_url
+        # Notification is about delivery, scoped by `subscribed` — unlike
+        # the active_groups gate above (subscribed_only=False), which
+        # exists so a pinned-but-unsubscribed member still gets /schedule.
+        for chat_id in storage.list_group_members(conn, group.id, subscribed_only=True):
+            try:
+                await notify(chat_id, message)
+            except Exception as exc:
+                logger.warning("sync: failed to notify chat_id=%s for group %r: %s", chat_id, group.name, exc)
+            await asyncio.sleep(SEND_PACING_SECONDS)
 
-    return SyncResult(status="applied", changes=changes)
+        results.append(SyncResult(group_id=group.id, status="applied", changes=changes))
+
+    return results

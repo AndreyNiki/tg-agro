@@ -5,28 +5,32 @@ from pathlib import Path
 import pytest
 
 from schedule_bot import storage
-from schedule_bot.sync import check_and_apply_diff
+from schedule_bot.sync import sync_institute_link
 
 FIXTURE_PATH = str(Path(__file__).parent / "fixtures" / "schedule_sample.pdf")
 
 
 @pytest.fixture
-def conn(tmp_path):
+def conn():
     connection = sqlite3.connect(":memory:")
     storage.init_db(connection)
     return connection
 
 
-def _make_group(conn, pdf_source_url=FIXTURE_PATH, source_page_url="https://example.com/schedules"):
-    return storage.create_group(
-        conn,
-        name="Б-Мв-101",
-        source_page_url=source_page_url,
-        pdf_source_url=pdf_source_url,
-        send_time="09:00",
-        check_interval_minutes=60,
-        tz_name="Europe/Moscow",
+def _make_institute(conn):
+    return storage.create_institute(
+        conn, name="ИТ", catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
     )
+
+
+def _make_link_and_groups(conn, institute_id, pdf_url, names):
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url=pdf_url, group_names=names, raw_label=",".join(names), last_seen_at="t"
+    )
+    group_ids = [storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name) for name in names]
+    return link_id, group_ids
 
 
 class RecordingNotifier:
@@ -37,310 +41,269 @@ class RecordingNotifier:
         self.sent.append((chat_id, text))
 
 
-def test_first_sync_seeds_active_version_without_notifying(conn, tmp_path):
-    group_id = _make_group(conn)
-    storage.upsert_member(conn, 111, group_id, joined_at="2026-09-16T00:00:00")
-    notifier = RecordingNotifier()
-
-    group = storage.get_group(conn, group_id)
-    result = asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
-
-    assert result.status == "initial"
-    assert notifier.sent == []
-    assert storage.get_active_version(conn, group_id) is not None
-
-
-def test_second_sync_with_same_pdf_reports_no_changes(conn, tmp_path):
-    group_id = _make_group(conn)
-    notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
-
-    result = asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
-
-    assert result.status == "no_changes"
-    assert notifier.sent == []
-
-
-def test_sync_with_changed_pdf_notifies_all_subscribers(conn, tmp_path, monkeypatch):
-    group_id = _make_group(conn)
-    storage.upsert_member(conn, 111, group_id, joined_at="t")
-    storage.upsert_member(conn, 222, group_id, joined_at="t")
-    notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
-
+def test_sync_institute_link_skips_network_when_no_active_groups(conn, tmp_path, monkeypatch):
     import schedule_bot.sync as sync_module
-    from schedule_bot.pdf_parser import parse_schedule as real_parse_schedule
 
-    def fake_parse_schedule(source, group_name):
-        schedule = real_parse_schedule(source, group_name)
-        schedule.days["Среда"].lessons[0].upper = "ИЗМЕНЁННЫЙ ПРЕДМЕТ"
-        return schedule
+    institute_id = _make_institute(conn)
+    link_id, _ = _make_link_and_groups(conn, institute_id, FIXTURE_PATH, ["Б-Мв-101"])
 
-    monkeypatch.setattr(sync_module, "parse_schedule", fake_parse_schedule)
+    def fail(*args, **kwargs):
+        raise AssertionError("must not fetch when no active groups")
 
-    result = asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
+    monkeypatch.setattr(sync_module, "_load_pdf_bytes", fail)
 
-    assert result.status == "applied"
-    assert len(result.changes) >= 1
-    assert {chat_id for chat_id, _ in notifier.sent} == {111, 222}
-
-
-def test_write_cache_sanitizes_group_name_used_as_path_segment(tmp_path):
-    from schedule_bot.sync import _write_cache
-
-    cache_path = Path(_write_cache(b"%PDF-fake", str(tmp_path), "Б-Мв/../101"))
-
-    assert cache_path.exists()
-    assert tmp_path in cache_path.resolve().parents
-    assert ".." not in cache_path.parts
+    results = asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+    ))
+    assert results == []
 
 
-def test_sync_caches_pdf_file_on_disk(conn, tmp_path):
-    group_id = _make_group(conn)
-    notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
-    active = storage.get_active_version(conn, group_id)
-    assert Path(active.pdf_cache_path).exists()
+def test_sync_institute_link_skips_network_when_stale(conn, tmp_path, monkeypatch):
+    import schedule_bot.sync as sync_module
+
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, FIXTURE_PATH, ["Б-Мв-101"])
+    storage.upsert_member(conn, 111, group_ids[0], joined_at="t")
+    storage.mark_stale_links_not_in(conn, institute_id, confirmed_link_ids=[])
+
+    def fail(*args, **kwargs):
+        raise AssertionError("must not fetch a stale link")
+
+    monkeypatch.setattr(sync_module, "_load_pdf_bytes", fail)
+
+    results = asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+    ))
+    assert results == []
 
 
-class PartiallyFailingNotifier:
-    def __init__(self, failing_chat_id):
-        self.failing_chat_id = failing_chat_id
-        self.sent = []
-
-    async def __call__(self, chat_id, text):
-        if chat_id == self.failing_chat_id:
-            raise RuntimeError("bot blocked by user")
-        self.sent.append((chat_id, text))
-
-
-def test_sync_reads_pdf_source_exactly_once_and_cache_matches_parsed_bytes(conn, tmp_path, monkeypatch):
+def test_sync_institute_link_fetches_and_parses_once_for_two_groups(conn, tmp_path, monkeypatch):
     import schedule_bot.pdf_parser as pdf_parser_module
     import schedule_bot.sync as sync_module
 
-    real_load_pdf_bytes = pdf_parser_module._load_pdf_bytes
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, FIXTURE_PATH, ["Б-Мв-101", "Б-Эв-101"])
+    for group_id in group_ids:
+        storage.upsert_member(conn, group_id * 1000, group_id, joined_at="t")
+
+    real_extract = pdf_parser_module.extract_raw_rows
     call_count = 0
 
-    def counting_load_pdf_bytes(source):
+    def counting_extract(source):
         nonlocal call_count
         call_count += 1
-        return real_load_pdf_bytes(source)
+        return real_extract(source)
 
-    monkeypatch.setattr(sync_module, "_load_pdf_bytes", counting_load_pdf_bytes)
+    monkeypatch.setattr(pdf_parser_module, "extract_raw_rows", counting_extract)
 
-    group_id = _make_group(conn)
-    notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    result = asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
+    results = asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+    ))
 
-    assert result.status == "initial"
     assert call_count == 1
-
-    active = storage.get_active_version(conn, group_id)
-    assert Path(active.pdf_cache_path).read_bytes() == Path(FIXTURE_PATH).read_bytes()
-
-
-def test_sync_deletes_superseded_cache_file_on_change(conn, tmp_path, monkeypatch):
-    group_id = _make_group(conn)
-    notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
-    first_cache_path = Path(storage.get_active_version(conn, group_id).pdf_cache_path)
-    assert first_cache_path.exists()
-
-    import schedule_bot.sync as sync_module
-    from schedule_bot.pdf_parser import parse_schedule as real_parse_schedule
-
-    def fake_parse_schedule(source, group_name):
-        schedule = real_parse_schedule(source, group_name)
-        schedule.days["Среда"].lessons[0].upper = "ИЗМЕНЁННЫЙ ПРЕДМЕТ"
-        return schedule
-
-    monkeypatch.setattr(sync_module, "parse_schedule", fake_parse_schedule)
-
-    result = asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
-
-    assert result.status == "applied"
-    second_cache_path = Path(storage.get_active_version(conn, group_id).pdf_cache_path)
-    assert not first_cache_path.exists()
-    assert second_cache_path.exists()
-    assert second_cache_path != first_cache_path
+    assert {r.status for r in results} == {"initial"}
+    assert len(results) == 2
 
 
-def test_sync_retries_transient_fetch_failure_and_succeeds(conn, tmp_path, monkeypatch):
-    import schedule_bot.pdf_parser as pdf_parser_module
+def test_sync_institute_link_fetches_pdf_bytes_once_for_two_groups(conn, tmp_path, monkeypatch):
+    """Review-focus guard: both the byte fetch AND the pdfplumber parse
+    must happen exactly once per link per sync call, regardless of how
+    many groups are subscribed to that link. The brief's own test above
+    only counts extract_raw_rows calls; this test additionally counts
+    _load_pdf_bytes calls to pin down the network-fetch side too."""
     import schedule_bot.sync as sync_module
 
-    real_load_pdf_bytes = pdf_parser_module._load_pdf_bytes
-    call_count = 0
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, FIXTURE_PATH, ["Б-Мв-101", "Б-Эв-101"])
+    for group_id in group_ids:
+        storage.upsert_member(conn, group_id * 1000, group_id, joined_at="t")
 
-    def flaky_load_pdf_bytes(source):
-        nonlocal call_count
-        call_count += 1
-        if call_count < 3:
-            raise ConnectionError("transient network error")
-        return real_load_pdf_bytes(source)
+    real_load = sync_module._load_pdf_bytes
+    fetch_calls = []
 
-    monkeypatch.setattr(sync_module, "_load_pdf_bytes", flaky_load_pdf_bytes)
-    # Disable 404-reconnect for this test: it's about plain transient
-    # retries, not link rediscovery, and resolve_group_pdf_source would
-    # otherwise fire a real network call on the first failure.
-    monkeypatch.setattr(sync_module, "resolve_group_pdf_source", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no reconnect")))
+    def counting_load(source):
+        fetch_calls.append(source)
+        return real_load(source)
 
-    group_id = _make_group(conn)
-    notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    result = asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
+    monkeypatch.setattr(sync_module, "_load_pdf_bytes", counting_load)
 
-    assert result.status == "initial"
-    assert call_count == 3
-    assert storage.get_group(conn, group_id).last_sync_failed_at in (None, "")
+    results = asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+    ))
+
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0] == FIXTURE_PATH
+    assert len(results) == 2
 
 
-def test_sync_records_failure_after_exhausting_retries(conn, tmp_path, monkeypatch):
+def test_sync_institute_link_writes_separate_cache_copy_per_group(conn, tmp_path):
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, FIXTURE_PATH, ["Б-Мв-101", "Б-Эв-101"])
+    for group_id in group_ids:
+        storage.upsert_member(conn, group_id * 1000, group_id, joined_at="t")
+
+    asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+    ))
+
+    cache_paths = {Path(storage.get_active_version(conn, group_id).pdf_cache_path) for group_id in group_ids}
+    assert len(cache_paths) == 2
+    for path in cache_paths:
+        assert path.exists()
+        assert f"link_{link_id}" in str(path)
+
+
+def test_sync_institute_link_sets_last_sync_failed_at_on_all_groups_on_fetch_failure(conn, tmp_path, monkeypatch):
     import schedule_bot.sync as sync_module
 
-    def always_fails(source):
-        raise ConnectionError("network unreachable")
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, "https://example.com/dead.pdf", ["Б-Мв-101", "Б-Эв-101"])
+    for group_id in group_ids:
+        storage.upsert_member(conn, group_id * 1000, group_id, joined_at="t")
 
-    monkeypatch.setattr(sync_module, "_load_pdf_bytes", always_fails)
-    monkeypatch.setattr(sync_module, "resolve_group_pdf_source", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("source page also down")))
+    monkeypatch.setattr(sync_module, "_load_pdf_bytes", lambda source: (_ for _ in ()).throw(ConnectionError("404")))
+    monkeypatch.setattr(sync_module, "refresh_institute_catalog", lambda *a, **k: None)  # 404-fallback no-ops
 
-    group_id = _make_group(conn)
-    notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    with pytest.raises(ConnectionError):
-        asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
+    results = asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+    ))
 
-    assert storage.get_group(conn, group_id).last_sync_failed_at
+    assert all(r.status == "error" for r in results)
+    for group_id in group_ids:
+        assert storage.get_group(conn, group_id).last_sync_failed_at
 
 
-def test_sync_clears_failure_flag_on_next_successful_sync(conn, tmp_path, monkeypatch):
+def test_sync_institute_link_sets_last_sync_failed_at_only_on_group_with_missing_column(conn, tmp_path):
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, FIXTURE_PATH, ["Б-Мв-101", "НЕТ-ТАКОЙ-ГРУППЫ"])
+    for group_id in group_ids:
+        storage.upsert_member(conn, group_id * 1000, group_id, joined_at="t")
+
+    results = asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+    ))
+
+    good_group, bad_group = group_ids
+    assert storage.get_group(conn, good_group).last_sync_failed_at in (None, "")
+    assert storage.get_group(conn, bad_group).last_sync_failed_at
+    statuses = {r.group_id: r.status for r in results}
+    assert statuses[good_group] == "initial"
+    assert statuses[bad_group] == "error"
+
+
+def test_sync_institute_link_catalog_refresh_rate_limited_to_once_per_cycle(conn, tmp_path, monkeypatch):
     import schedule_bot.sync as sync_module
 
-    def always_fails(source):
-        raise ConnectionError("network unreachable")
+    institute_id = _make_institute(conn)
+    link_a, group_ids_a = _make_link_and_groups(conn, institute_id, "https://example.com/dead-a.pdf", ["A"])
+    link_b, group_ids_b = _make_link_and_groups(conn, institute_id, "https://example.com/dead-b.pdf", ["B"])
+    storage.upsert_member(conn, 111, group_ids_a[0], joined_at="t")
+    storage.upsert_member(conn, 222, group_ids_b[0], joined_at="t")
 
-    monkeypatch.setattr(sync_module, "_load_pdf_bytes", always_fails)
-    monkeypatch.setattr(sync_module, "resolve_group_pdf_source", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no reconnect")))
+    monkeypatch.setattr(sync_module, "_load_pdf_bytes", lambda source: (_ for _ in ()).throw(ConnectionError("404")))
+    refresh_calls = []
+    monkeypatch.setattr(sync_module, "refresh_institute_catalog", lambda conn, institute, **kwargs: refresh_calls.append(institute.id))
 
-    group_id = _make_group(conn)
-    notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    with pytest.raises(ConnectionError):
-        asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
-    assert storage.get_group(conn, group_id).last_sync_failed_at
+    shared_cycle_flag: set[int] = set()
+    asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_a), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=shared_cycle_flag,
+    ))
+    asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_b), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=shared_cycle_flag,
+    ))
 
-    monkeypatch.undo()
-
-    group = storage.get_group(conn, group_id)
-    result = asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
-
-    assert result.status == "initial"
-    assert storage.get_group(conn, group_id).last_sync_failed_at in (None, "")
-
-
-def test_sync_notifies_remaining_subscribers_when_one_notify_fails(conn, tmp_path, monkeypatch):
-    group_id = _make_group(conn)
-    storage.upsert_member(conn, 111, group_id, joined_at="t")
-    storage.upsert_member(conn, 222, group_id, joined_at="t")
-    seed_notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), seed_notifier))
-
-    import schedule_bot.sync as sync_module
-    from schedule_bot.pdf_parser import parse_schedule as real_parse_schedule
-
-    def fake_parse_schedule(source, group_name):
-        schedule = real_parse_schedule(source, group_name)
-        schedule.days["Среда"].lessons[0].upper = "ИЗМЕНЁННЫЙ ПРЕДМЕТ"
-        return schedule
-
-    monkeypatch.setattr(sync_module, "parse_schedule", fake_parse_schedule)
-
-    notifier = PartiallyFailingNotifier(failing_chat_id=111)
-    result = asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
-
-    assert result.status == "applied"
-    assert {chat_id for chat_id, _ in notifier.sent} == {222}
+    assert refresh_calls == [institute_id]  # second 404, same cycle, does not refresh again
 
 
-def test_sync_reconnects_on_404_and_persists_new_pdf_source_url(conn, tmp_path, monkeypatch):
-    """The motivating bug fix: a dead pdf_source_url must trigger one
-    lookup of a fresh link on source_page_url, and the group's stored
-    pdf_source_url must be updated to the rediscovered link on success."""
+def test_sync_institute_link_rereads_pdf_url_from_db_after_catalog_refresh(conn, tmp_path, monkeypatch):
     import schedule_bot.sync as sync_module
 
-    group_id = _make_group(conn, pdf_source_url="https://example.com/dead-link.pdf")
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, "https://example.com/dead.pdf", ["Б-Мв-101"])
+    storage.upsert_member(conn, 111, group_ids[0], joined_at="t")
 
-    def fake_load_pdf_bytes(source):
-        if source == "https://example.com/dead-link.pdf":
+    def fake_load(source):
+        if source == "https://example.com/dead.pdf":
             raise ConnectionError("404")
         return Path(FIXTURE_PATH).read_bytes()
 
-    monkeypatch.setattr(sync_module, "_load_pdf_bytes", fake_load_pdf_bytes)
-    monkeypatch.setattr(
-        sync_module, "resolve_group_pdf_source",
-        lambda source_page_url, group_name: "https://example.com/fresh-link.pdf",
+    monkeypatch.setattr(sync_module, "_load_pdf_bytes", fake_load)
+
+    def fake_refresh(conn, institute, **kwargs):
+        storage.update_institute_link_pdf_url(conn, link_id, FIXTURE_PATH)
+
+    monkeypatch.setattr(sync_module, "refresh_institute_catalog", fake_refresh)
+
+    results = asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+    ))
+
+    assert results[0].status == "initial"
+
+
+def test_sync_institute_link_notifies_subscribers_not_just_members(conn, tmp_path):
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, FIXTURE_PATH, ["Б-Мв-101"])
+    storage.upsert_member(conn, 111, group_ids[0], joined_at="t", subscribed=True)
+    storage.upsert_member(conn, 222, group_ids[0], joined_at="t", subscribed=False)
+    notifier = RecordingNotifier()
+    asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), notifier, catalog_refreshed_this_cycle=set(),
+    ))
+    # First sync is "initial" -> no notifications at all regardless of subscription.
+    assert notifier.sent == []
+
+
+def test_sync_institute_link_notifies_only_subscribed_member_on_change(conn, tmp_path):
+    """Second sync pass that produces an actual change must notify only
+    the subscribed member (subscribed_only=True), even though the gate
+    for whether to sync at all considers all members (subscribed_only=False)."""
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, FIXTURE_PATH, ["Б-Мв-101"])
+    group_id = group_ids[0]
+    storage.upsert_member(conn, 111, group_id, joined_at="t", subscribed=True)
+    storage.upsert_member(conn, 222, group_id, joined_at="t", subscribed=False)
+
+    # First sync: establishes the "initial" active version.
+    asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+    ))
+
+    # Force a change on the next sync by tampering with a lesson's text in
+    # the stored active payload (compute_diff only compares per-day lesson
+    # text, not the table bbox, so that's what must be mutated).
+    active = storage.get_active_version(conn, group_id)
+    import json
+    payload = json.loads(active.payload_json)
+    mutated = False
+    for day in payload["days"].values():
+        for lesson in day["lessons"]:
+            lesson["upper"] = "ТАМПЕРЕД ДЛЯ ТЕСТА"
+            mutated = True
+    assert mutated, "fixture PDF must have at least one lesson to tamper with"
+    conn.execute(
+        "UPDATE schedule_versions SET payload_json = ? WHERE group_id = ? AND status = 'active'",
+        (json.dumps(payload), group_id),
     )
+    conn.commit()
 
     notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    result = asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
+    results = asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), notifier, catalog_refreshed_this_cycle=set(),
+    ))
 
-    assert result.status == "initial"
-    assert storage.get_group(conn, group_id).pdf_source_url == "https://example.com/fresh-link.pdf"
-
-
-def test_sync_reconnect_attempted_only_once_per_sync_call(conn, tmp_path, monkeypatch):
-    """A dead link whose rediscovered replacement is ALSO dead must not
-    cause repeated reconnect attempts — only one lookup per sync call,
-    the remaining retry budget just keeps failing against the same
-    (still dead) resolved link."""
-    import schedule_bot.sync as sync_module
-
-    group_id = _make_group(conn, pdf_source_url="https://example.com/dead-link.pdf")
-
-    monkeypatch.setattr(sync_module, "_load_pdf_bytes", lambda source: (_ for _ in ()).throw(ConnectionError("404")))
-    reconnect_calls = []
-
-    def fake_resolve(source_page_url, group_name):
-        reconnect_calls.append((source_page_url, group_name))
-        return "https://example.com/also-dead.pdf"
-
-    monkeypatch.setattr(sync_module, "resolve_group_pdf_source", fake_resolve)
-
-    notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    with pytest.raises(ConnectionError):
-        asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
-
-    assert len(reconnect_calls) == 1
-    # Regression: the reconnected-but-still-dead link must NOT be persisted
-    # as the group's pdf_source_url — it was never proven to work, so
-    # persisting it would permanently clobber the original (working) link.
-    assert storage.get_group(conn, group_id).pdf_source_url == "https://example.com/dead-link.pdf"
-
-
-def test_sync_reconnect_failure_falls_back_to_original_error(conn, tmp_path, monkeypatch):
-    """If the source page itself is unreachable (or has no matching link),
-    the sync must still fail with the original fetch error within the
-    existing retry budget, not hang or raise something new."""
-    import schedule_bot.sync as sync_module
-    from schedule_bot.group_links import SourcePageUnreachableError
-
-    group_id = _make_group(conn, pdf_source_url="https://example.com/dead-link.pdf")
-
-    monkeypatch.setattr(sync_module, "_load_pdf_bytes", lambda source: (_ for _ in ()).throw(ConnectionError("404")))
-    monkeypatch.setattr(
-        sync_module, "resolve_group_pdf_source",
-        lambda *a, **k: (_ for _ in ()).throw(SourcePageUnreachableError("page down")),
-    )
-
-    notifier = RecordingNotifier()
-    group = storage.get_group(conn, group_id)
-    with pytest.raises(ConnectionError):
-        asyncio.run(check_and_apply_diff(conn, group, str(tmp_path), notifier))
+    assert results[0].status == "applied"
+    assert [chat_id for chat_id, _ in notifier.sent] == [111]
