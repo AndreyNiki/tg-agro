@@ -59,15 +59,22 @@ def _patch_week_formula(monkeypatch):
     )
 
 
+_test_group_counter = 0
+
 def _make_test_group(conn, name="Б-Мв-101"):
-    """Helper to create a test group with dummy institute and link (for test_main_wiring)."""
-    # Create a dummy institute (minimal Task 2 implementation for testing)
+    """Helper to create a test group with dummy institute and link (for test_main_wiring).
+    Creates a unique institute per call to avoid UNIQUE(name) constraint violations."""
+    global _test_group_counter
+    _test_group_counter += 1
+
+    # Create a dummy institute with a unique name per call
     from datetime import datetime, timezone
+    institute_name = f"test-institute-{_test_group_counter}"
     cursor = conn.execute(
         "INSERT INTO institutes (name, catalog_url, check_interval_minutes, send_time, timezone, "
         "catalog_refresh_interval_minutes, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("test-institute", "https://example.com/catalog", 60, "09:00", "Europe/Moscow", 10080, datetime.now(timezone.utc).isoformat()),
+        (institute_name, "https://example.com/catalog", 60, "09:00", "Europe/Moscow", 10080, datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     institute_id = cursor.lastrowid

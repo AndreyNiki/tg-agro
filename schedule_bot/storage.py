@@ -230,12 +230,6 @@ class GroupRow:
     is_closed: bool
     last_sync_failed_at: str | None
     created_at: str
-    # Legacy fields for backwards compatibility (will be populated by institute/link in new schema)
-    source_page_url: str = ""
-    pdf_source_url: str = ""
-    send_time: str = ""
-    check_interval_minutes: int = 0
-    timezone: str = ""
 
 
 _GROUP_COLUMNS = (
