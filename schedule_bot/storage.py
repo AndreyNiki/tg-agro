@@ -274,18 +274,74 @@ def create_group(
     return cursor.lastrowid
 
 
+@dataclass
+class InstituteRow:
+    id: int
+    name: str
+    catalog_url: str
+    check_interval_minutes: int
+    send_time: str
+    timezone: str
+    catalog_refresh_interval_minutes: int
+    last_catalog_sync_at: str | None
+    created_at: str
+
+
+_INSTITUTE_COLUMNS = (
+    "id, name, catalog_url, check_interval_minutes, send_time, timezone, "
+    "catalog_refresh_interval_minutes, last_catalog_sync_at, created_at"
+)
+
+
 def create_institute(
-    conn: sqlite3.Connection,
-    *,
-    name: str,
-    catalog_url: str,
-    check_interval_minutes: int,
-    send_time: str,
-    tz_name: str,
-    catalog_refresh_interval_minutes: int,
+    conn: sqlite3.Connection, *, name: str, catalog_url: str, check_interval_minutes: int,
+    send_time: str, tz_name: str, catalog_refresh_interval_minutes: int,
 ) -> int:
-    """Create an institute (Task 2)."""
-    raise NotImplementedError("create_institute - Task 2")
+    cursor = conn.execute(
+        "INSERT INTO institutes (name, catalog_url, check_interval_minutes, send_time, "
+        "timezone, catalog_refresh_interval_minutes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (name, catalog_url, check_interval_minutes, send_time, tz_name,
+         catalog_refresh_interval_minutes, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_institute(conn: sqlite3.Connection, institute_id: int) -> InstituteRow | None:
+    row = conn.execute(
+        f"SELECT {_INSTITUTE_COLUMNS} FROM institutes WHERE id = ?", (institute_id,)
+    ).fetchone()
+    return InstituteRow(*row) if row else None
+
+
+def list_institutes(conn: sqlite3.Connection) -> list[InstituteRow]:
+    rows = conn.execute(f"SELECT {_INSTITUTE_COLUMNS} FROM institutes ORDER BY name").fetchall()
+    return [InstituteRow(*row) for row in rows]
+
+
+def update_institute_catalog_url(conn: sqlite3.Connection, institute_id: int, catalog_url: str) -> None:
+    conn.execute("UPDATE institutes SET catalog_url = ? WHERE id = ?", (catalog_url, institute_id))
+    conn.commit()
+
+
+def update_institute_check_interval(conn: sqlite3.Connection, institute_id: int, minutes: int) -> None:
+    conn.execute("UPDATE institutes SET check_interval_minutes = ? WHERE id = ?", (minutes, institute_id))
+    conn.commit()
+
+
+def update_institute_send_time(conn: sqlite3.Connection, institute_id: int, send_time: str) -> None:
+    conn.execute("UPDATE institutes SET send_time = ? WHERE id = ?", (send_time, institute_id))
+    conn.commit()
+
+
+def update_institute_catalog_refresh_interval(conn: sqlite3.Connection, institute_id: int, minutes: int) -> None:
+    conn.execute("UPDATE institutes SET catalog_refresh_interval_minutes = ? WHERE id = ?", (minutes, institute_id))
+    conn.commit()
+
+
+def set_institute_last_catalog_sync_at(conn: sqlite3.Connection, institute_id: int, value: str) -> None:
+    conn.execute("UPDATE institutes SET last_catalog_sync_at = ? WHERE id = ?", (value, institute_id))
+    conn.commit()
 
 
 def create_institute_link(

@@ -460,3 +460,56 @@ def test_get_group_where_starosta_finds_the_right_group(conn):
     storage.update_group_starosta(conn, group_b, 111)
     found = storage.get_group_where_starosta(conn, 111)
     assert found.id == group_b
+
+
+def test_create_institute_returns_row_with_defaults(conn):
+    institute_id = storage.create_institute(
+        conn, name="ИТ", catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
+    )
+    institute = storage.get_institute(conn, institute_id)
+    assert institute.name == "ИТ"
+    assert institute.catalog_url == "https://example.com/catalog"
+    assert institute.last_catalog_sync_at is None
+
+
+def test_create_institute_rejects_duplicate_name(conn):
+    storage.create_institute(
+        conn, name="ИТ", catalog_url="u", check_interval_minutes=60,
+        send_time="09:00", tz_name="Europe/Moscow", catalog_refresh_interval_minutes=10080,
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        storage.create_institute(
+            conn, name="ИТ", catalog_url="u2", check_interval_minutes=60,
+            send_time="09:00", tz_name="Europe/Moscow", catalog_refresh_interval_minutes=10080,
+        )
+
+
+def test_list_institutes_orders_alphabetically(conn):
+    storage.create_institute(conn, name="Б", catalog_url="u", check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow", catalog_refresh_interval_minutes=10080)
+    storage.create_institute(conn, name="А", catalog_url="u", check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow", catalog_refresh_interval_minutes=10080)
+    assert [i.name for i in storage.list_institutes(conn)] == ["А", "Б"]
+
+
+def test_update_institute_fields(conn):
+    institute_id = _make_institute(conn)
+    storage.update_institute_catalog_url(conn, institute_id, "https://new.example.com")
+    storage.update_institute_check_interval(conn, institute_id, 30)
+    storage.update_institute_send_time(conn, institute_id, "08:00")
+    storage.update_institute_catalog_refresh_interval(conn, institute_id, 1440)
+    institute = storage.get_institute(conn, institute_id)
+    assert institute.catalog_url == "https://new.example.com"
+    assert institute.check_interval_minutes == 30
+    assert institute.send_time == "08:00"
+    assert institute.catalog_refresh_interval_minutes == 1440
+
+
+def test_set_institute_last_catalog_sync_at(conn):
+    institute_id = _make_institute(conn)
+    storage.set_institute_last_catalog_sync_at(conn, institute_id, "2026-10-09T00:00:00+00:00")
+    assert storage.get_institute(conn, institute_id).last_catalog_sync_at == "2026-10-09T00:00:00+00:00"
+
+
+def test_get_institute_returns_none_for_missing_id(conn):
+    assert storage.get_institute(conn, 999) is None
