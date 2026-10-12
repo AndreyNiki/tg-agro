@@ -195,37 +195,6 @@ def _resolve_admin_group(conn, group_id_str: str):
     return storage.get_group(conn, int(group_id_str))
 
 
-def _apply_set_pdf_source(conn, group, value: str) -> str:
-    """Deprecated placeholder, kept only so that `schedule_bot/menu.py` —
-    not yet rewired to the institute-level admin flow (Task 15/19) — still
-    imports and calls this name successfully. PDF-source configuration
-    moved to the institute level (`/set_institute_catalog_url`); this must
-    never actually be invoked for real."""
-    raise NotImplementedError(
-        "_apply_set_pdf_source is removed (Task 16); configure the "
-        "catalog URL at the institute level via /set_institute_catalog_url "
-        "(institute_commands.py, Task 15/19)"
-    )
-
-
-def _apply_set_send_time(conn, group, value: str, reschedule_fn) -> str:
-    """Deprecated placeholder — see `_apply_set_pdf_source`'s docstring."""
-    raise NotImplementedError(
-        "_apply_set_send_time is removed (Task 16); configure send time "
-        "at the institute level via /set_institute_send_time "
-        "(institute_commands.py, Task 15/19)"
-    )
-
-
-def _apply_set_check_interval(conn, group, value: str, reschedule_fn) -> str:
-    """Deprecated placeholder — see `_apply_set_pdf_source`'s docstring."""
-    raise NotImplementedError(
-        "_apply_set_check_interval is removed (Task 16); configure the "
-        "check interval at the institute level via "
-        "/set_institute_check_interval (institute_commands.py, Task 15/19)"
-    )
-
-
 async def set_pdf_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Deprecated placeholder, kept only so that `main.py` — not yet
     rewired to register institute-level admin commands instead

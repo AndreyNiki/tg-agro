@@ -6,9 +6,6 @@ from schedule_bot.bot import (
     _apply_alert,
     _apply_notify,
     _apply_remove_starosta,
-    _apply_set_check_interval,
-    _apply_set_pdf_source,
-    _apply_set_send_time,
     _apply_set_starosta,
     _resolve_admin_group,
     schedule_command,
@@ -160,6 +157,7 @@ def _admin_root_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📢 Объявление всем", callback_data="menu:admin:alert")],
+            [InlineKeyboardButton("🏫 Институты", callback_data="menu:admin:institutes")],
             [InlineKeyboardButton("🔧 Настройки группы", callback_data="menu:admin:groupsettings")],
             [InlineKeyboardButton("👑 Старосты", callback_data="menu:admin:starostas")],
             [InlineKeyboardButton("🔒 Открытость группы", callback_data="menu:admin:closedtoggle")],
@@ -188,10 +186,26 @@ def _build_admin_group_picker(conn, pick_action: str, page: int = 0) -> InlineKe
 def _group_settings_submenu(group_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Источник PDF", callback_data=f"menu:setpdf:{group_id}")],
-            [InlineKeyboardButton("Время рассылки", callback_data=f"menu:setsendtime:{group_id}")],
-            [InlineKeyboardButton("Интервал проверки", callback_data=f"menu:setinterval:{group_id}")],
             [InlineKeyboardButton("◀️ Назад", callback_data="menu:admin:groupsettings")],
+        ]
+    )  # pdf/send-time/interval are institute-level now — see _institute_settings_submenu
+
+
+def _institute_picker_keyboard(conn) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(i.name, callback_data=f"menu:pickinstitute:{i.id}")] for i in storage.list_institutes(conn)]
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="menu:admin:root")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _institute_settings_submenu(institute_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("URL каталога", callback_data=f"menu:setinstitutecatalogurl:{institute_id}")],
+            [InlineKeyboardButton("Время рассылки", callback_data=f"menu:setinstitutesendtime:{institute_id}")],
+            [InlineKeyboardButton("Интервал проверки", callback_data=f"menu:setinstitutecheckinterval:{institute_id}")],
+            [InlineKeyboardButton("Интервал скана каталога", callback_data=f"menu:setinstitutecataloginterval:{institute_id}")],
+            [InlineKeyboardButton("🔄 Пересканировать сейчас", callback_data=f"menu:refreshinstitutelinks:{institute_id}")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu:admin:institutes")],
         ]
     )
 
@@ -218,6 +232,9 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
     if action == "alert":
         context.user_data["pending_menu_action"] = {"action": "alert"}
         await query.message.reply_text("Отправьте текст объявления:")
+        return
+    if action == "institutes":
+        await query.edit_message_text("Выберите институт:", reply_markup=_institute_picker_keyboard(conn))
         return
     if action == "groupsettings":
         await query.edit_message_text("Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickgroup"))
@@ -274,18 +291,6 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
         for text, keyboard in entries:
             await query.message.reply_text(text, reply_markup=keyboard)
         return
-    if action == "setpdf":
-        context.user_data["pending_menu_action"] = {"action": "set_pdf_source", "group_id": group_id}
-        await query.message.reply_text("Отправьте новый источник PDF:")
-        return
-    if action == "setsendtime":
-        context.user_data["pending_menu_action"] = {"action": "set_send_time", "group_id": group_id}
-        await query.message.reply_text("Отправьте новое время (HH:MM):")
-        return
-    if action == "setinterval":
-        context.user_data["pending_menu_action"] = {"action": "set_check_interval", "group_id": group_id}
-        await query.message.reply_text("Отправьте новый интервал в минутах:")
-        return
     if action == "setstarosta":
         context.user_data["pending_menu_action"] = {"action": "set_starosta", "group_id": group_id}
         await query.message.reply_text("Отправьте chat_id нового старосты:")
@@ -295,6 +300,51 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
             _apply_remove_starosta(conn, group),
             reply_markup=_starosta_pick_submenu(group_id),
         )
+        return
+
+
+async def _handle_institute_scoped_pick(
+    update, context, conn, chat_id: int, admin_chat_id: int, action: str, institute_id: int
+) -> None:
+    query = update.callback_query
+    if chat_id != admin_chat_id:
+        await query.message.reply_text("Недостаточно прав.")
+        return
+    institute = storage.get_institute(conn, institute_id)
+    if institute is None:
+        await query.message.reply_text("Этот институт больше не существует.")
+        return
+
+    if action == "pickinstitute":
+        await query.edit_message_text(
+            f"Настройки института «{institute.name}»:", reply_markup=_institute_settings_submenu(institute_id)
+        )
+        return
+    if action == "setinstitutecatalogurl":
+        context.user_data["pending_menu_action"] = {"action": "set_institute_catalog_url", "institute_id": institute_id}
+        await query.message.reply_text("Отправьте новый url каталога:")
+        return
+    if action == "setinstitutesendtime":
+        context.user_data["pending_menu_action"] = {"action": "set_institute_send_time", "institute_id": institute_id}
+        await query.message.reply_text("Отправьте новое время (HH:MM):")
+        return
+    if action == "setinstitutecheckinterval":
+        context.user_data["pending_menu_action"] = {"action": "set_institute_check_interval", "institute_id": institute_id}
+        await query.message.reply_text("Отправьте новый интервал проверки в минутах:")
+        return
+    if action == "setinstitutecataloginterval":
+        context.user_data["pending_menu_action"] = {"action": "set_institute_catalog_interval", "institute_id": institute_id}
+        await query.message.reply_text("Отправьте новый интервал сканирования каталога в минутах:")
+        return
+    if action == "refreshinstitutelinks":
+        from schedule_bot.group_links import refresh_institute_catalog
+
+        alerts = []
+        refresh_institute_catalog(conn, institute, notify_admin=alerts.append)
+        context.bot_data["reschedule_institute_jobs"](institute_id)
+        for text in alerts:
+            await query.message.reply_text(text)
+        await query.message.reply_text(f"Каталог института «{institute.name}» пересканирован.")
         return
 
 
@@ -319,22 +369,49 @@ async def pending_action_followup(update, context) -> None:
         )
         return
 
+    if "institute_id" in pending:
+        institute = storage.get_institute(conn, pending["institute_id"])
+        if institute is None:
+            await update.message.reply_text("Этот институт больше не существует.")
+            return
+        if action == "set_institute_catalog_url":
+            storage.update_institute_catalog_url(conn, institute.id, value)
+            await update.message.reply_text(f"Каталог института «{institute.name}» обновлён: {value}")
+        elif action == "set_institute_send_time":
+            from schedule_bot.bot import _is_valid_hh_mm
+
+            if not _is_valid_hh_mm(value):
+                await update.message.reply_text("Неверный формат времени, используйте HH:MM.")
+                return
+            storage.update_institute_send_time(conn, institute.id, value)
+            for institute_link in storage.list_institute_links(conn, institute.id, include_stale=False):
+                context.bot_data["reschedule_institute_link_jobs"](institute_link.id)
+            await update.message.reply_text(f"Время рассылки института «{institute.name}» обновлено: {value}")
+        elif action == "set_institute_check_interval":
+            if not value.isdigit() or int(value) <= 0:
+                await update.message.reply_text("Неверное значение интервала, укажите положительное целое число минут.")
+                return
+            storage.update_institute_check_interval(conn, institute.id, int(value))
+            for institute_link in storage.list_institute_links(conn, institute.id, include_stale=False):
+                context.bot_data["reschedule_institute_link_jobs"](institute_link.id)
+            await update.message.reply_text(f"Интервал проверки института «{institute.name}» обновлён: {value} мин.")
+        elif action == "set_institute_catalog_interval":
+            if not value.isdigit() or int(value) <= 0:
+                await update.message.reply_text("Неверное значение интервала, укажите положительное целое число минут.")
+                return
+            storage.update_institute_catalog_refresh_interval(conn, institute.id, int(value))
+            context.bot_data["reschedule_institute_jobs"](institute.id)
+            await update.message.reply_text(
+                f"Интервал сканирования каталога института «{institute.name}» обновлён: {value} мин."
+            )
+        return
+
     group = storage.get_group(conn, pending["group_id"])
     if group is None:
         await update.message.reply_text("Эта группа больше не существует.")
         return
 
-    if action == "set_pdf_source":
-        await update.message.reply_text(_apply_set_pdf_source(conn, group, value))
-    elif action == "set_send_time":
-        await update.message.reply_text(
-            _apply_set_send_time(conn, group, value, context.bot_data["reschedule_group_jobs"])
-        )
-    elif action == "set_check_interval":
-        await update.message.reply_text(
-            _apply_set_check_interval(conn, group, value, context.bot_data["reschedule_group_jobs"])
-        )
-    elif action == "set_starosta":
+    if action == "set_starosta":
         await update.message.reply_text(await _apply_set_starosta(conn, context.bot, group, value))
     elif action == "notify":
         current_group = storage.get_group_where_starosta(conn, update.effective_chat.id)
@@ -358,11 +435,18 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     context.user_data.pop("pending_menu_action", None)
 
     group_scoped_actions = {
-        "pickgroup", "pickstarostagroup", "toggleclosed", "pickrequestsgroup",
-        "setpdf", "setsendtime", "setinterval", "setstarosta", "removestarosta",
+        "pickgroup", "pickstarostagroup", "toggleclosed", "pickrequestsgroup", "setstarosta", "removestarosta",
     }
     if section in group_scoped_actions:
         await _handle_group_scoped_pick(update, context, conn, chat_id, admin_chat_id, section, int(action))
+        return
+
+    institute_scoped_actions = {
+        "pickinstitute", "setinstitutecatalogurl", "setinstitutesendtime",
+        "setinstitutecheckinterval", "setinstitutecataloginterval", "refreshinstitutelinks",
+    }
+    if section in institute_scoped_actions:
+        await _handle_institute_scoped_pick(update, context, conn, chat_id, admin_chat_id, section, int(action))
         return
 
     admin_picker_prompts = {

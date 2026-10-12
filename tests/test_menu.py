@@ -16,11 +16,24 @@ def conn():
     return connection
 
 
-def _make_group(conn, name="Б-Мв-101"):
-    return storage.create_group(
-        conn, name=name, source_page_url="u", pdf_source_url="p",
-        send_time="09:00", check_interval_minutes=60, tz_name="Europe/Moscow",
+def _make_institute(conn, name="ИТ"):
+    return storage.create_institute(
+        conn, name=name, catalog_url="old", check_interval_minutes=60, send_time="09:00",
+        tz_name="Europe/Moscow", catalog_refresh_interval_minutes=10080,
     )
+
+
+_group_counter = [0]
+
+
+def _make_group(conn, name="Б-Мв-101"):
+    _group_counter[0] += 1
+    institute_id = _make_institute(conn, name=f"ИТ-{_group_counter[0]}")
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url=f"https://example.com/{_group_counter[0]}.pdf",
+        group_names=[name], raw_label=name, last_seen_at="t",
+    )
+    return storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name)
 
 
 def _button_texts(keyboard):
@@ -360,15 +373,34 @@ async def test_menu_callback_admin_pickgroup_shows_group_settings_submenu(conn):
 
     _, kwargs = update.callback_query.edit_message_text.call_args
     texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
-    assert any("PDF" in t for t in texts)
-    assert any("рассылки" in t for t in texts)
-    assert any("Интервал" in t for t in texts)
+    assert any("Назад" in t for t in texts)
+    assert "Источник PDF" not in texts
+    assert "Время рассылки" not in texts
+    assert "Интервал проверки" not in texts
 
 
 @pytest.mark.asyncio
-async def test_menu_callback_admin_setpdf_prompts_with_group_id(conn):
-    group_id = _make_group(conn, "A")
-    update = make_callback_update(ADMIN_CHAT_ID, f"menu:setpdf:{group_id}")
+async def test_admin_root_keyboard_has_institutes_entry():
+    from schedule_bot.menu import _admin_root_keyboard
+    keyboard = _admin_root_keyboard()
+    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert any("Институт" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_group_settings_submenu_no_longer_offers_pdf_sendtime_interval():
+    from schedule_bot.menu import _group_settings_submenu
+    keyboard = _group_settings_submenu(1)
+    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "Источник PDF" not in texts
+    assert "Время рассылки" not in texts
+    assert "Интервал проверки" not in texts
+
+
+@pytest.mark.asyncio
+async def test_institute_scoped_pick_sets_pending_catalog_url_action(conn):
+    institute_id = _make_institute(conn)
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:setinstitutecatalogurl:{institute_id}")
     update.callback_query.message = MagicMock()
     update.callback_query.message.reply_text = AsyncMock()
     context = make_context(conn)
@@ -376,7 +408,24 @@ async def test_menu_callback_admin_setpdf_prompts_with_group_id(conn):
 
     await menu_callback(update, context)
 
-    assert context.user_data["pending_menu_action"] == {"action": "set_pdf_source", "group_id": group_id}
+    assert context.user_data["pending_menu_action"] == {
+        "action": "set_institute_catalog_url", "institute_id": institute_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_applies_institute_catalog_url(conn):
+    institute_id = _make_institute(conn)
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "set_institute_catalog_url", "institute_id": institute_id}}
+    update = MagicMock()
+    update.message.text = "https://new.example.com"
+    update.message.reply_text = AsyncMock()
+    update.effective_chat.id = ADMIN_CHAT_ID
+
+    await pending_action_followup(update, context)
+
+    assert storage.get_institute(conn, institute_id).catalog_url == "https://new.example.com"
 
 
 @pytest.mark.asyncio
@@ -403,19 +452,19 @@ async def test_menu_callback_admin_removestarosta_clears_picked_group(conn):
 
 
 @pytest.mark.asyncio
-async def test_pending_action_followup_applies_set_send_time(conn):
-    group_id = _make_group(conn, "A")
+async def test_pending_action_followup_applies_institute_send_time(conn):
+    institute_id = _make_institute(conn)
     update = MagicMock()
     update.effective_chat.id = ADMIN_CHAT_ID
     update.message.text = "07:45"
     update.message.reply_text = AsyncMock()
     context = make_context(conn)
-    context.user_data = {"pending_menu_action": {"action": "set_send_time", "group_id": group_id}}
-    context.bot_data["reschedule_group_jobs"] = MagicMock()
+    context.user_data = {"pending_menu_action": {"action": "set_institute_send_time", "institute_id": institute_id}}
+    context.bot_data["reschedule_institute_link_jobs"] = MagicMock()
 
     await pending_action_followup(update, context)
 
-    assert storage.get_group(conn, group_id).send_time == "07:45"
+    assert storage.get_institute(conn, institute_id).send_time == "07:45"
     assert "pending_menu_action" not in context.user_data
     update.message.reply_text.assert_awaited_once()
 
@@ -468,9 +517,9 @@ async def test_menu_callback_removestarosta_rejects_non_admin(conn):
 
 
 @pytest.mark.asyncio
-async def test_menu_callback_setpdf_rejects_non_admin_without_stashing_pending_action(conn):
-    group_id = _make_group(conn, "A")
-    update = make_callback_update(111, f"menu:setpdf:{group_id}")
+async def test_menu_callback_setinstitutecatalogurl_rejects_non_admin_without_stashing_pending_action(conn):
+    institute_id = _make_institute(conn)
+    update = make_callback_update(111, f"menu:setinstitutecatalogurl:{institute_id}")
     update.callback_query.message = MagicMock()
     update.callback_query.message.reply_text = AsyncMock()
     context = make_context(conn)
