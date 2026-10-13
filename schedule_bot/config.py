@@ -13,6 +13,19 @@ class Config:
     default_check_interval_minutes: int
     default_timezone: str
     default_catalog_refresh_interval_minutes: int
+    legacy_migration_catalog_url: str | None = None
+    legacy_migration_institute_name: str | None = None
+    legacy_migration_group_name: str | None = None
+
+    @property
+    def legacy_migration(self) -> tuple[str, str, str] | None:
+        if self.legacy_migration_catalog_url and self.legacy_migration_institute_name and self.legacy_migration_group_name:
+            return (
+                self.legacy_migration_catalog_url,
+                self.legacy_migration_institute_name,
+                self.legacy_migration_group_name,
+            )
+        return None
 
 
 def load_config(env: Mapping[str, str]) -> Config:
@@ -36,4 +49,7 @@ def load_config(env: Mapping[str, str]) -> Config:
         default_catalog_refresh_interval_minutes=int(
             env.get("CATALOG_REFRESH_INTERVAL_MINUTES", "10080")  # 1 week
         ),
+        legacy_migration_catalog_url=env.get("LEGACY_MIGRATION_INSTITUT") or None,
+        legacy_migration_institute_name=env.get("LEGACY_MIGRATION_INSTITUT_NAME") or None,
+        legacy_migration_group_name=env.get("LEGACY_MIGRATION_GROUP_NAME") or None,
     )

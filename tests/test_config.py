@@ -30,3 +30,31 @@ def test_load_config_raises_on_missing_required_var():
 def test_load_config_defaults_catalog_refresh_interval_to_one_week():
     config = load_config(_base_env())
     assert config.default_catalog_refresh_interval_minutes == 10080
+
+
+def test_load_config_legacy_migration_is_none_when_vars_absent():
+    config = load_config(_base_env())
+    assert config.legacy_migration_catalog_url is None
+    assert config.legacy_migration_institute_name is None
+    assert config.legacy_migration_group_name is None
+    assert config.legacy_migration is None
+
+
+def test_load_config_legacy_migration_is_none_when_only_some_vars_present():
+    env = _base_env()
+    env["LEGACY_MIGRATION_INSTITUT"] = "https://example.com/institut"
+    env["LEGACY_MIGRATION_INSTITUT_NAME"] = "Институт агробизнеса"
+    # LEGACY_MIGRATION_GROUP_NAME intentionally missing
+    config = load_config(env)
+    assert config.legacy_migration is None
+
+
+def test_load_config_legacy_migration_set_when_all_three_vars_present():
+    env = _base_env()
+    env["LEGACY_MIGRATION_INSTITUT"] = "https://example.com/institut"
+    env["LEGACY_MIGRATION_INSTITUT_NAME"] = "Институт агробизнеса"
+    env["LEGACY_MIGRATION_GROUP_NAME"] = "Б-Мв-101"
+    config = load_config(env)
+    assert config.legacy_migration == (
+        "https://example.com/institut", "Институт агробизнеса", "Б-Мв-101",
+    )
