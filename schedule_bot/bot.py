@@ -10,7 +10,7 @@ from schedule_bot import elections, storage
 from schedule_bot.formatting import format_day_schedule
 from schedule_bot.pdf_parser import DAY_ORDER
 from schedule_bot.screenshot import render_day_image
-from schedule_bot.telegram_utils import SEND_PACING_SECONDS, reply, send_with_retry
+from schedule_bot.telegram_utils import SEND_PACING_SECONDS, parse_positive_int, reply, send_with_retry
 from schedule_bot.timeutil import today_in_configured_timezone
 
 logger = logging.getLogger(__name__)
@@ -216,9 +216,10 @@ def _is_valid_positive_int(value: str) -> bool:
 
 
 def _resolve_admin_group(conn, group_id_str: str):
-    if not group_id_str.isdigit():
+    group_id = parse_positive_int(group_id_str)
+    if group_id is None:
         return None
-    return storage.get_group(conn, int(group_id_str))
+    return storage.get_group(conn, group_id)
 
 
 def format_refresh_result(results, group) -> str:
@@ -281,9 +282,9 @@ async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def _apply_set_starosta(conn, bot_client, group, chat_id_str: str) -> str:
-    if not chat_id_str.isdigit():
-        return "chat_id должен быть числом."
-    new_starosta_chat_id = int(chat_id_str)
+    new_starosta_chat_id = parse_positive_int(chat_id_str)
+    if new_starosta_chat_id is None:
+        return "chat_id должен быть положительным целым числом."
     now = datetime.now(timezone.utc).isoformat()
     storage.cancel_open_elections_for_group(conn, group.id, now)
     storage.update_group_starosta(conn, group.id, new_starosta_chat_id)

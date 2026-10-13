@@ -498,3 +498,16 @@ async def test_apply_alert_broadcasts_globally(conn):
 
     assert "1" in text
     bot_client.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_refresh_command_rejects_unicode_digit_lookalike_group_id(conn):
+    from schedule_bot.bot import refresh_command
+
+    update = make_update(ADMIN_CHAT_ID)
+    context = make_context(conn, sync_institute_link_fn=AsyncMock())
+    context.args = ["²"]
+
+    await refresh_command(update, context)
+
+    update.message.reply_text.assert_awaited_with("Группа с таким id не найдена.")

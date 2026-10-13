@@ -57,6 +57,19 @@ async def safe_edit_message_text(query, text: str, **kwargs) -> None:
             raise
 
 
+def parse_positive_int(value: str) -> int | None:
+    """Stricter than str.isdigit(): some Unicode characters (superscript
+    digits, fullwidth digits, etc.) satisfy isdigit() but make int(value)
+    raise ValueError. isdecimal() narrows that to ASCII-compatible decimal
+    digit characters, which int() always accepts; this additionally
+    rejects non-positive values so every admin-id/interval parsing call
+    site gets one consistent, exception-free check."""
+    if not value.isdecimal():
+        return None
+    parsed = int(value)
+    return parsed if parsed > 0 else None
+
+
 async def safe_edit_reply_markup(query, **kwargs) -> None:
     try:
         await query.message.edit_reply_markup(**kwargs)

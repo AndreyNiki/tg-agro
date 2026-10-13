@@ -8,14 +8,16 @@ from telegram.ext import ContextTypes
 from schedule_bot import storage
 from schedule_bot.bot import _is_valid_hh_mm, is_admin
 from schedule_bot.group_links import refresh_institute_catalog
+from schedule_bot.telegram_utils import parse_positive_int
 
 logger = logging.getLogger(__name__)
 
 
 def _resolve_admin_institute(conn, institute_id_str: str):
-    if not institute_id_str.isdigit():
+    institute_id = parse_positive_int(institute_id_str)
+    if institute_id is None:
         return None
-    return storage.get_institute(conn, int(institute_id_str))
+    return storage.get_institute(conn, institute_id)
 
 
 async def create_institute_and_scan(

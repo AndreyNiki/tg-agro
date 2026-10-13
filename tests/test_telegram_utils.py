@@ -3,7 +3,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
-from schedule_bot.telegram_utils import safe_edit_message_text, safe_edit_reply_markup, send_with_retry, reply
+from schedule_bot.telegram_utils import (
+    parse_positive_int,
+    safe_edit_message_text,
+    safe_edit_reply_markup,
+    send_with_retry,
+    reply,
+)
 
 
 @pytest.mark.asyncio
@@ -105,3 +111,11 @@ async def test_safe_edit_reply_markup_swallows_not_modified_error():
     query.message.edit_reply_markup = AsyncMock(side_effect=BadRequest("Message is not modified"))
     await safe_edit_reply_markup(query, reply_markup=None)
     query.message.edit_reply_markup.assert_awaited_once()
+
+
+def test_parse_positive_int_rejects_unicode_digit_lookalikes():
+    assert parse_positive_int("²") is None  # str.isdigit() is True, int() raises ValueError
+    assert parse_positive_int("-5") is None
+    assert parse_positive_int("0") is None
+    assert parse_positive_int("") is None
+    assert parse_positive_int("42") == 42

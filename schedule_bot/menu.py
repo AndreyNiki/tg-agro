@@ -29,7 +29,7 @@ from schedule_bot.group_commands import build_institute_picker_keyboard, subscri
 from schedule_bot.institute_commands import create_institute_and_scan, format_institute_links
 from schedule_bot.report import _apply_report
 from schedule_bot.starosta_commands import starosta_command, votes_command
-from schedule_bot.telegram_utils import safe_edit_message_text, send_with_retry
+from schedule_bot.telegram_utils import parse_positive_int, safe_edit_message_text, send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -549,21 +549,23 @@ async def pending_action_followup(update, context) -> None:
                 context.bot_data["reschedule_institute_link_jobs"](institute_link.id)
             await update.message.reply_text(f"Время рассылки института «{institute.name}» обновлено: {value}")
         elif action == "set_institute_check_interval":
-            if not value.isdigit() or int(value) <= 0:
+            minutes = parse_positive_int(value)
+            if minutes is None:
                 await update.message.reply_text("Неверное значение интервала, укажите положительное целое число минут.")
                 return
-            storage.update_institute_check_interval(conn, institute.id, int(value))
+            storage.update_institute_check_interval(conn, institute.id, minutes)
             for institute_link in storage.list_institute_links(conn, institute.id, include_stale=False):
                 context.bot_data["reschedule_institute_link_jobs"](institute_link.id)
-            await update.message.reply_text(f"Интервал проверки института «{institute.name}» обновлён: {value} мин.")
+            await update.message.reply_text(f"Интервал проверки института «{institute.name}» обновлён: {minutes} мин.")
         elif action == "set_institute_catalog_interval":
-            if not value.isdigit() or int(value) <= 0:
+            minutes = parse_positive_int(value)
+            if minutes is None:
                 await update.message.reply_text("Неверное значение интервала, укажите положительное целое число минут.")
                 return
-            storage.update_institute_catalog_refresh_interval(conn, institute.id, int(value))
+            storage.update_institute_catalog_refresh_interval(conn, institute.id, minutes)
             context.bot_data["reschedule_institute_jobs"](institute.id)
             await update.message.reply_text(
-                f"Интервал сканирования каталога института «{institute.name}» обновлён: {value} мин."
+                f"Интервал сканирования каталога института «{institute.name}» обновлён: {minutes} мин."
             )
         return
 
