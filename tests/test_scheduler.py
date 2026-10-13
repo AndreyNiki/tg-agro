@@ -247,6 +247,15 @@ def test_build_scheduler_registers_link_and_catalog_jobs(conn, shutdown_schedule
     assert "weekly_weektype_refresh" in job_ids
 
 
+def test_build_scheduler_sets_generous_misfire_grace_time(conn, shutdown_scheduler):
+    bot = MagicMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+    scheduler = shutdown_scheduler(build_scheduler(conn, _config(), bot, holder))
+
+    assert scheduler._job_defaults["misfire_grace_time"] >= 3600
+    assert scheduler._job_defaults["coalesce"] is True
+
+
 def test_build_scheduler_binds_daily_trigger_to_institute_timezone(conn, shutdown_scheduler):
     institute_id = _make_institute(conn, tz_name="Asia/Yekaterinburg")
     link_id, _ = _make_link_and_group(conn, institute_id)

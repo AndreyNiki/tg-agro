@@ -338,7 +338,10 @@ def build_scheduler(
     if catalog_rescan_state is None:
         catalog_rescan_state = {}
 
-    scheduler = AsyncIOScheduler(timezone=config.default_timezone)
+    scheduler = AsyncIOScheduler(
+        timezone=config.default_timezone,
+        job_defaults={"misfire_grace_time": 3600, "coalesce": True, "max_instances": 1},
+    )
 
     reschedule_links = make_links_rescheduler(
         scheduler, conn, config, bot, week_formula_holder, locks, catalog_rescan_state
