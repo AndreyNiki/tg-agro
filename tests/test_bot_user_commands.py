@@ -216,6 +216,37 @@ async def test_day_callback_sends_text_and_image_when_lessons_exist(conn, sample
 
 
 @pytest.mark.asyncio
+async def test_day_callback_renders_image_off_event_loop(conn, sample_schedule, monkeypatch):
+    import threading
+
+    group_id = _make_group_and_member(conn, chat_id=111)
+    formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)
+    wednesday = date(2026, 9, 16)
+
+    update = MagicMock()
+    update.effective_chat.id = 111
+    update.callback_query.data = f"day:{wednesday.isoformat()}"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    update.callback_query.message.reply_photo = AsyncMock()
+    context = make_context(conn, group_id=group_id, week_formula=formula, active_schedule=sample_schedule)
+
+    render_thread_name = {}
+
+    import schedule_bot.bot as bot_module
+
+    def fake_render(pdf_path, schedule, day):
+        render_thread_name["name"] = threading.current_thread().name
+        return b"fake-png"
+
+    monkeypatch.setattr(bot_module, "render_day_image", fake_render)
+
+    await day_callback(update, context)
+
+    assert render_thread_name["name"] != threading.main_thread().name
+
+
+@pytest.mark.asyncio
 async def test_day_callback_skips_image_when_no_lessons(conn, sample_schedule, monkeypatch):
     group_id = _make_group_and_member(conn, chat_id=111)
     formula = WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)

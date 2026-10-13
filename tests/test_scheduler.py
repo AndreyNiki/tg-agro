@@ -201,6 +201,40 @@ async def test_link_daily_send_job_sends_to_all_groups_of_the_link(conn, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_link_daily_send_job_renders_image_off_event_loop(conn, monkeypatch):
+    import threading
+
+    import schedule_bot.scheduler as scheduler_module
+
+    institute_id = _make_institute(conn)
+    link_id, group_id = _make_link_and_group(conn, institute_id)
+    _seed_active_version(conn, group_id)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+
+    render_thread_name = {}
+
+    def fake_render(pdf_path, schedule, day):
+        render_thread_name["name"] = threading.current_thread().name
+        return b"fake-png"
+
+    async def noop_sync(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(scheduler_module, "sync_institute_link", noop_sync)
+    monkeypatch.setattr(scheduler_module, "today_in_configured_timezone", lambda tz: FixedMonday.today())
+    monkeypatch.setattr(scheduler_module, "render_day_image", fake_render)
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    bot.send_photo = AsyncMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+
+    await link_daily_send_job(conn, _config(), bot, link_id, holder)
+
+    assert render_thread_name["name"] != threading.main_thread().name
+
+
+@pytest.mark.asyncio
 async def test_link_daily_send_job_isolates_per_subscriber_failures(conn, monkeypatch):
     import schedule_bot.scheduler as scheduler_module
 

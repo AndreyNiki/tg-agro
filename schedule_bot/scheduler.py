@@ -130,7 +130,7 @@ async def link_daily_send_job(
 
         image_bytes = None
         try:
-            image_bytes = render_day_image(active.pdf_cache_path, schedule, day_name)
+            image_bytes = await asyncio.to_thread(render_day_image, active.pdf_cache_path, schedule, day_name)
         except Exception as error:
             logger.warning("scheduler: failed to render day image for %r: %s", active.pdf_cache_path, error)
             if not render_error_notified:

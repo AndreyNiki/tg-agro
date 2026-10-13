@@ -172,7 +172,7 @@ async def day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     try:
-        image_bytes = render_day_image(pdf_path, schedule, day_name)
+        image_bytes = await asyncio.to_thread(render_day_image, pdf_path, schedule, day_name)
     except Exception as error:
         logger.warning("bot: failed to render day image for %r: %s", pdf_path, error)
         image_bytes = None
