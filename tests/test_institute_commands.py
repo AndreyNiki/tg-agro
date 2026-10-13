@@ -202,3 +202,32 @@ async def test_refresh_institute_links_runs_blocking_catalog_fetch_off_the_event
     await refresh_institute_links_command(update, context)
 
     assert seen_threads and seen_threads[0] is not threading.main_thread()
+
+
+@pytest.mark.asyncio
+async def test_add_institute_command_accepts_multi_word_name(conn, monkeypatch):
+    monkeypatch.setattr(
+        "schedule_bot.institute_commands.refresh_institute_catalog", lambda conn_, institute, notify_admin: None
+    )
+    update = _update(["Аграрный", "институт", "https://example.com/catalog"])
+    context = _context(conn, ["Аграрный", "институт", "https://example.com/catalog"])
+
+    await add_institute_command(update, context)
+
+    institutes = storage.list_institutes(conn)
+    assert len(institutes) == 1
+    assert institutes[0].name == "Аграрный институт"
+    assert institutes[0].catalog_url == "https://example.com/catalog"
+
+
+@pytest.mark.asyncio
+async def test_add_institute_command_rejects_url_not_starting_with_http(conn):
+    update = _update(["Институт", "not-a-url"])
+    context = _context(conn, ["Институт", "not-a-url"])
+
+    await add_institute_command(update, context)
+
+    assert storage.list_institutes(conn) == []
+    update.message.reply_text.assert_awaited_with(
+        "Использование: /add_institute <название> <url_каталога> — url должен начинаться с http:// или https://"
+    )

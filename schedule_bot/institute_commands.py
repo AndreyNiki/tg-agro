@@ -74,10 +74,15 @@ async def add_institute_command(update: Update, context: ContextTypes.DEFAULT_TY
     if len(context.args) < 2:
         await update.message.reply_text("Использование: /add_institute <название> <url_каталога>")
         return
+    catalog_url = context.args[-1]
+    name = " ".join(context.args[:-1])
+    if not catalog_url.startswith(("http://", "https://")):
+        await update.message.reply_text(
+            "Использование: /add_institute <название> <url_каталога> — url должен начинаться с http:// или https://"
+        )
+        return
     conn = context.bot_data["conn"]
     config = context.bot_data["config"]
-    name = context.args[0]
-    catalog_url = context.args[1]
     alerts: list[str] = []
     institute_id, scan_status = await create_institute_and_scan(conn, config, name, catalog_url, alerts.append)
     context.bot_data["reschedule_institute_jobs"](institute_id)
