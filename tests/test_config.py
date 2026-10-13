@@ -58,3 +58,24 @@ def test_load_config_legacy_migration_set_when_all_three_vars_present():
     assert config.legacy_migration == (
         "https://example.com/institut", "Институт агробизнеса", "Б-Мв-101",
     )
+
+
+def test_load_config_legacy_migration_is_none_when_a_var_is_whitespace_only():
+    env = _base_env()
+    env["LEGACY_MIGRATION_INSTITUT"] = "   "
+    env["LEGACY_MIGRATION_INSTITUT_NAME"] = "Институт агробизнеса"
+    env["LEGACY_MIGRATION_GROUP_NAME"] = "Б-Мв-101"
+    config = load_config(env)
+    assert config.legacy_migration_catalog_url is None
+    assert config.legacy_migration is None
+
+
+def test_load_config_legacy_migration_strips_surrounding_whitespace():
+    env = _base_env()
+    env["LEGACY_MIGRATION_INSTITUT"] = "  https://example.com/institut  "
+    env["LEGACY_MIGRATION_INSTITUT_NAME"] = " Институт агробизнеса "
+    env["LEGACY_MIGRATION_GROUP_NAME"] = " Б-Мв-101 "
+    config = load_config(env)
+    assert config.legacy_migration == (
+        "https://example.com/institut", "Институт агробизнеса", "Б-Мв-101",
+    )

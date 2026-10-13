@@ -88,6 +88,8 @@ def list_form_of_study_links(html: str, base_url: str) -> list[tuple[str, str]]:
     page's menu simply produces no entry here."""
     results = []
     for href, inner_html in _GENERIC_LINK_RE.findall(html):
+        if href.lower().endswith(".pdf"):
+            continue
         visible_text = _TAG_RE.sub("", inner_html)
         label = _normalize_label(visible_text)
         if _FORM_OF_STUDY_LABEL_RE.search(label):
@@ -223,18 +225,26 @@ def refresh_institute_catalog(conn, institute, *, notify_admin: Callable[[str], 
 
     raw_entries: list[tuple[str, str]] = []
     scan_is_partial = False
+    unreachable_form_count = 0
     for form_url, form_label in form_links:
         try:
             form_html = fetch_source_page_html(form_url)
         except SourcePageUnreachableError as error:
             logger.warning("group_links: form-of-study page %r (%s) unreachable: %s", form_label, form_url, error)
             scan_is_partial = True
+            unreachable_form_count += 1
             continue
         raw_entries.extend(list_pdf_links(form_html, form_url))
 
     if not raw_entries:
         logger.warning("group_links: catalog for institute %r returned 0 PDF links across all form-of-study pages", institute.name)
-        notify_admin(f"Каталог института {institute.name} (id={institute.id}) вернул 0 ссылок")
+        if unreachable_form_count == len(form_links):
+            notify_admin(
+                f"Каталог института {institute.name} (id={institute.id}) вернул 0 ссылок — "
+                f"все {unreachable_form_count} страниц(ы) форм обучения недоступны"
+            )
+        else:
+            notify_admin(f"Каталог института {institute.name} (id={institute.id}) вернул 0 ссылок")
         return
 
     # Dedup same pdf_url appearing under two different <a> tags in one scan.

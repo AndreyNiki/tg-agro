@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -6,6 +7,8 @@ import pytest
 from schedule_bot import storage
 from schedule_bot.config import Config
 from schedule_bot.legacy_migration import run_legacy_migration_if_configured
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "schedule_sample.pdf"
 
 
 @pytest.fixture
@@ -172,6 +175,38 @@ async def test_postpones_when_pdf_validation_fails(conn, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_postpones_with_specific_message_when_group_already_failed_validation(conn, monkeypatch):
+    """Once is_verified is already -1 (set by an earlier failed
+    validation attempt), validate_and_sync_group_on_first_subscribe
+    short-circuits WITHOUT any network call or its own admin alert (see
+    its docstring: "Already-verified groups (1 or -1) skip this
+    entirely"). The migration's own alert must mention that this group
+    already failed PDF validation, not repeat a bare generic message
+    that gives the admin no hint about the cause on every restart."""
+    import schedule_bot.legacy_migration as mod
+
+    def fake_refresh(conn_, institute, *, notify_admin):
+        link_id = storage.create_institute_link(
+            conn_, institute_id=institute.id, pdf_url="https://example.com/a.pdf",
+            group_names=["Б-Мв-101"], raw_label="Б-Мв-101", last_seen_at="t",
+        )
+        group_id = storage.create_group(conn_, institute_id=institute.id, institute_link_id=link_id, name="Б-Мв-101")
+        storage.update_group_is_verified(conn_, group_id, -1)
+
+    monkeypatch.setattr(mod, "refresh_institute_catalog", fake_refresh)
+    monkeypatch.setattr(mod, "validate_and_sync_group_on_first_subscribe", AsyncMock(return_value=False))
+    config = _config()
+    notify_admin = AsyncMock()
+
+    await run_legacy_migration_if_configured(conn, config, notify_admin, AsyncMock(), MagicMock())
+
+    notify_admin.assert_awaited_once()
+    alert_text = notify_admin.await_args.args[0]
+    assert "is_verified=-1" in alert_text or "ранее не подтвердилась" in alert_text
+    assert storage.get_setting(conn, "legacy_migration_done_at") is None
+
+
+@pytest.mark.asyncio
 async def test_successful_migration_reassigns_all_members_and_sets_flag_once(conn, monkeypatch):
     import schedule_bot.legacy_migration as mod
 
@@ -236,3 +271,65 @@ async def test_successful_migration_reassigns_all_members_and_sets_flag_once(con
     monkeypatch.setattr(mod, "refresh_institute_catalog", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run again")))
     await run_legacy_migration_if_configured(conn, config, notify_admin, sync_fn, reschedule)
     notify_admin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_integration_real_catalog_scan_and_real_validation_succeed_together(conn, monkeypatch):
+    """Unlike every other test in this file, this one does NOT monkeypatch
+    refresh_institute_catalog or validate_and_sync_group_on_first_subscribe
+    — only the actual network/file boundary (fetch_source_page_html,
+    _load_pdf_bytes) is stubbed. This exercises the real sync-vs-async
+    notify_admin contract between the two real functions, and would have
+    caught the "immediate sync is a no-op" ordering bug on its own."""
+    import schedule_bot.group_commands as group_commands_module
+    import schedule_bot.group_links as group_links_module
+
+    pdf_bytes = FIXTURE_PATH.read_bytes()
+    catalog_html = '<a href="/ochnaya">Очная форма обучения</a>'
+
+    def fetch(url):
+        if url == "https://example.com/institut":
+            return catalog_html
+        if url == "https://example.com/ochnaya":
+            return '<a href="/a.pdf">Б-Мв-101</a>'
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", fetch)
+    monkeypatch.setattr(group_commands_module, "_load_pdf_bytes", lambda source: pdf_bytes)
+
+    config = _config()
+    notify_admin = AsyncMock()
+    sync_fn = AsyncMock(return_value=[])
+    reschedule = MagicMock()
+
+    old_institute_id = storage.create_institute(
+        conn, name="Старый", catalog_url="https://old.example.com",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
+    )
+    old_link_id = storage.create_institute_link(
+        conn, institute_id=old_institute_id, pdf_url="https://old.example.com/x.pdf",
+        group_names=["Старая"], raw_label="Старая", last_seen_at="t",
+    )
+    old_group_id = storage.create_group(conn, institute_id=old_institute_id, institute_link_id=old_link_id, name="Старая")
+    storage.upsert_member(conn, 999, old_group_id, joined_at="t")
+
+    await run_legacy_migration_if_configured(conn, config, notify_admin, sync_fn, reschedule)
+
+    institute = storage.get_institute_by_catalog_url(conn, "https://example.com/institut")
+    assert institute is not None
+    group = storage.get_group_by_name(conn, institute.id, "Б-Мв-101")
+    assert group is not None
+    assert group.is_verified == 1  # real find_header_column_index found the column in the real fixture PDF
+
+    assert storage.get_member(conn, 999).group_id == group.id  # pre-existing member moved onto the real target group
+    assert storage.get_setting(conn, "legacy_migration_done_at") is not None
+    # sync_fn is called TWICE for real here: once by
+    # validate_and_sync_group_on_first_subscribe itself (a no-op, since no
+    # member is on the group yet at that point) and once by
+    # legacy_migration's own explicit call after members are reassigned —
+    # both with the same institute_link_id.
+    assert sync_fn.await_count == 2
+    for call in sync_fn.await_args_list:
+        assert call.args == (group.institute_link_id,)
+    reschedule.assert_called_once_with(institute.id)

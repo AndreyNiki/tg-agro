@@ -49,7 +49,7 @@ def load_config(env: Mapping[str, str]) -> Config:
         default_catalog_refresh_interval_minutes=int(
             env.get("CATALOG_REFRESH_INTERVAL_MINUTES", "10080")  # 1 week
         ),
-        legacy_migration_catalog_url=env.get("LEGACY_MIGRATION_INSTITUT") or None,
-        legacy_migration_institute_name=env.get("LEGACY_MIGRATION_INSTITUT_NAME") or None,
-        legacy_migration_group_name=env.get("LEGACY_MIGRATION_GROUP_NAME") or None,
+        legacy_migration_catalog_url=env.get("LEGACY_MIGRATION_INSTITUT", "").strip() or None,
+        legacy_migration_institute_name=env.get("LEGACY_MIGRATION_INSTITUT_NAME", "").strip() or None,
+        legacy_migration_group_name=env.get("LEGACY_MIGRATION_GROUP_NAME", "").strip() or None,
     )

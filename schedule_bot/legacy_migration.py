@@ -68,10 +68,27 @@ async def run_legacy_migration_if_configured(
         conn, group, config.pdf_cache_dir, notify_admin, sync_institute_link_fn,
     )
     if not ok:
-        logger.warning("legacy_migration: group %r failed PDF validation, migration postponed", group_name)
-        await notify_admin(
-            f"Миграция легаси-пользователей отложена: группа «{group_name}» не подтвердилась по PDF."
-        )
+        # validate_and_sync_group_on_first_subscribe short-circuits
+        # silently (no network call, no alert of its own) once
+        # is_verified is already -1 from an earlier failed attempt — so
+        # on every later restart this is the ONLY alert the admin sees.
+        # Re-check the group's current state to say why, instead of
+        # repeating a bare generic message forever.
+        group_after = storage.get_group_by_name(conn, institute.id, group_name)
+        if group_after is not None and group_after.is_verified == -1:
+            logger.warning(
+                "legacy_migration: group %r already has is_verified=-1 from a previous failed validation, migration postponed",
+                group_name,
+            )
+            await notify_admin(
+                f"Миграция легаси-пользователей отложена: группа «{group_name}» ранее не подтвердилась по PDF "
+                f"(is_verified=-1) — проверьте название группы или PDF института вручную."
+            )
+        else:
+            logger.warning("legacy_migration: group %r failed PDF validation, migration postponed", group_name)
+            await notify_admin(
+                f"Миграция легаси-пользователей отложена: группа «{group_name}» не подтвердилась по PDF."
+            )
         return
 
     chat_ids = storage.list_all_member_chat_ids(conn)

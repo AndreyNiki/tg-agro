@@ -178,6 +178,33 @@ def test_refresh_institute_catalog_zero_pdf_links_across_all_forms_alerts_and_do
     assert any("0 ссылок" in alert for alert in alerts)
 
 
+def test_refresh_institute_catalog_zero_pdf_links_mentions_unreachable_form_count_when_all_down(conn, monkeypatch):
+    """Regression test: when 0 PDF links is caused by EVERY form-of-study
+    page being unreachable (not by a reachable-but-empty page), the alert
+    must say so — a bare "0 ссылок" reads as "institute genuinely has no
+    PDFs", hiding that the real cause is a site outage."""
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    catalog_html = (
+        '<a href="/ochnaya">Очная форма обучения</a>'
+        '<a href="/zaochnaya">Заочная форма обучения</a>'
+    )
+
+    def fetch_all_down(url):
+        if url == "https://example.com/catalog":
+            return catalog_html
+        raise group_links_module.SourcePageUnreachableError("boom")
+
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", fetch_all_down)
+    alerts = []
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=alerts.append)
+
+    assert len(alerts) == 1
+    assert "2" in alerts[0]
+    assert "недоступ" in alerts[0]
+
+
 def test_refresh_institute_catalog_filters_out_non_group_looking_labels(conn, monkeypatch):
     import schedule_bot.group_links as group_links_module
 

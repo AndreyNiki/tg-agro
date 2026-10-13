@@ -165,3 +165,13 @@ def test_list_form_of_study_links_handles_subset_of_the_three_forms():
     assert list_form_of_study_links(html, "https://example.com/institut") == [
         ("https://example.com/x", "Очная форма обучения")
     ]
+
+
+def test_list_form_of_study_links_ignores_pdf_hrefs_even_with_matching_label():
+    """A .pdf href whose label happens to mention "форма обучения"
+    (e.g. a PDF file itself named with the phrase) is not a navigation
+    link to a form-of-study subpage — matching it would make
+    refresh_institute_catalog fetch a PDF and regex it as HTML, wasting
+    a request for zero benefit."""
+    html = '<a href="/zaochnaya-1kurs.pdf">Заочная форма обучения, 1 курс</a>'
+    assert list_form_of_study_links(html, "https://example.com/institut") == []
