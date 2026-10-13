@@ -712,3 +712,22 @@ async def test_global_error_handler_notifies_admin_and_logs(conn, config, monkey
         assert "boom" in kwargs["text"] or "ValueError" in kwargs["text"]
     finally:
         app.bot_data["_scheduler"].shutdown(wait=False)
+
+
+def test_command_handlers_ignore_edited_messages(conn, config, monkeypatch):
+    from telegram.ext import CommandHandler, MessageHandler
+
+    _patch_week_formula(monkeypatch)
+    app = build_application(config, conn)
+    try:
+        command_handlers = [
+            h for group in app.handlers.values() for h in group
+            if isinstance(h, (CommandHandler, MessageHandler))
+        ]
+        assert command_handlers, "expected at least one CommandHandler/MessageHandler"
+        for handler in command_handlers:
+            assert "MESSAGE" in repr(handler.filters) or "message" in repr(handler.filters).lower(), (
+                f"{handler.callback.__name__} is not restricted to non-edited messages: {handler.filters!r}"
+            )
+    finally:
+        app.bot_data["_scheduler"].shutdown(wait=False)
