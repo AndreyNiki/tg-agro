@@ -228,6 +228,37 @@ async def test_subscribe_to_group_of_stale_link_makes_no_network_call_and_no_adm
 
 
 @pytest.mark.asyncio
+async def test_admin_subscribing_to_closed_group_skips_approval(conn):
+    """The admin is a super-user: closed groups and prior exclusions
+    (join_requests.requires_approval) must never gate the admin — they
+    subscribe directly, same as picking an open group."""
+    from schedule_bot.group_commands import group_select_callback
+
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link(conn, institute_id, names=("Б-Мв-101",))
+    group_id = group_ids[0]
+    storage.update_group_closed(conn, group_id, True)
+    admin_chat_id = 999
+
+    update, query = _make_select_update(institute_id, group_id, admin_chat_id)
+    context = MagicMock()
+    context.bot = MagicMock(send_message=AsyncMock(), set_my_commands=AsyncMock())
+    context.bot_data = {
+        "conn": conn,
+        "admin_chat_id": admin_chat_id,
+        "config": MagicMock(pdf_cache_dir="/tmp/cache"),
+        "sync_institute_link_fn": AsyncMock(return_value=[]),
+    }
+
+    await group_select_callback(update, context)
+
+    member = storage.get_member(conn, admin_chat_id)
+    assert member is not None
+    assert member.group_id == group_id
+    assert storage.get_pending_request_for_chat(conn, admin_chat_id) is None
+
+
+@pytest.mark.asyncio
 async def test_validate_refuses_stale_link_without_fetching(conn, monkeypatch):
     import schedule_bot.group_commands as group_commands_module
 

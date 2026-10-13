@@ -235,8 +235,9 @@ async def group_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     chat_id = update.effective_chat.id
+    is_admin_caller = chat_id == context.bot_data["admin_chat_id"]
 
-    if requires_approval(conn, group, chat_id):
+    if not is_admin_caller and requires_approval(conn, group, chat_id):
         if storage.get_pending_request_for_chat(conn, chat_id) is not None:
             await query.message.reply_text("У вас уже есть заявка на рассмотрении.")
             return

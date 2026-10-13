@@ -38,7 +38,7 @@ async def classmates_command(update, context) -> None:
     if can_exclude:
         rows = []
         for m in members:
-            if m.chat_id == chat_id:
+            if m.chat_id == chat_id or m.chat_id == admin_chat_id:
                 continue
             label = format_member_line(m, m.chat_id == group.starosta_chat_id)
             rows.append([InlineKeyboardButton(f"❌ Исключить {label}", callback_data=f"exclude:select:{m.chat_id}")])
@@ -56,6 +56,9 @@ async def exclude_select_callback(update, context) -> None:
     caller_chat_id = update.effective_chat.id
     if target_chat_id == caller_chat_id:
         await query.message.reply_text("Нельзя исключить самого себя.")
+        return
+    if target_chat_id == context.bot_data.get("admin_chat_id"):
+        await query.message.reply_text("Нельзя исключить администратора.")
         return
     conn = context.bot_data["conn"]
     target = storage.get_member(conn, target_chat_id)
@@ -93,6 +96,9 @@ async def exclude_confirm_callback(update, context) -> None:
     caller_chat_id = update.effective_chat.id
     if target_chat_id == caller_chat_id:
         await query.message.reply_text("Нельзя исключить самого себя.")
+        return
+    if target_chat_id == context.bot_data.get("admin_chat_id"):
+        await query.message.reply_text("Нельзя исключить администратора.")
         return
 
     conn = context.bot_data["conn"]

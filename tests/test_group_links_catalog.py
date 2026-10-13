@@ -42,9 +42,16 @@ def test_looks_like_group_name_accepts_letter_dash_digits():
     assert looks_like_group_name("Б-Мв-101") is True
 
 
+def test_looks_like_group_name_accepts_letter_only_suffix():
+    assert looks_like_group_name("Б-ТОП") is True
+    assert looks_like_group_name("М-УК-О") is True
+    assert looks_like_group_name("С-БиБ") is True
+
+
 def test_looks_like_group_name_rejects_free_text():
     assert looks_like_group_name("Приказ №12 от 01.09") is False
     assert looks_like_group_name("1 курс БЭ, БМ оз") is False
+    assert looks_like_group_name("Политика в отношении персональных данных") is False
 
 
 def test_refresh_institute_catalog_creates_links_and_groups(conn, monkeypatch):

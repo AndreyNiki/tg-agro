@@ -20,7 +20,9 @@ _FORM_OF_STUDY_LABEL_RE = re.compile(r"форма обучения", re.IGNORECA
 _TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"[\s\xa0]+")
 _TRAILING_DIGITS = re.compile(r"\d+$")
-_GROUP_NAME_RE = re.compile(r"^[А-ЯA-Zа-яa-z]+(-[А-ЯA-Zа-яa-z]+)*-\d+$")
+_GROUP_NAME_RE = re.compile(r"^[А-ЯA-Zа-яa-z]+(-[А-ЯA-Zа-яa-z0-9]+)+$")
+_COURSE_PREFIX_RE = re.compile(r"^\d+\s*курс\S*\s+", re.IGNORECASE)
+_DATE_SUFFIX_RE = re.compile(r"\s+с\s+\d{1,2}\.\d{1,2}\.\d{2,4}$", re.IGNORECASE)
 
 
 class SourcePageUnreachableError(Exception):
@@ -46,7 +48,15 @@ def expand_group_names(raw_label: str) -> list[str]:
     digits (no previous name to borrow a prefix from), the whole label
     is invalid and skipped with a logged warning — this format isn't
     something this rule was calibrated for (see the "Known limitation"
-    note in the design spec, section 2)."""
+    note in the design spec, section 2).
+
+    Before splitting, a leading "<N> курс[...] " prefix ("1 курс ",
+    "5 курс ") and a trailing " с <D>.<M>.<Y>" effective-date suffix
+    (" с 12.10.2026") are stripped — some institutes' catalog pages
+    wrap the actual comma-separated name list in both, and neither is
+    part of any group's name."""
+    raw_label = _COURSE_PREFIX_RE.sub("", raw_label)
+    raw_label = _DATE_SUFFIX_RE.sub("", raw_label)
     fragments = [f.strip() for f in raw_label.split(",")]
     names: list[str] = []
     prefix: str | None = None
@@ -135,11 +145,14 @@ def resolve_group_pdf_source(source_page_url: str, group_name: str) -> str:
 
 
 def looks_like_group_name(name: str) -> bool:
-    """Cheap heuristic filter for the "Letter(s)-Letter(s)-Digits" shape
-    ("Б-А-301", "Б-Мв-101") — filters out obvious catalog noise (orders,
-    guidelines) at name-expansion time, before a `groups` row is ever
-    created. Does NOT replace PDF-based validation (group_commands.py);
-    see design spec section 1.5/2."""
+    """Cheap heuristic filter for the "Letter(s)-Letter(s)[-Letter(s) or
+    Digits]" shape — at least one hyphen-joined segment after the first
+    ("Б-А-301", "Б-Мв-101", "Б-ТОП", "М-УК-О"). The final segment need
+    not be numeric: some institutes code groups purely with letters.
+    Filters out obvious catalog noise (orders, guidelines, free text)
+    at name-expansion time, before a `groups` row is ever created. Does
+    NOT replace PDF-based validation (group_commands.py); see design
+    spec section 1.5/2."""
     return bool(_GROUP_NAME_RE.match(name.strip()))
 
 

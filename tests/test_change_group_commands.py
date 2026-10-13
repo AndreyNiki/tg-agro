@@ -148,6 +148,41 @@ async def test_confirm_callback_notifies_target_starosta_too(conn):
 
 
 @pytest.mark.asyncio
+async def test_confirm_callback_by_admin_switches_immediately_without_request(conn):
+    """The admin is a super-user: switching groups must never wait on
+    anyone's approval, including the admin's own."""
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, ADMIN_CHAT_ID, group_a, joined_at="t")
+    update = make_callback_update(ADMIN_CHAT_ID, f"chgconfirm:{group_b}")
+    context = make_context(conn)
+
+    await change_group_confirm_callback(update, context)
+
+    assert storage.get_member(conn, ADMIN_CHAT_ID).group_id == group_b
+    assert storage.get_pending_request_for_chat(conn, ADMIN_CHAT_ID) is None
+    context.bot.send_message.assert_not_awaited()  # no approver to notify, no requester to notify back
+
+
+@pytest.mark.asyncio
+async def test_confirm_callback_by_admin_enters_closed_group_immediately(conn):
+    """A closed group normally forces the request/approval path (_can_decide
+    gates on the target's starosta or admin) — but the admin IS the
+    super-user, so is_closed must not block the direct switch either."""
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.update_group_closed(conn, group_b, True)
+    storage.upsert_member(conn, ADMIN_CHAT_ID, group_a, joined_at="t")
+    update = make_callback_update(ADMIN_CHAT_ID, f"chgconfirm:{group_b}")
+    context = make_context(conn)
+
+    await change_group_confirm_callback(update, context)
+
+    assert storage.get_member(conn, ADMIN_CHAT_ID).group_id == group_b
+    assert storage.get_pending_request_for_chat(conn, ADMIN_CHAT_ID) is None
+
+
+@pytest.mark.asyncio
 async def test_confirm_callback_refuses_second_pending_request(conn):
     group_a = _make_group(conn, "A")
     group_b = _make_group(conn, "B")

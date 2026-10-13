@@ -300,6 +300,70 @@ async def test_exclude_select_callback_rejects_unauthorized_caller_without_discl
 
 
 @pytest.mark.asyncio
+async def test_classmates_command_hides_exclude_button_for_admin(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+    storage.upsert_member(conn, ADMIN_CHAT_ID, group_id, joined_at="t")  # admin happens to be a member
+
+    update = make_update(111)
+    context = make_context_with_admin(conn)
+
+    await classmates_command(update, context)
+
+    _, kwargs = update.message.reply_text.call_args
+    buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any(b.callback_data == "exclude:select:222" for b in buttons)
+    assert not any(b.callback_data == f"exclude:select:{ADMIN_CHAT_ID}" for b in buttons)
+
+
+@pytest.mark.asyncio
+async def test_exclude_select_callback_rejects_targeting_admin_even_by_admin(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, ADMIN_CHAT_ID, group_id, joined_at="t")
+
+    update = make_callback_update(ADMIN_CHAT_ID, f"exclude:select:{ADMIN_CHAT_ID}")
+    context = make_context_with_admin(conn)
+
+    await exclude_select_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+    assert "самого себя" in update.callback_query.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_exclude_select_callback_rejects_targeting_admin_by_starosta(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    storage.upsert_member(conn, ADMIN_CHAT_ID, group_id, joined_at="t")
+
+    update = make_callback_update(111, f"exclude:select:{ADMIN_CHAT_ID}")
+    context = make_context_with_admin(conn)
+
+    await exclude_select_callback(update, context)
+
+    assert "администратора" in update.callback_query.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_exclude_confirm_callback_rejects_targeting_admin_by_starosta(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    storage.upsert_member(conn, ADMIN_CHAT_ID, group_id, joined_at="t")
+
+    update = make_callback_update(111, f"exclude:confirm:{ADMIN_CHAT_ID}")
+    context = make_context_with_admin(conn)
+
+    await exclude_confirm_callback(update, context)
+
+    assert storage.get_member(conn, ADMIN_CHAT_ID) is not None
+    context.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_exclude_confirm_callback_clears_starosta_vacancy_when_excluding_starosta(conn):
     group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")

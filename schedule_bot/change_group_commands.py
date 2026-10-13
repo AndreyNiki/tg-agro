@@ -134,6 +134,21 @@ async def change_group_confirm_callback(update: Update, context: ContextTypes.DE
         await query.message.reply_text("Эта группа больше не существует.")
         return
 
+    if chat_id == context.bot_data["admin_chat_id"]:
+        # The admin is a super-user: switching groups never waits on
+        # anyone's approval, including the admin's own — go straight to
+        # the same effects an approved request would have, with no
+        # request row and no approver notification.
+        result = await _perform_group_switch(conn, context, chat_id, member.group_id, target_group)
+        if result == "stale":
+            await query.message.reply_text("Группа временно недоступна, попробуйте позже.")
+            return
+        if result == "invalid":
+            await query.message.reply_text("Группа временно недоступна, администратор уведомлён.")
+            return
+        await query.message.reply_text(f"Вы перешли в группу «{target_group.name}».")
+        return
+
     request_id = storage.create_group_change_request(
         conn, chat_id, member.group_id, target_group_id, datetime.now(timezone.utc).isoformat()
     )
@@ -142,6 +157,55 @@ async def change_group_confirm_callback(update: Update, context: ContextTypes.DE
         from_group_id=member.group_id,
     )
     await query.message.reply_text("Заявка отправлена, ожидайте решения.")
+
+
+async def _perform_group_switch(conn, context, chat_id: int, from_group_id: int | None, target_group) -> str:
+    """Core group-switch effects: membership move, subscribe-time
+    validation/sync for an unverified target group (rolled back on
+    failure), and clearing a vacated starosta seat. Shared by
+    change_request_approve_callback (after human approval) and the admin's
+    own change_group confirm (the admin is a super-user and switches
+    immediately, without anyone's approval). Returns "ok", "stale" (target
+    link vanished/never fetched), or "invalid" (validation against the PDF
+    failed)."""
+    now = datetime.now(timezone.utc).isoformat()
+    previous_member = storage.get_member(conn, chat_id)
+    storage.upsert_member(conn, chat_id, target_group.id, joined_at=now, subscribed=True)
+
+    if target_group.is_verified == 0:
+        institute_link = storage.get_institute_link(conn, target_group.institute_link_id)
+        if institute_link is None or institute_link.is_stale:
+            _rollback_membership(conn, chat_id, previous_member)
+            await sync_visible_commands(context.bot, conn, chat_id)
+            return "stale"
+
+        async def notify_admin(text: str) -> None:
+            try:
+                await send_with_retry(
+                    lambda: context.bot.send_message(chat_id=context.bot_data["admin_chat_id"], text=text)
+                )
+            except Exception as error:
+                logger.warning("change_group_commands: failed to notify admin: %s", error)
+
+        ok = await validate_and_sync_group_on_first_subscribe(
+            conn, target_group, context.bot_data["config"].pdf_cache_dir, notify_admin,
+            context.bot_data["sync_institute_link_fn"],
+        )
+        if not ok:
+            _rollback_membership(conn, chat_id, previous_member)
+            await sync_visible_commands(context.bot, conn, chat_id)
+            return "invalid"
+
+    await sync_visible_commands(context.bot, conn, chat_id)
+
+    if from_group_id is not None:
+        from_group = storage.get_group(conn, from_group_id)
+        if from_group is not None and from_group.starosta_chat_id == chat_id:
+            storage.cancel_open_elections_for_group(conn, from_group.id, now)
+            storage.update_group_starosta(conn, from_group.id, None)
+            storage.set_group_last_starosta_change_at(conn, from_group.id, now)
+
+    return "ok"
 
 
 def _can_decide(caller_chat_id: int, target_group, admin_chat_id: int) -> bool:
@@ -214,55 +278,26 @@ async def change_request_approve_callback(update: Update, context: ContextTypes.
         await query.message.reply_text("Недостаточно прав для решения по этой заявке.")
         return
 
-    now = datetime.now(timezone.utc).isoformat()
     # Same contract as the first-subscribe picker (spec 1.5/4.2): an
     # is_verified == 0 group must be validated against the real PDF and
     # get its immediate first sync before the switch is considered done,
     # and a stale link must never be fetched. The membership row is
     # written first because sync_institute_link only syncs links that
     # have at least one member; it is rolled back if validation fails.
-    previous_member = storage.get_member(conn, request.chat_id)
-    storage.upsert_member(conn, request.chat_id, request.to_group_id, joined_at=now, subscribed=True)
-
-    target_group = storage.get_group(conn, request.to_group_id)
-    if target_group.is_verified == 0:
-        institute_link = storage.get_institute_link(conn, target_group.institute_link_id)
-        if institute_link is None or institute_link.is_stale:
-            _rollback_membership(conn, request.chat_id, previous_member)
-            await sync_visible_commands(context.bot, conn, request.chat_id)
-            await query.message.reply_text(
-                "Группа временно недоступна, попробуйте позже. Заявка осталась на рассмотрении."
-            )
-            return
-
-        async def notify_admin(text: str) -> None:
-            try:
-                await send_with_retry(
-                    lambda: context.bot.send_message(chat_id=context.bot_data["admin_chat_id"], text=text)
-                )
-            except Exception as error:
-                logger.warning("change_group_commands: failed to notify admin: %s", error)
-
-        ok = await validate_and_sync_group_on_first_subscribe(
-            conn, target_group, context.bot_data["config"].pdf_cache_dir, notify_admin,
-            context.bot_data["sync_institute_link_fn"],
+    result = await _perform_group_switch(conn, context, request.chat_id, request.from_group_id, target_group)
+    if result == "stale":
+        await query.message.reply_text(
+            "Группа временно недоступна, попробуйте позже. Заявка осталась на рассмотрении."
         )
-        if not ok:
-            _rollback_membership(conn, request.chat_id, previous_member)
-            await sync_visible_commands(context.bot, conn, request.chat_id)
-            await query.message.reply_text(
-                "Группа временно недоступна, администратор уведомлён. Заявка осталась на рассмотрении."
-            )
-            return
+        return
+    if result == "invalid":
+        await query.message.reply_text(
+            "Группа временно недоступна, администратор уведомлён. Заявка осталась на рассмотрении."
+        )
+        return
 
+    now = datetime.now(timezone.utc).isoformat()
     storage.decide_group_change_request(conn, request_id, "approved", now)
-    await sync_visible_commands(context.bot, conn, request.chat_id)
-
-    from_group = storage.get_group(conn, request.from_group_id)
-    if from_group is not None and from_group.starosta_chat_id == request.chat_id:
-        storage.cancel_open_elections_for_group(conn, from_group.id, now)
-        storage.update_group_starosta(conn, from_group.id, None)
-        storage.set_group_last_starosta_change_at(conn, from_group.id, now)
     try:
         await send_with_retry(
             lambda: context.bot.send_message(

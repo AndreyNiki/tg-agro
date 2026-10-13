@@ -121,6 +121,20 @@ def test_expand_group_names_ignores_surrounding_whitespace_around_commas():
     assert expand_group_names(" Б-А-301 , 302 ") == ["Б-А-301", "Б-А-302"]
 
 
+def test_expand_group_names_strips_leading_course_number_prefix():
+    assert expand_group_names("1 курс Б-ТОП") == ["Б-ТОП"]
+    assert expand_group_names("1 курсы Б-ППР,Б-ТП") == ["Б-ППР", "Б-ТП"]
+
+
+def test_expand_group_names_strips_trailing_date_suffix():
+    assert expand_group_names("2 курс Б-ТП-21 с 23.02.2026") == ["Б-ТП-21"]
+    assert expand_group_names("4 курс Б-ТОП с 12.10.26") == ["Б-ТОП"]
+
+
+def test_expand_group_names_strips_course_prefix_and_date_suffix_with_comma_list():
+    assert expand_group_names("2 курс М-ЗТ-ИППЖ,М-УК-О,М-ВБ") == ["М-ЗТ-ИППЖ", "М-УК-О", "М-ВБ"]
+
+
 from schedule_bot.group_links import list_form_of_study_links
 
 _FORM_NAV_HTML = """
