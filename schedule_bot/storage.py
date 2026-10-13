@@ -740,6 +740,20 @@ def close_election(conn: sqlite3.Connection, election_id: int, status: str, deci
     conn.commit()
 
 
+def close_election_if_open(conn: sqlite3.Connection, election_id: int, status: str, decided_at: str) -> bool:
+    """Atomic version of close_election: only transitions the row if it
+    is still 'open' at the moment of this UPDATE, and reports whether
+    THIS call was the one that closed it. Used to guard against two
+    concurrent approvals both reaching the "enough votes" threshold and
+    both trying to apply the election result."""
+    cursor = conn.execute(
+        "UPDATE elections SET status = ?, decided_at = ? WHERE id = ? AND status = 'open'",
+        (status, decided_at, election_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def cancel_open_elections_for_group(conn: sqlite3.Connection, group_id: int, decided_at: str) -> None:
     conn.execute(
         "UPDATE elections SET status = 'cancelled', decided_at = ? WHERE group_id = ? AND status = 'open'",

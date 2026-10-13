@@ -759,3 +759,20 @@ def test_init_db_backs_up_member_chat_ids_before_dropping_legacy_schema(tmp_path
     backed_up = sorted(storage.list_legacy_member_chat_ids_backup(new_conn))
     assert backed_up == [111, 222]
     assert storage.list_all_member_chat_ids(new_conn) == []
+
+
+def test_close_election_if_open_only_succeeds_once(conn):
+    institute_id = storage.create_institute(
+        conn, name="X", catalog_url="y", check_interval_minutes=60, send_time="09:00",
+        tz_name="Europe/Moscow", catalog_refresh_interval_minutes=10080,
+    )
+    link_id = storage.create_institute_link(conn, institute_id=institute_id, pdf_url="z", group_names=["G"], raw_label="G", last_seen_at="t")
+    group_id = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="G")
+    election_id = storage.create_election(conn, group_id, "initial", 1, 1, "t")
+
+    first = storage.close_election_if_open(conn, election_id, "approved", "t2")
+    second = storage.close_election_if_open(conn, election_id, "approved", "t3")
+
+    assert first is True
+    assert second is False
+    assert storage.get_election(conn, election_id).decided_at == "t2"

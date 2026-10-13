@@ -276,3 +276,33 @@ async def test_votes_command_lists_open_election_with_working_button(conn):
     assert "0/2" in text
     buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
     assert any(b.callback_data == f"election:approve:{election_id}" for b in buttons)
+
+
+@pytest.mark.asyncio
+async def test_two_simultaneous_approvals_only_apply_the_election_result_once(conn, monkeypatch):
+    group_id = _make_group(conn)
+    _add_members(conn, group_id, [111, 222, 333, 444])
+    election_id = storage.create_election(conn, group_id, "initial", 111, 111, "t")
+    storage.add_election_approval(conn, election_id, 222, "t")
+
+    context = make_context(conn)
+    update_a = make_callback_update(333, f"election:approve:{election_id}")
+    update_b = make_callback_update(444, f"election:approve:{election_id}")
+
+    # Both "concurrent" callbacks read the election as still 'open' —
+    # this is what happens for real if they interleave before either one
+    # calls close_election_if_open. Simulated deterministically here by
+    # freezing get_election's view to the pre-close snapshot for both
+    # calls, instead of relying on asyncio.gather's scheduling order
+    # (which runs each coroutine to its first real suspension point
+    # before switching, and so wouldn't reproduce the race at all).
+    open_snapshot = storage.get_election(conn, election_id)
+    monkeypatch.setattr(storage, "get_election", lambda conn_, eid: open_snapshot)
+
+    await election_approve_callback(update_a, context)
+    await election_approve_callback(update_b, context)
+
+    group = storage.get_group(conn, group_id)
+    assert group.starosta_chat_id == 111
+    welcome_sends = [c for c in context.bot.send_message.await_args_list if c.kwargs.get("chat_id") == 111]
+    assert len(welcome_sends) == 1

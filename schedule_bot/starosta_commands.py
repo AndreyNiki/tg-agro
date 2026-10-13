@@ -149,9 +149,11 @@ async def starosta_change_callback(update: Update, context: ContextTypes.DEFAULT
     )
 
 
-async def _apply_election_result(bot, conn, election: "storage.ElectionRow") -> None:
+async def _apply_election_result(bot, conn, election: "storage.ElectionRow") -> bool:
     now = datetime.now(timezone.utc).isoformat()
-    storage.close_election(conn, election.id, "approved", now)
+    if not storage.close_election_if_open(conn, election.id, "approved", now):
+        return False  # another concurrent approval already applied this result
+
     group = storage.get_group(conn, election.group_id)
     old_starosta_chat_id = group.starosta_chat_id
     storage.update_group_starosta(conn, group.id, election.candidate_chat_id)
@@ -174,6 +176,7 @@ async def _apply_election_result(bot, conn, election: "storage.ElectionRow") -> 
             logger.warning(
                 "starosta_commands: failed to notify old starosta chat_id=%s: %s", old_starosta_chat_id, error
             )
+    return True
 
 
 async def election_approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -200,7 +203,9 @@ async def election_approve_callback(update: Update, context: ContextTypes.DEFAUL
     storage.add_election_approval(conn, election_id, chat_id, datetime.now(timezone.utc).isoformat())
     count = storage.count_election_approvals(conn, election_id)
     if count >= 2:
-        await _apply_election_result(context.bot, conn, election)
+        applied = await _apply_election_result(context.bot, conn, election)
+        if not applied:
+            await query.message.reply_text("Это голосование уже было применено другим одобрением.")
     else:
         await query.message.reply_text(f"Голос засчитан ({count}/2).")
 
