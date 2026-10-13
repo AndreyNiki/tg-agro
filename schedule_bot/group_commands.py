@@ -9,7 +9,7 @@ from telegram.ext import ContextTypes
 
 from schedule_bot import storage
 from schedule_bot.join_requests import create_join_request_and_notify, requires_approval
-from schedule_bot.pdf_parser import _load_pdf_bytes, find_group_column_index, extract_raw_rows
+from schedule_bot.pdf_parser import _load_pdf_bytes, find_header_column_index, extract_raw_rows
 from schedule_bot.telegram_utils import reply
 
 logger = logging.getLogger(__name__)
@@ -114,6 +114,13 @@ async def group_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 def _blocking_validate_group_names(pdf_url: str, group_names: list[str]) -> dict[str, bool]:
+    """Column lookup here MUST use the same function the real sync
+    pipeline uses (`find_header_column_index`, via
+    `pdf_parser.parse_schedules_for_groups`) — not the whole-table
+    `find_group_column_index`. Otherwise a name that only appears in
+    lesson body text ("совм. с Б-А-301") passes validation
+    (`is_verified=1`, stays in the picker) and then fails every single
+    later sync forever, with no path back to `is_verified=-1`."""
     pdf_bytes = _load_pdf_bytes(pdf_url)
     tmp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
     try:
@@ -123,7 +130,7 @@ def _blocking_validate_group_names(pdf_url: str, group_names: list[str]) -> dict
         found = {}
         for name in group_names:
             try:
-                find_group_column_index(rows, name)
+                find_header_column_index(rows, name)
                 found[name] = True
             except ValueError:
                 found[name] = False
@@ -146,6 +153,20 @@ async def validate_and_sync_group_on_first_subscribe(conn, group, pdf_cache_dir:
         return group.is_verified == 1
 
     institute_link = storage.get_institute_link(conn, group.institute_link_id)
+    if institute_link is None or institute_link.is_stale:
+        # Binding global constraint: "Устаревшие ссылки никогда не
+        # триггерят сетевых запросов." A stale link means the catalog scan
+        # no longer lists this PDF — the admin was already alerted exactly
+        # once at the moment it went stale (spec 1.3), so this routine,
+        # expected state must NOT produce another alert, and must not
+        # fetch anything. The caller just tells the user the group is
+        # temporarily unavailable.
+        logger.info(
+            "group_commands: subscribe to group %r refused without any network call — its institute_link is stale/missing",
+            group.name,
+        )
+        return False
+
     sibling_groups = storage.list_groups_for_link(conn, institute_link.id)
     sibling_names = [g.name for g in sibling_groups]
 
@@ -165,6 +186,19 @@ async def validate_and_sync_group_on_first_subscribe(conn, group, pdf_cache_dir:
 
     await sync_institute_link_fn(institute_link.id)
     return True
+
+
+def _rollback_membership(conn, chat_id: int, previous_member) -> None:
+    """Undo the speculative upsert_member done before validation: either
+    delete the brand-new row (no previous membership) or put the chat back
+    into exactly the group/subscription state it had before."""
+    if previous_member is None:
+        storage.remove_member(conn, chat_id)
+        return
+    storage.upsert_member(
+        conn, chat_id, previous_member.group_id,
+        joined_at=previous_member.joined_at, subscribed=previous_member.subscribed,
+    )
 
 
 async def group_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -199,20 +233,40 @@ async def group_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as error:
             logger.warning("group_commands: failed to notify admin: %s", error)
 
-    ok = await validate_and_sync_group_on_first_subscribe(
-        conn, group, context.bot_data["config"].pdf_cache_dir, notify_admin,
-        context.bot_data["sync_institute_link_fn"],
-    )
-    if not ok:
-        await query.message.reply_text("Группа временно недоступна, администратор уведомлён.")
+    # Stale link: never fetch, never alert (spec 1.3 — the admin already
+    # got one alert when the link disappeared from the catalog), and don't
+    # even write a membership row. Validation enforces this too, but doing
+    # it here keeps the user-facing wording honest (no "администратор
+    # уведомлён" claim when no alert was sent).
+    institute_link = storage.get_institute_link(conn, group.institute_link_id)
+    if group.is_verified == 0 and (institute_link is None or institute_link.is_stale):
+        await query.message.reply_text("Группа временно недоступна, попробуйте позже.")
         return
 
+    # The membership row MUST be written BEFORE validation/first sync, not
+    # after: sync_institute_link only syncs links that have at least one
+    # group with at least one member (spec 3.2 p.1). With the opposite
+    # order the very first subscriber's immediate first sync was a
+    # guaranteed no-op (active_groups == [] -> early return, no fetch), so
+    # /schedule stayed empty until the next scheduled check. On failure we
+    # roll the membership back to exactly its previous state below.
+    previous_member = storage.get_member(conn, chat_id)
     storage.upsert_member(conn, chat_id, group_id, joined_at=datetime.now(timezone.utc).isoformat(), subscribed=True)
     storage.update_member_profile(
         conn, chat_id,
         telegram_username=update.effective_user.username,
         display_name=update.effective_user.full_name,
     )
+
+    ok = await validate_and_sync_group_on_first_subscribe(
+        conn, group, context.bot_data["config"].pdf_cache_dir, notify_admin,
+        context.bot_data["sync_institute_link_fn"],
+    )
+    if not ok:
+        _rollback_membership(conn, chat_id, previous_member)
+        await query.message.reply_text("Группа временно недоступна, администратор уведомлён.")
+        return
+
     await query.message.reply_text(
         f"Вы подписались на рассылку расписания группы «{group.name}». "
         "Команда /schedule покажет расписание на выбранный день."

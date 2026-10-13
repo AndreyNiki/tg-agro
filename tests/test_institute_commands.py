@@ -138,3 +138,66 @@ async def test_institute_links_command_lists_raw_labels_and_group_counts(conn):
     assert "2" in text  # group count for the first link
     assert "1 курс БЭ, БМ оз" in text
     assert "0" in text  # group count for the second link
+
+
+@pytest.mark.asyncio
+async def test_add_institute_reports_zero_links_honestly_and_forwards_alert(conn, monkeypatch):
+    """A 0-link scan must not be reported as a bare success, and the
+    rescan's own admin alert must not be swallowed by a no-op lambda."""
+    import schedule_bot.institute_commands as institute_commands_module
+
+    def fake_refresh(conn_, institute, *, notify_admin):
+        notify_admin(f"Каталог института {institute.name} (id={institute.id}) вернул 0 ссылок")
+
+    monkeypatch.setattr(institute_commands_module, "refresh_institute_catalog", fake_refresh)
+
+    update = _update(["ИТ", "https://example.com/catalog"])
+    context = _context(conn, ["ИТ", "https://example.com/catalog"])
+
+    await add_institute_command(update, context)
+
+    texts = [call.args[0] for call in update.message.reply_text.await_args_list]
+    assert any("вернул 0 ссылок" in text for text in texts)
+    assert any("ссылок не найдено" in text for text in texts)
+
+
+@pytest.mark.asyncio
+async def test_add_institute_runs_blocking_catalog_fetch_off_the_event_loop(conn, monkeypatch):
+    import threading
+
+    import schedule_bot.institute_commands as institute_commands_module
+
+    seen_threads = []
+    monkeypatch.setattr(
+        institute_commands_module, "refresh_institute_catalog",
+        lambda *a, **k: seen_threads.append(threading.current_thread()),
+    )
+
+    update = _update(["ИТ", "https://example.com/catalog"])
+    context = _context(conn, ["ИТ", "https://example.com/catalog"])
+    await add_institute_command(update, context)
+
+    assert seen_threads and seen_threads[0] is not threading.main_thread()
+
+
+@pytest.mark.asyncio
+async def test_refresh_institute_links_runs_blocking_catalog_fetch_off_the_event_loop(conn, monkeypatch):
+    import threading
+
+    import schedule_bot.institute_commands as institute_commands_module
+
+    institute_id = storage.create_institute(
+        conn, name="ИТ", catalog_url="https://example.com/catalog", check_interval_minutes=60,
+        send_time="09:00", tz_name="Europe/Moscow", catalog_refresh_interval_minutes=10080,
+    )
+    seen_threads = []
+    monkeypatch.setattr(
+        institute_commands_module, "refresh_institute_catalog",
+        lambda *a, **k: seen_threads.append(threading.current_thread()),
+    )
+
+    update = _update([str(institute_id)])
+    context = _context(conn, [str(institute_id)])
+    await refresh_institute_links_command(update, context)
+
+    assert seen_threads and seen_threads[0] is not threading.main_thread()

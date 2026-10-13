@@ -12,7 +12,7 @@ FIXTURE_PATH = str(Path(__file__).parent / "fixtures" / "schedule_sample.pdf")
 
 @pytest.fixture
 def conn():
-    connection = sqlite3.connect(":memory:")
+    connection = sqlite3.connect(":memory:", check_same_thread=False)  # sync runs blocking work via asyncio.to_thread, like production (main.py)
     storage.init_db(connection)
     return connection
 
@@ -54,7 +54,7 @@ def test_sync_institute_link_skips_network_when_no_active_groups(conn, tmp_path,
 
     results = asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
-        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
     ))
     assert results == []
 
@@ -74,7 +74,7 @@ def test_sync_institute_link_skips_network_when_stale(conn, tmp_path, monkeypatc
 
     results = asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
-        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
     ))
     assert results == []
 
@@ -100,7 +100,7 @@ def test_sync_institute_link_fetches_and_parses_once_for_two_groups(conn, tmp_pa
 
     results = asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
-        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
     ))
 
     assert call_count == 1
@@ -132,7 +132,7 @@ def test_sync_institute_link_fetches_pdf_bytes_once_for_two_groups(conn, tmp_pat
 
     results = asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
-        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
     ))
 
     assert len(fetch_calls) == 1
@@ -148,7 +148,7 @@ def test_sync_institute_link_writes_separate_cache_copy_per_group(conn, tmp_path
 
     asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
-        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
     ))
 
     cache_paths = {Path(storage.get_active_version(conn, group_id).pdf_cache_path) for group_id in group_ids}
@@ -171,7 +171,7 @@ def test_sync_institute_link_sets_last_sync_failed_at_on_all_groups_on_fetch_fai
 
     results = asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
-        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
     ))
 
     assert all(r.status == "error" for r in results)
@@ -187,7 +187,7 @@ def test_sync_institute_link_sets_last_sync_failed_at_only_on_group_with_missing
 
     results = asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
-        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
     ))
 
     good_group, bad_group = group_ids
@@ -211,17 +211,17 @@ def test_sync_institute_link_catalog_refresh_rate_limited_to_once_per_cycle(conn
     refresh_calls = []
     monkeypatch.setattr(sync_module, "refresh_institute_catalog", lambda conn, institute, **kwargs: refresh_calls.append(institute.id))
 
-    shared_cycle_flag: set[int] = set()
+    shared_cycle_flag: dict[int, float] = {}
     asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_a), storage.get_institute(conn, institute_id),
-        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=shared_cycle_flag,
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state=shared_cycle_flag,
     ))
     asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_b), storage.get_institute(conn, institute_id),
-        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=shared_cycle_flag,
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state=shared_cycle_flag,
     ))
 
-    assert refresh_calls == [institute_id]  # second 404, same cycle, does not refresh again
+    assert refresh_calls == [institute_id]  # second 404 within the same check interval does not refresh again
 
 
 def test_sync_institute_link_rereads_pdf_url_from_db_after_catalog_refresh(conn, tmp_path, monkeypatch):
@@ -245,7 +245,7 @@ def test_sync_institute_link_rereads_pdf_url_from_db_after_catalog_refresh(conn,
 
     results = asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
-        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
     ))
 
     assert results[0].status == "initial"
@@ -259,7 +259,7 @@ def test_sync_institute_link_notifies_subscribers_not_just_members(conn, tmp_pat
     notifier = RecordingNotifier()
     asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
-        str(tmp_path), notifier, catalog_refreshed_this_cycle=set(),
+        str(tmp_path), notifier, catalog_rescan_state={},
     ))
     # First sync is "initial" -> no notifications at all regardless of subscription.
     assert notifier.sent == []
@@ -278,7 +278,7 @@ def test_sync_institute_link_notifies_only_subscribed_member_on_change(conn, tmp
     # First sync: establishes the "initial" active version.
     asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
-        str(tmp_path), RecordingNotifier(), catalog_refreshed_this_cycle=set(),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
     ))
 
     # Force a change on the next sync by tampering with a lesson's text in
@@ -302,8 +302,80 @@ def test_sync_institute_link_notifies_only_subscribed_member_on_change(conn, tmp
     notifier = RecordingNotifier()
     results = asyncio.run(sync_institute_link(
         conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
-        str(tmp_path), notifier, catalog_refreshed_this_cycle=set(),
+        str(tmp_path), notifier, catalog_rescan_state={},
     ))
 
     assert results[0].status == "applied"
     assert [chat_id for chat_id, _ in notifier.sent] == [111]
+
+
+def test_sync_forwards_catalog_rescan_alerts_to_admin(conn, tmp_path, monkeypatch):
+    """Spec 1.3's "ссылка пропала из каталога" alert is most likely to be
+    produced exactly here (PDF 404 -> catalog rescan -> link gone), and it
+    can never fire again later (the newly-stale diff only looks at
+    previously-live links). It must therefore reach the admin, not a
+    `lambda text: None`."""
+    import schedule_bot.sync as sync_module
+
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, "https://example.com/dead.pdf", ["Б-Мв-101"])
+    storage.upsert_member(conn, 111, group_ids[0], joined_at="t")
+
+    monkeypatch.setattr(
+        sync_module, "_load_pdf_bytes", lambda source: (_ for _ in ()).throw(ConnectionError("404"))
+    )
+
+    def fake_refresh(conn_, institute, *, notify_admin):
+        notify_admin("Ссылка института ИТ (id=1) пропала из каталога, подписчиков затронуто: 1")
+
+    monkeypatch.setattr(sync_module, "refresh_institute_catalog", fake_refresh)
+
+    admin_messages = []
+
+    async def notify_admin(text):
+        admin_messages.append(text)
+
+    asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={}, notify_admin=notify_admin,
+    ))
+
+    assert any("пропала из каталога" in text for text in admin_messages)
+
+
+def test_sync_allows_catalog_rescan_again_after_check_interval_elapsed(conn, tmp_path, monkeypatch):
+    """The rate limit must be self-resetting: a stale per-process "already
+    refreshed" flag would block the 404 fallback forever."""
+    import schedule_bot.sync as sync_module
+
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, "https://example.com/dead.pdf", ["Б-Мв-101"])
+    storage.upsert_member(conn, 111, group_ids[0], joined_at="t")
+
+    monkeypatch.setattr(
+        sync_module, "_load_pdf_bytes", lambda source: (_ for _ in ()).throw(ConnectionError("404"))
+    )
+    refresh_calls = []
+    monkeypatch.setattr(
+        sync_module, "refresh_institute_catalog",
+        lambda conn_, institute, **kwargs: refresh_calls.append(institute.id),
+    )
+
+    institute = storage.get_institute(conn, institute_id)  # check_interval_minutes == 60
+    state: dict[int, float] = {}
+    link = storage.get_institute_link(conn, link_id)
+
+    asyncio.run(sync_institute_link(
+        conn, link, institute, str(tmp_path), RecordingNotifier(), catalog_rescan_state=state,
+    ))
+    # Still inside the interval -> no second rescan.
+    asyncio.run(sync_institute_link(
+        conn, link, institute, str(tmp_path), RecordingNotifier(), catalog_rescan_state=state,
+    ))
+    # Pretend a full check interval has passed.
+    state[institute_id] -= 61 * 60
+    asyncio.run(sync_institute_link(
+        conn, link, institute, str(tmp_path), RecordingNotifier(), catalog_rescan_state=state,
+    ))
+
+    assert refresh_calls == [institute_id, institute_id]

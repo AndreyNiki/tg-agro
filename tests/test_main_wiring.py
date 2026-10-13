@@ -484,6 +484,40 @@ def test_build_application_registers_menu_handlers(conn, config, monkeypatch):
     application.bot_data["_scheduler"].shutdown(wait=False)
 
 
+@pytest.mark.asyncio
+async def test_manual_refresh_and_scheduled_jobs_share_one_catalog_rescan_state(conn, config, monkeypatch):
+    """Finding: main.py owned a separate per-process set used only by the
+    manual /refresh path, while the scheduler passed None (making its own
+    fresh structure per call). Both must now use the IDENTICAL object, or
+    the 404-rescan rate limit means nothing."""
+    import schedule_bot.sync as sync_module
+
+    _patch_week_formula(monkeypatch)
+
+    group_id = _make_test_group(conn, "Б-Мв-101")
+    group = storage.get_group(conn, group_id)
+    application = build_application(config, conn)
+
+    scheduled_state = application.bot_data["_scheduler"].get_job(
+        f"link_check_{group.institute_link_id}"
+    ).args[-1]
+    assert scheduled_state is application.bot_data["_catalog_rescan_state"]
+
+    seen = []
+
+    async def recording_sync(*args, catalog_rescan_state, **kwargs):
+        seen.append(catalog_rescan_state)
+        return []
+
+    monkeypatch.setattr(sync_module, "sync_institute_link", recording_sync)
+    monkeypatch.setattr("main.sync_institute_link", recording_sync)
+
+    await application.bot_data["sync_institute_link_fn"](group.institute_link_id)
+
+    assert seen and seen[0] is scheduled_state
+    application.bot_data["_scheduler"].shutdown(wait=False)
+
+
 def test_build_application_wires_institute_bot_data_callbacks(conn, config, monkeypatch):
     _patch_week_formula(monkeypatch)
 

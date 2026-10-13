@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 
@@ -35,18 +36,29 @@ async def add_institute_command(update: Update, context: ContextTypes.DEFAULT_TY
         send_time=config.default_daily_send_time, tz_name=config.default_timezone,
         catalog_refresh_interval_minutes=config.default_catalog_refresh_interval_minutes,
     )
+    alerts: list[str] = []
     try:
-        refresh_institute_catalog(
-            conn, storage.get_institute(conn, institute_id),
-            notify_admin=lambda text: None,  # synchronous call site, can't await here — see refresh_institute_links_command for the alert path
+        # asyncio.to_thread: refresh_institute_catalog does a blocking HTTP
+        # fetch (~15s timeout). With concurrent_updates(True) a direct call
+        # would stall every other user's update for that whole time.
+        await asyncio.to_thread(
+            refresh_institute_catalog, conn, storage.get_institute(conn, institute_id), notify_admin=alerts.append
         )
-        scan_status = "каталог просканирован"
+        link_count = len(storage.list_institute_links(conn, institute_id, include_stale=False))
+        if link_count:
+            scan_status = f"каталог просканирован, ссылок найдено: {link_count}"
+        else:
+            # Never report a bare success here: a 0-link scan (broken page,
+            # unparsable labels) leaves the institute with nothing to sync.
+            scan_status = "каталог просканирован, ссылок не найдено"
     except Exception as error:
         # Institute creation must succeed even if the catalog page is unreachable right now —
         # a later /refresh_institute_links or the background catalog job can retry the scan.
         logger.warning("institute_commands: initial catalog scan failed for institute_id=%s: %s", institute_id, error)
         scan_status = f"сканирование каталога не удалось: {error}"
     context.bot_data["reschedule_institute_jobs"](institute_id)
+    for text in alerts:
+        await update.message.reply_text(text)
     await update.message.reply_text(f"Институт «{name}» создан (id={institute_id}), {scan_status}.")
 
 
@@ -155,7 +167,7 @@ async def refresh_institute_links_command(update: Update, context: ContextTypes.
         return
     alerts = []
     try:
-        refresh_institute_catalog(conn, institute, notify_admin=alerts.append)
+        await asyncio.to_thread(refresh_institute_catalog, conn, institute, notify_admin=alerts.append)
     except Exception as error:
         await update.message.reply_text(f"Сканирование каталога не удалось: {error}")
         return

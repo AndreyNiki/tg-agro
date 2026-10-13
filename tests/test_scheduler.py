@@ -88,6 +88,48 @@ def shutdown_scheduler():
 
 
 @pytest.mark.asyncio
+async def test_institute_catalog_refresh_job_schedules_jobs_for_newly_found_link(shutdown_scheduler, monkeypatch):
+    """A link discovered by the BACKGROUND catalog scan must get its
+    link_check_*/link_daily_send_* jobs immediately — not only after a
+    process restart (the manual rescan paths already reschedule)."""
+    import schedule_bot.scheduler as scheduler_module
+
+    # check_same_thread=False: refresh_institute_catalog runs in
+    # asyncio.to_thread here, exactly as in production (see main.py).
+    connection = sqlite3.connect(":memory:", check_same_thread=False)
+    storage.init_db(connection)
+    storage.ensure_default_settings(connection, {"weektype_url": "https://example.com/week"})
+
+    institute_id = _make_institute(connection)
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+    scheduler = shutdown_scheduler(build_scheduler(connection, _config(), bot, holder))
+
+    assert not [job.id for job in scheduler.get_jobs() if job.id.startswith("link_")]
+
+    created: dict = {}
+
+    def fake_refresh(conn_, institute, *, notify_admin):
+        created["link_id"] = storage.create_institute_link(
+            conn_, institute_id=institute.id, pdf_url="https://example.com/new.pdf",
+            group_names=["Б-А-301"], raw_label="Б-А-301", last_seen_at="t",
+        )
+
+    monkeypatch.setattr(scheduler_module, "refresh_institute_catalog", fake_refresh)
+
+    job = scheduler.get_job(f"institute_catalog_refresh_{institute_id}")
+    await job.func(*job.args)
+
+    job_ids = {j.id for j in scheduler.get_jobs()}
+    # Shut down inside the test: this scheduler is bound to the
+    # pytest-asyncio event loop, which is closed before fixture teardown.
+    scheduler.shutdown(wait=False)
+    assert f"link_check_{created['link_id']}" in job_ids
+    assert f"link_daily_send_{created['link_id']}" in job_ids
+
+
+@pytest.mark.asyncio
 async def test_link_check_job_swallows_sync_failure_instead_of_crashing(conn, monkeypatch):
     import schedule_bot.scheduler as scheduler_module
 
@@ -301,33 +343,91 @@ async def test_weekly_weektype_refresh_job_persists_successful_fetch(conn, monke
 
 
 @pytest.mark.asyncio
-async def test_link_check_job_shares_catalog_refreshed_this_cycle_across_calls(conn, monkeypatch):
-    # The rate-limiting set from Task 12 must be created ONCE per
-    # scheduler build/run-cycle and passed into every link_check_job call
-    # for that cycle — not freshly created inside link_check_job itself
-    # (which would defeat its whole purpose of rate-limiting catalog
-    # refreshes across all of one institute's links within a cycle).
+async def test_link_check_job_shares_catalog_rescan_state_across_calls(conn, monkeypatch):
+    # The rate-limiting structure must be created ONCE and passed into
+    # every link_check_job call — not freshly created inside
+    # link_check_job itself (which would defeat its whole purpose of
+    # rate-limiting catalog refreshes across all of one institute's links).
     import schedule_bot.scheduler as scheduler_module
 
     institute_id = _make_institute(conn)
     link_a, _ = _make_link_and_group(conn, institute_id, pdf_url="a.pdf", name="A")
     link_b, _ = _make_link_and_group(conn, institute_id, pdf_url="b.pdf", name="B")
 
-    seen_sets = []
+    seen_states = []
 
-    async def recording_sync(conn_, institute_link, institute, pdf_cache_dir, notify, *, catalog_refreshed_this_cycle):
-        seen_sets.append(catalog_refreshed_this_cycle)
-        catalog_refreshed_this_cycle.add(institute.id)
+    async def recording_sync(conn_, institute_link, institute, pdf_cache_dir, notify, *, catalog_rescan_state, notify_admin=None):
+        seen_states.append(catalog_rescan_state)
+        catalog_rescan_state[institute.id] = 1.0
         return []
 
     monkeypatch.setattr(scheduler_module, "sync_institute_link", recording_sync)
 
-    cycle_set: set = set()
+    rescan_state: dict = {}
     bot = MagicMock()
     bot.send_message = AsyncMock()
 
-    await link_check_job(conn, _config(), bot, link_a, catalog_refreshed_this_cycle=cycle_set)
-    await link_check_job(conn, _config(), bot, link_b, catalog_refreshed_this_cycle=cycle_set)
+    await link_check_job(conn, _config(), bot, link_a, catalog_rescan_state=rescan_state)
+    await link_check_job(conn, _config(), bot, link_b, catalog_rescan_state=rescan_state)
 
-    assert seen_sets[0] is seen_sets[1] is cycle_set
-    assert institute_id in cycle_set
+    assert seen_states[0] is seen_states[1] is rescan_state
+    assert institute_id in rescan_state
+
+
+def test_build_scheduler_shares_one_catalog_rescan_state_across_all_link_jobs(conn, shutdown_scheduler):
+    """Every link's check AND daily-send job of every institute must get
+    the identical rate-limit dict from a single build_scheduler call —
+    otherwise "one catalog rescan per institute per cycle" degenerates
+    into "one per link per call"."""
+    institute_id = _make_institute(conn)
+    link_a, _ = _make_link_and_group(conn, institute_id, pdf_url="a.pdf", name="A")
+    link_b, _ = _make_link_and_group(conn, institute_id, pdf_url="b.pdf", name="B")
+    bot = MagicMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+
+    scheduler = shutdown_scheduler(build_scheduler(conn, _config(), bot, holder))
+
+    states = [
+        scheduler.get_job(f"link_check_{link_a}").args[-1],
+        scheduler.get_job(f"link_check_{link_b}").args[-1],
+        scheduler.get_job(f"link_daily_send_{link_a}").args[-1],
+        scheduler.get_job(f"link_daily_send_{link_b}").args[-1],
+    ]
+    assert all(isinstance(state, dict) for state in states)
+    assert all(state is states[0] for state in states)
+
+
+@pytest.mark.asyncio
+async def test_sync_rate_limits_second_404_for_same_institute_through_scheduler_jobs(conn, shutdown_scheduler, monkeypatch):
+    """End-to-end over the REAL sync function: two different links of one
+    institute both 404 within one check interval -> exactly one catalog
+    rescan, because both scheduled jobs share the rate-limit dict."""
+    import schedule_bot.sync as sync_module
+
+    institute_id = _make_institute(conn, check_interval_minutes=60)
+    link_a, group_a = _make_link_and_group(conn, institute_id, pdf_url="https://example.com/a.pdf", name="A")
+    link_b, group_b = _make_link_and_group(conn, institute_id, pdf_url="https://example.com/b.pdf", name="B")
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    storage.upsert_member(conn, 222, group_b, joined_at="t")
+
+    monkeypatch.setattr(
+        sync_module, "_load_pdf_bytes", lambda source: (_ for _ in ()).throw(ConnectionError("404"))
+    )
+    refresh_calls = []
+    monkeypatch.setattr(
+        sync_module, "refresh_institute_catalog",
+        lambda conn_, institute, **kwargs: refresh_calls.append(institute.id),
+    )
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+    scheduler = shutdown_scheduler(build_scheduler(conn, _config(), bot, holder))
+
+    job_a = scheduler.get_job(f"link_check_{link_a}")
+    job_b = scheduler.get_job(f"link_check_{link_b}")
+    await job_a.func(*job_a.args)
+    await job_b.func(*job_b.args)
+    scheduler.shutdown(wait=False)  # bound to the pytest-asyncio loop; see note above
+
+    assert refresh_calls == [institute_id]

@@ -1,7 +1,13 @@
 import io
+import re
 from dataclasses import asdict, dataclass
 
 import pdfplumber
+
+# A body (lesson) row is identified by an actual time-range label
+# ("8.30-10.00", "13.40-15.10"); header rows carry either no label or a
+# caption like "Часы". Used to find the end of the header zone.
+_TIME_LABEL_RE = re.compile(r"^\s*\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2}")
 
 
 @dataclass
@@ -66,23 +72,45 @@ def find_group_column_index(rows: list[RawRow], group_name: str) -> tuple[int, i
     raise ValueError(f"Column for group {group_name!r} not found in table header")
 
 
-def _first_day_marker_index(rows: list[RawRow]) -> int:
+def _header_zone_end_index(rows: list[RawRow]) -> int:
+    """Index of the first BODY (lesson) row — i.e. the exclusive end of
+    the table's header zone.
+
+    `row.day_marker` alone cannot express this boundary: it is derived
+    from `cells[0] is not None`, and `cells[0]` (the day column) is
+    non-None both for the real header rows AND for the row where each
+    day's label first appears — which in the real fixture
+    (`tests/fixtures/schedule_sample.pdf`) is Monday's FIRST lesson row
+    (row index 2, time label "8.30-10.00"). Stopping at the first
+    `day_marker is False` row therefore left that lesson row inside the
+    "header zone", re-opening exactly the false-positive this zone exists
+    to prevent (a group name mentioned in lesson text, e.g.
+    "совм. с Б-А-301" — design spec 5.1).
+
+    The reliable marker of a body row is an actual time-range label
+    ("8.30-10.00"): header rows either have no time label at all or a
+    non-range caption ("Часы"). We stop at the first such row; the
+    `day_marker is False` condition is kept only as a secondary guard for
+    tables whose body rows carry no time label at all."""
     for index, row in enumerate(rows):
+        if row.time_label and _TIME_LABEL_RE.match(row.time_label):
+            return index
         if not row.day_marker:
             return index
     return len(rows)
 
 
 def find_header_column_index(rows: list[RawRow], group_name: str) -> tuple[int, int]:
-    """Like find_group_column_index, but the search is restricted to
-    rows[:first_day_marker_index] — the header zone. find_group_column_index
-    scans the WHOLE table and returns the first substring match anywhere,
-    which can land on a body row ("совм. с Б-А-301" in a lesson cell of
-    another group) instead of the actual header — fatal for header-crop
-    geometry (design spec, section 5.1). The same column index is valid
-    for the whole table (fixed column layout), so this is only a
-    narrower SEARCH, not a different RESULT shape."""
-    header_zone = rows[: _first_day_marker_index(rows)]
+    """Like find_group_column_index, but the search is restricted to the
+    header zone (`rows[:_header_zone_end_index(rows)]`).
+    find_group_column_index scans the WHOLE table and returns the first
+    substring match anywhere, which can land on a body row ("совм. с
+    Б-А-301" in a lesson cell of another group) instead of the actual
+    header — fatal for header-crop geometry (design spec, section 5.1).
+    The same column index is valid for the whole table (fixed column
+    layout), so this is only a narrower SEARCH, not a different RESULT
+    shape."""
+    header_zone = rows[: _header_zone_end_index(rows)]
     return find_group_column_index(header_zone, group_name)
 
 

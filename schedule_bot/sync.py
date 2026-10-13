@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ from schedule_bot.telegram_utils import SEND_PACING_SECONDS
 logger = logging.getLogger(__name__)
 
 Notifier = Callable[[int, str], Awaitable[None]]
+AdminNotifier = Callable[[str], Awaitable[None]]
 
 MAX_FETCH_ATTEMPTS = 3
 
@@ -91,9 +93,39 @@ def _fetch_and_parse_blocking(
             pass
 
 
+def _catalog_rescan_allowed(catalog_rescan_state: dict[int, float], institute) -> bool:
+    """Rate-limit the 404-reconnect catalog rescan to at most once per
+    institute per check cycle (design spec 3.3/3.4).
+
+    This is keyed by institute_id to a monotonic TIMESTAMP rather than a
+    boolean "already done this cycle" flag, because scheduling is
+    per-link and independent (spec 4.1): there is no single moment at
+    which a "cycle" starts or ends that any caller could use to clear a
+    flag. A timestamp makes "once per cycle" self-resetting and
+    well-defined — the next rescan is allowed once a full
+    `institute.check_interval_minutes` has elapsed, which is exactly the
+    period after which every link of the institute gets re-checked
+    anyway. The same dict must be shared by all scheduled jobs and by the
+    manual /refresh path (see main.py), or the limit is per-caller only.
+    """
+    try:
+        interval_minutes = int(institute.check_interval_minutes)
+    except (TypeError, ValueError):
+        interval_minutes = 60
+    min_gap_seconds = max(interval_minutes, 1) * 60
+
+    now = time.monotonic()
+    last = catalog_rescan_state.get(institute.id)
+    if last is not None and now - last < min_gap_seconds:
+        return False
+    catalog_rescan_state[institute.id] = now
+    return True
+
+
 async def sync_institute_link(
     conn, institute_link, institute, pdf_cache_dir: str, notify: Notifier,
-    *, catalog_refreshed_this_cycle: set[int],
+    *, catalog_rescan_state: dict[int, float],
+    notify_admin: AdminNotifier | None = None,
 ) -> list[SyncResult]:
     """Fetch + parse the link's PDF exactly once per call (deduplicated
     across however many groups are subscribed to it, design spec 3.1/3.2),
@@ -121,19 +153,34 @@ async def sync_institute_link(
     )
 
     if pdf_bytes is None:
-        # 404-style fallback: rate-limited to once per institute per
-        # scheduler cycle via the caller-owned catalog_refreshed_this_cycle
-        # set (design spec 3.3/3.4) — a dead link shouldn't trigger a full
-        # catalog re-scan once per subscribed link on every sync pass.
-        if institute.id not in catalog_refreshed_this_cycle:
-            catalog_refreshed_this_cycle.add(institute.id)
+        # 404-style fallback: rate-limited to once per institute per check
+        # interval via the caller-owned catalog_rescan_state dict (design
+        # spec 3.3/3.4) — a dead link shouldn't trigger a full catalog
+        # re-scan once per subscribed link on every sync pass.
+        if _catalog_rescan_allowed(catalog_rescan_state, institute):
+            # Alerts raised by the rescan (notably spec 1.3's "ссылка
+            # пропала из каталога, подписчиков затронуто: K") MUST be
+            # forwarded to the admin: this 404 -> rescan -> link gone path
+            # is the single most likely way that alert is ever produced,
+            # and it can never fire again later (the newly-stale diff only
+            # considers previously-live links).
+            catalog_alerts: list[str] = []
             try:
-                refresh_institute_catalog(conn, institute, notify_admin=lambda text: None)
+                await asyncio.to_thread(
+                    refresh_institute_catalog, conn, institute, notify_admin=catalog_alerts.append
+                )
             except Exception as refresh_error:
                 logger.warning(
                     "sync: catalog refresh fallback failed for institute %r: %s",
                     institute.name, refresh_error,
                 )
+            for alert_text in catalog_alerts:
+                logger.warning("sync: catalog rescan alert for institute %r: %s", institute.name, alert_text)
+                if notify_admin is not None:
+                    try:
+                        await notify_admin(alert_text)
+                    except Exception as notify_error:
+                        logger.warning("sync: failed to forward catalog alert to admin: %s", notify_error)
             refreshed_link = storage.get_institute_link(conn, institute_link.id)
             if refreshed_link is not None and refreshed_link.pdf_url != institute_link.pdf_url:
                 pdf_bytes, schedules, error = await asyncio.to_thread(

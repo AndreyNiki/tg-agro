@@ -1,3 +1,5 @@
+import asyncio
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -13,6 +15,7 @@ from schedule_bot.bot import (
 from schedule_bot.change_group_commands import _build_requests_messages, change_group_command
 from schedule_bot.classmates import classmates_command
 from schedule_bot.faq import faq_command
+from schedule_bot.group_links import refresh_institute_catalog
 from schedule_bot.group_commands import subscribe_command, unsubscribe_command
 from schedule_bot.report import _apply_report
 from schedule_bot.starosta_commands import starosta_command, votes_command
@@ -344,10 +347,16 @@ async def _handle_institute_scoped_pick(
         await query.message.reply_text("Отправьте новый интервал сканирования каталога в минутах:")
         return
     if action == "refreshinstitutelinks":
-        from schedule_bot.group_links import refresh_institute_catalog
-
         alerts = []
-        refresh_institute_catalog(conn, institute, notify_admin=alerts.append)
+        try:
+            # asyncio.to_thread + try/except mirror
+            # institute_commands.refresh_institute_links_command: the fetch
+            # is blocking (~15s) and an unreachable catalog page must not
+            # raise out of the callback handler.
+            await asyncio.to_thread(refresh_institute_catalog, conn, institute, notify_admin=alerts.append)
+        except Exception as error:
+            await query.message.reply_text(f"Сканирование каталога не удалось: {error}")
+            return
         context.bot_data["reschedule_institute_jobs"](institute_id)
         for text in alerts:
             await query.message.reply_text(text)

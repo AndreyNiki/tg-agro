@@ -146,7 +146,15 @@ def build_application(config: Config, conn) -> Application:
     # job'ы на уровне ссылки, не института" — locking stays at the link
     # level, never institute- or group-level.
     link_locks: dict[int, asyncio.Lock] = {}
-    catalog_refreshed_this_cycle: set[int] = set()
+    # institute_id -> time.monotonic() of that institute's last 404-triggered
+    # catalog rescan. ONE dict for the whole process: it is passed into
+    # build_scheduler (so every link_check_job/link_daily_send_job of every
+    # link shares it) AND used by the manual /refresh path below, so the
+    # "one catalog rescan per institute per check interval" limit holds
+    # across all of them. A timestamp (not a per-process "already done"
+    # set) is what makes the limit self-resetting — see
+    # sync._catalog_rescan_allowed.
+    catalog_rescan_state: dict[int, float] = {}
 
     async def sync_institute_link_fn(institute_link_id: int):
         institute_link = storage.get_institute_link(conn, institute_link_id)
@@ -157,11 +165,17 @@ def build_application(config: Config, conn) -> Application:
         async def notify(chat_id, text):
             await send_with_retry(lambda: application.bot.send_message(chat_id=chat_id, text=text))
 
+        async def notify_admin(text):
+            await send_with_retry(
+                lambda: application.bot.send_message(chat_id=config.admin_chat_id, text=text)
+            )
+
         lock = link_locks.setdefault(institute_link_id, asyncio.Lock())
         async with lock:
             return await sync_institute_link(
                 conn, institute_link, institute, config.pdf_cache_dir, notify,
-                catalog_refreshed_this_cycle=catalog_refreshed_this_cycle,
+                catalog_rescan_state=catalog_rescan_state,
+                notify_admin=notify_admin,
             )
 
     application.bot_data["sync_institute_link_fn"] = sync_institute_link_fn
@@ -171,12 +185,14 @@ def build_application(config: Config, conn) -> Application:
     def reschedule_institute_link_jobs_cb(institute_link_id: int) -> None:
         lock = link_locks.setdefault(institute_link_id, asyncio.Lock())
         reschedule_institute_link_jobs(
-            scheduler_holder["scheduler"], conn, config, application.bot, institute_link_id, week_formula_holder, lock
+            scheduler_holder["scheduler"], conn, config, application.bot, institute_link_id, week_formula_holder, lock,
+            catalog_rescan_state,
         )
 
     def reschedule_institute_jobs_cb(institute_id: int) -> None:
         reschedule_institute_jobs(
-            scheduler_holder["scheduler"], conn, config, application.bot, institute_id, week_formula_holder, link_locks
+            scheduler_holder["scheduler"], conn, config, application.bot, institute_id, week_formula_holder, link_locks,
+            catalog_rescan_state,
         )
 
     application.bot_data["reschedule_institute_link_jobs"] = reschedule_institute_link_jobs_cb
@@ -248,8 +264,12 @@ def build_application(config: Config, conn) -> Application:
     # Lock object a manual /refresh for that link will use — not a
     # separate, internally-created lock.
     scheduler_holder["scheduler"] = build_scheduler(
-        conn, config, application.bot, week_formula_holder, locks=link_locks
+        conn, config, application.bot, week_formula_holder, locks=link_locks,
+        catalog_rescan_state=catalog_rescan_state,
     )
+    # Exposed so tests (and any future consumer) can assert the scheduled
+    # jobs and the manual /refresh path really share ONE rate-limit dict.
+    application.bot_data["_catalog_rescan_state"] = catalog_rescan_state
     application.bot_data["_scheduler"] = scheduler_holder["scheduler"]
 
     return application

@@ -414,6 +414,60 @@ async def test_institute_scoped_pick_sets_pending_catalog_url_action(conn):
 
 
 @pytest.mark.asyncio
+async def test_menu_rescan_button_reports_unreachable_catalog_instead_of_raising(conn, monkeypatch):
+    """The rescan button had no try/except (unlike
+    /refresh_institute_links), so an unreachable catalog page crashed the
+    callback handler with an unhandled exception."""
+    import schedule_bot.menu as menu_module
+
+    institute_id = _make_institute(conn)
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:refreshinstitutelinks:{institute_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+    context.bot_data["reschedule_institute_jobs"] = MagicMock()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("catalog page unreachable")
+
+    monkeypatch.setattr(menu_module, "refresh_institute_catalog", boom)
+
+    await menu_callback(update, context)  # must not raise
+
+    texts = [call.args[0] for call in update.callback_query.message.reply_text.await_args_list]
+    assert any("не удалось" in text for text in texts)
+    context.bot_data["reschedule_institute_jobs"].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_menu_rescan_button_runs_blocking_fetch_off_the_event_loop(conn, monkeypatch):
+    """Spec 3.2: with concurrent_updates(True), the ~15s blocking catalog
+    fetch must not run on the event loop thread."""
+    import threading
+
+    import schedule_bot.menu as menu_module
+
+    institute_id = _make_institute(conn)
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:refreshinstitutelinks:{institute_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+    context.bot_data["reschedule_institute_jobs"] = MagicMock()
+
+    seen_threads = []
+    monkeypatch.setattr(
+        menu_module, "refresh_institute_catalog",
+        lambda *a, **k: seen_threads.append(threading.current_thread()),
+    )
+
+    await menu_callback(update, context)
+
+    assert seen_threads and seen_threads[0] is not threading.main_thread()
+
+
+@pytest.mark.asyncio
 async def test_pending_action_followup_applies_institute_catalog_url(conn):
     institute_id = _make_institute(conn)
     context = make_context(conn)

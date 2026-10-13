@@ -128,6 +128,38 @@ def test_find_header_column_index_raises_when_not_in_header_zone():
         find_header_column_index(rows, "Б-А-301")
 
 
+def test_header_zone_excludes_first_day_row_that_is_also_a_lesson_row():
+    """Real-fixture shape (schedule_sample.pdf rows 0-2): the row carrying
+    the FIRST day's label also carries that day's first lesson, so it has
+    day_marker=True. The header zone must still end BEFORE it, otherwise a
+    group name mentioned in that row's lesson text would be matched as a
+    header (design spec 5.1)."""
+    rows = [
+        day_row(None, [Cell("СОГЛАСОВАНО", 0, 30), None, None, None], day_marker=True, y0=0, y1=10),
+        day_row("Часы", [Cell("Дни", 0, 30), Cell("Часы", 30, 60), Cell("Б-Эв-101", 60, 300), Cell("Б-Мв-101", 300, 500)], day_marker=True, y0=10, y1=20),
+        # Monday's label AND Monday's first lesson in one row -> day_marker=True
+        day_row("8.30-10.00", [Cell("Понедельник", 0, 30), Cell("8.30-10.00", 30, 60), Cell("совм. с Б-А-301", 60, 300), Cell("Матан", 300, 500)], day_marker=True, y0=20, y1=30),
+    ]
+    # Real header rows still resolve normally.
+    assert find_header_column_index(rows, "Б-Мв-101") == (1, 3)
+    # "Б-А-301" exists ONLY in the lesson text of that first day row, which
+    # has day_marker=True — the old `first row with day_marker is False`
+    # boundary kept it inside the header zone and happily returned (2, 2).
+    with pytest.raises(ValueError):
+        find_header_column_index(rows, "Б-А-301")
+
+
+def test_header_zone_end_index_stops_at_first_time_range_row():
+    from schedule_bot.pdf_parser import _header_zone_end_index
+
+    rows = [
+        day_row(None, [Cell("hdr", 0, 30)], day_marker=True),
+        day_row("Часы", [Cell("Дни", 0, 30)], day_marker=True),
+        day_row("8.30-10.00", [Cell("Пн", 0, 30)], day_marker=True),
+    ]
+    assert _header_zone_end_index(rows) == 2
+
+
 def test_day_schedule_records_time_and_group_column_x_bounds():
     rows = [
         day_row(None, [Cell("Пн", 0, 30), None, None], day_marker=True, y0=0, y1=10),

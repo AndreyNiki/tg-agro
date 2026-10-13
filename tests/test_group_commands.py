@@ -117,6 +117,157 @@ async def test_validate_is_skipped_for_already_verified_group(conn):
     sync_fn.assert_not_awaited()  # already verified -> no re-validation, no forced immediate sync
 
 
+def _make_select_update(institute_id, group_id, chat_id):
+    update = MagicMock()
+    query = MagicMock()
+    query.answer = AsyncMock()
+    query.data = f"grp:select:{institute_id}:{group_id}"
+    query.message.reply_text = AsyncMock()
+    update.callback_query = query
+    update.effective_chat.id = chat_id
+    update.effective_user.username = "tester"
+    update.effective_user.full_name = "Tester Testovich"
+    return update, query
+
+
+@pytest.mark.asyncio
+async def test_first_subscribe_populates_active_version_via_real_sync(conn, tmp_path):
+    """Regression for the "first-subscriber sync is a guaranteed no-op" bug:
+    sync_institute_link only syncs links whose groups have at least one
+    member, so if upsert_member runs AFTER the immediate first sync, that
+    sync returns early without even fetching the PDF. Deliberately uses the
+    REAL sync_institute_link (not an AsyncMock whose assert_awaited_once
+    passes either way) and asserts the observable outcome: an active
+    schedule version exists for the group right after subscribing."""
+    from schedule_bot.group_commands import group_select_callback
+    from schedule_bot.sync import sync_institute_link
+
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link(conn, institute_id, names=("Б-Мв-101",))
+    group_id = group_ids[0]
+    chat_id = 4242
+
+    async def real_sync_fn(institute_link_id):
+        return await sync_institute_link(
+            conn,
+            storage.get_institute_link(conn, institute_link_id),
+            storage.get_institute(conn, institute_id),
+            str(tmp_path),
+            AsyncMock(),
+            catalog_rescan_state={},
+        )
+
+    update, query = _make_select_update(institute_id, group_id, chat_id)
+    context = MagicMock()
+    context.bot = MagicMock(send_message=AsyncMock())
+    context.bot_data = {
+        "conn": conn,
+        "admin_chat_id": 999,
+        "config": MagicMock(pdf_cache_dir=str(tmp_path)),
+        "sync_institute_link_fn": real_sync_fn,
+    }
+
+    await group_select_callback(update, context)
+
+    assert storage.get_member(conn, chat_id) is not None
+    assert storage.get_group(conn, group_id).is_verified == 1
+    assert storage.get_active_version(conn, group_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_subscribe_to_group_of_stale_link_makes_no_network_call_and_no_admin_alert(conn, monkeypatch, tmp_path):
+    """Binding global constraint: "Устаревшие ссылки никогда не триггерят
+    сетевых запросов." Staleness is routine (the admin already got exactly
+    one alert when the link vanished from the catalog, spec 1.3), so this
+    path must neither fetch nor alert."""
+    import schedule_bot.group_commands as group_commands_module
+    from schedule_bot.group_commands import group_select_callback
+
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link(conn, institute_id, names=("Б-Мв-101",))
+    storage.mark_stale_links_not_in(conn, institute_id, confirmed_link_ids=[])
+
+    def fail(*args, **kwargs):
+        raise AssertionError("stale link must never be fetched")
+
+    monkeypatch.setattr(group_commands_module, "_load_pdf_bytes", fail)
+
+    update, query = _make_select_update(institute_id, group_ids[0], 777)
+    sync_fn = AsyncMock(return_value=[])
+    context = MagicMock()
+    context.bot = MagicMock(send_message=AsyncMock())
+    context.bot_data = {
+        "conn": conn,
+        "admin_chat_id": 999,
+        "config": MagicMock(pdf_cache_dir=str(tmp_path)),
+        "sync_institute_link_fn": sync_fn,
+    }
+
+    await group_select_callback(update, context)
+
+    context.bot.send_message.assert_not_awaited()
+    sync_fn.assert_not_awaited()
+    assert storage.get_member(conn, 777) is None
+    assert storage.get_group(conn, group_ids[0]).is_verified == 0
+    assert "недоступна" in query.message.reply_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_validate_refuses_stale_link_without_fetching(conn, monkeypatch):
+    import schedule_bot.group_commands as group_commands_module
+
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link(conn, institute_id, names=("Б-Мв-101",))
+    storage.mark_stale_links_not_in(conn, institute_id, confirmed_link_ids=[])
+    group = storage.get_group(conn, group_ids[0])
+
+    monkeypatch.setattr(
+        group_commands_module, "_load_pdf_bytes",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not fetch for stale link")),
+    )
+    notify_admin = AsyncMock()
+    sync_fn = AsyncMock(return_value=[])
+
+    ok = await validate_and_sync_group_on_first_subscribe(conn, group, "/tmp/cache", notify_admin, sync_fn)
+
+    assert ok is False
+    notify_admin.assert_not_awaited()
+    sync_fn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_validate_rejects_group_found_only_in_lesson_body_text(conn, monkeypatch):
+    """Validation must use the SAME column search as the sync pipeline
+    (find_header_column_index). With the old whole-table
+    find_group_column_index, a name appearing only in lesson body text
+    ("совм. с Б-А-301") was accepted (is_verified=1) and then failed every
+    subsequent sync forever."""
+    import schedule_bot.group_commands as group_commands_module
+    from schedule_bot.pdf_parser import Cell, RawRow
+
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link(conn, institute_id, names=("Б-А-301",))
+    group = storage.get_group(conn, group_ids[0])
+
+    rows = [
+        RawRow(day_marker=True, time_label="Часы", y0=0, y1=10,
+               cells=[Cell("Дни", 0, 30), Cell("Часы", 30, 60), Cell("Б-Мв-101", 60, 300)]),
+        RawRow(day_marker=True, time_label="8.30-10.00", y0=10, y1=20,
+               cells=[Cell("Пн", 0, 30), Cell("8.30-10.00", 30, 60), Cell("лек. Матан совм. с Б-А-301", 60, 300)]),
+    ]
+    monkeypatch.setattr(group_commands_module, "_load_pdf_bytes", lambda source: b"pdf")
+    monkeypatch.setattr(group_commands_module, "extract_raw_rows", lambda path: (rows, (0, 0, 300, 20)))
+
+    notify_admin = AsyncMock()
+    sync_fn = AsyncMock(return_value=[])
+    ok = await validate_and_sync_group_on_first_subscribe(conn, group, "/tmp/cache", notify_admin, sync_fn)
+
+    assert ok is False
+    assert storage.get_group(conn, group.id).is_verified == -1
+    notify_admin.assert_awaited_once()
+    sync_fn.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_validate_failure_excludes_group_from_picker_and_does_not_create_membership(conn):
     """Binding review focus: when the first subscriber triggers real-PDF

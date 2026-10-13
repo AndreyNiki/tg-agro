@@ -32,7 +32,7 @@ async def _notify(bot, chat_id: int, text: str) -> None:
 
 async def link_check_job(
     conn, config, bot, institute_link_id: int, lock: asyncio.Lock | None = None,
-    catalog_refreshed_this_cycle: set | None = None,
+    catalog_rescan_state: dict | None = None,
 ) -> None:
     institute_link = storage.get_institute_link(conn, institute_link_id)
     if institute_link is None:
@@ -42,13 +42,18 @@ async def link_check_job(
     if institute is None:
         return
 
-    cycle_set = catalog_refreshed_this_cycle if catalog_refreshed_this_cycle is not None else set()
+    # Must be the dict owned by build_scheduler/main.py and shared by every
+    # job of every link, otherwise the 404-rescan rate limit degenerates
+    # into "once per link per call", i.e. no limit at all. The local
+    # fallback below only exists for direct unit-test calls.
+    rescan_state = catalog_rescan_state if catalog_rescan_state is not None else {}
 
     async def _do_sync():
         return await sync_institute_link(
             conn, institute_link, institute, config.pdf_cache_dir,
             lambda chat_id, text: _notify(bot, chat_id, text),
-            catalog_refreshed_this_cycle=cycle_set,
+            catalog_rescan_state=rescan_state,
+            notify_admin=lambda text: _notify(bot, config.admin_chat_id, text),
         )
 
     logger.info("scheduler: link_check_job starting for link id=%s", institute_link_id)
@@ -73,6 +78,7 @@ async def link_check_job(
 
 async def link_daily_send_job(
     conn, config, bot, institute_link_id: int, week_formula_holder: WeekFormulaHolder, lock: asyncio.Lock | None = None,
+    catalog_rescan_state: dict | None = None,
 ) -> None:
     institute_link = storage.get_institute_link(conn, institute_link_id)
     if institute_link is None:
@@ -82,10 +88,14 @@ async def link_daily_send_job(
     if institute is None:
         return
 
+    rescan_state = catalog_rescan_state if catalog_rescan_state is not None else {}
+
     async def _do_sync():
         return await sync_institute_link(
             conn, institute_link, institute, config.pdf_cache_dir,
-            lambda chat_id, text: _notify(bot, chat_id, text), catalog_refreshed_this_cycle=set(),
+            lambda chat_id, text: _notify(bot, chat_id, text),
+            catalog_rescan_state=rescan_state,
+            notify_admin=lambda text: _notify(bot, config.admin_chat_id, text),
         )
 
     try:
@@ -146,7 +156,7 @@ async def link_daily_send_job(
             await asyncio.sleep(SEND_PACING_SECONDS)
 
 
-async def institute_catalog_refresh_job(conn, config, bot, institute_id: int) -> None:
+async def institute_catalog_refresh_job(conn, config, bot, institute_id: int, reschedule_links=None) -> None:
     institute = storage.get_institute(conn, institute_id)
     if institute is None:
         return
@@ -157,6 +167,19 @@ async def institute_catalog_refresh_job(conn, config, bot, institute_id: int) ->
     except Exception as error:
         logger.warning("scheduler: institute_catalog_refresh_job failed for institute %r: %s", institute.name, error)
         return
+
+    # A link discovered by THIS background scan has no link_check_*/
+    # link_daily_send_* jobs yet; without this call it would stay unsynced
+    # until the process restarts (the manual rescan paths —
+    # /refresh_institute_links and the menu button — already reschedule).
+    if reschedule_links is not None:
+        try:
+            reschedule_links(institute_id)
+        except Exception as error:
+            logger.warning(
+                "scheduler: institute_catalog_refresh_job failed to (re)schedule link jobs for institute %r: %s",
+                institute.name, error,
+            )
 
     for text in alerts:
         try:
@@ -204,15 +227,24 @@ def _safe_interval_minutes(value: int | str, default: int) -> int:
         return int(default)
 
 
-def schedule_link_jobs(scheduler, conn, config, bot, institute_link, institute, week_formula_holder, lock) -> None:
+def schedule_link_jobs(
+    scheduler, conn, config, bot, institute_link, institute, week_formula_holder, lock,
+    catalog_rescan_state: dict | None = None,
+) -> None:
     check_id = f"link_check_{institute_link.id}"
     daily_id = f"link_daily_send_{institute_link.id}"
+
+    # ONE shared dict for every job of every link (and for main.py's manual
+    # /refresh path) — passing None/a fresh set here is what made the
+    # 404-rescan rate limit a no-op.
+    if catalog_rescan_state is None:
+        catalog_rescan_state = {}
 
     hour, minute = _safe_hh_mm(institute.send_time, config.default_daily_send_time)
     scheduler.add_job(
         link_daily_send_job,
         CronTrigger(hour=hour, minute=minute, timezone=institute.timezone),
-        args=[conn, config, bot, institute_link.id, week_formula_holder, lock],
+        args=[conn, config, bot, institute_link.id, week_formula_holder, lock, catalog_rescan_state],
         id=daily_id,
         replace_existing=True,
     )
@@ -221,57 +253,104 @@ def schedule_link_jobs(scheduler, conn, config, bot, institute_link, institute, 
     scheduler.add_job(
         link_check_job,
         IntervalTrigger(minutes=interval_minutes),
-        args=[conn, config, bot, institute_link.id, lock, None],
+        args=[conn, config, bot, institute_link.id, lock, catalog_rescan_state],
         id=check_id,
         replace_existing=True,
     )
 
 
-def schedule_institute_catalog_job(scheduler, conn, config, bot, institute) -> None:
+def schedule_institute_catalog_job(scheduler, conn, config, bot, institute, reschedule_links=None) -> None:
     interval_minutes = _safe_interval_minutes(
         institute.catalog_refresh_interval_minutes, config.default_catalog_refresh_interval_minutes
     )
     scheduler.add_job(
         institute_catalog_refresh_job,
         IntervalTrigger(minutes=interval_minutes),
-        args=[conn, config, bot, institute.id],
+        args=[conn, config, bot, institute.id, reschedule_links],
         id=f"institute_catalog_refresh_{institute.id}",
         replace_existing=True,
     )
 
 
-def reschedule_institute_link_jobs(scheduler, conn, config, bot, institute_link_id: int, week_formula_holder, lock) -> None:
+def make_links_rescheduler(scheduler, conn, config, bot, week_formula_holder, locks: dict, catalog_rescan_state: dict):
+    """Callback handed to institute_catalog_refresh_job so a link found by
+    the BACKGROUND catalog scan immediately gets its own
+    link_check_*/link_daily_send_* jobs, wired to the same per-link Lock
+    and the same shared catalog_rescan_state as everything else."""
+
+    def reschedule_links(institute_id: int) -> None:
+        institute = storage.get_institute(conn, institute_id)
+        if institute is None:
+            return
+        for institute_link in storage.list_institute_links(conn, institute_id, include_stale=False):
+            link_lock = locks.setdefault(institute_link.id, asyncio.Lock())
+            schedule_link_jobs(
+                scheduler, conn, config, bot, institute_link, institute, week_formula_holder, link_lock,
+                catalog_rescan_state,
+            )
+
+    return reschedule_links
+
+
+def reschedule_institute_link_jobs(
+    scheduler, conn, config, bot, institute_link_id: int, week_formula_holder, lock,
+    catalog_rescan_state: dict | None = None,
+) -> None:
     institute_link = storage.get_institute_link(conn, institute_link_id)
     if institute_link is None:
         return
     institute = storage.get_institute(conn, institute_link.institute_id)
     if institute is None:
         return
-    schedule_link_jobs(scheduler, conn, config, bot, institute_link, institute, week_formula_holder, lock)
+    schedule_link_jobs(
+        scheduler, conn, config, bot, institute_link, institute, week_formula_holder, lock, catalog_rescan_state
+    )
 
 
-def reschedule_institute_jobs(scheduler, conn, config, bot, institute_id: int, week_formula_holder, locks: dict) -> None:
+def reschedule_institute_jobs(
+    scheduler, conn, config, bot, institute_id: int, week_formula_holder, locks: dict,
+    catalog_rescan_state: dict | None = None,
+) -> None:
     institute = storage.get_institute(conn, institute_id)
     if institute is None:
         return
-    schedule_institute_catalog_job(scheduler, conn, config, bot, institute)
+    if catalog_rescan_state is None:
+        catalog_rescan_state = {}
+    schedule_institute_catalog_job(
+        scheduler, conn, config, bot, institute,
+        make_links_rescheduler(scheduler, conn, config, bot, week_formula_holder, locks, catalog_rescan_state),
+    )
     for institute_link in storage.list_institute_links(conn, institute_id, include_stale=False):
         link_lock = locks.setdefault(institute_link.id, asyncio.Lock())
-        schedule_link_jobs(scheduler, conn, config, bot, institute_link, institute, week_formula_holder, link_lock)
+        schedule_link_jobs(
+            scheduler, conn, config, bot, institute_link, institute, week_formula_holder, link_lock,
+            catalog_rescan_state,
+        )
 
 
 
-def build_scheduler(conn, config, bot, week_formula_holder: WeekFormulaHolder, locks: dict | None = None) -> AsyncIOScheduler:
+def build_scheduler(
+    conn, config, bot, week_formula_holder: WeekFormulaHolder, locks: dict | None = None,
+    catalog_rescan_state: dict | None = None,
+) -> AsyncIOScheduler:
     if locks is None:
         locks = {}
+    if catalog_rescan_state is None:
+        catalog_rescan_state = {}
 
     scheduler = AsyncIOScheduler(timezone=config.default_timezone)
 
+    reschedule_links = make_links_rescheduler(
+        scheduler, conn, config, bot, week_formula_holder, locks, catalog_rescan_state
+    )
     for institute in storage.list_institutes(conn):
-        schedule_institute_catalog_job(scheduler, conn, config, bot, institute)
+        schedule_institute_catalog_job(scheduler, conn, config, bot, institute, reschedule_links)
         for institute_link in storage.list_institute_links(conn, institute.id, include_stale=False):
             link_lock = locks.setdefault(institute_link.id, asyncio.Lock())
-            schedule_link_jobs(scheduler, conn, config, bot, institute_link, institute, week_formula_holder, link_lock)
+            schedule_link_jobs(
+                scheduler, conn, config, bot, institute_link, institute, week_formula_holder, link_lock,
+                catalog_rescan_state,
+            )
 
     scheduler.add_job(
         weekly_weektype_refresh_job,
