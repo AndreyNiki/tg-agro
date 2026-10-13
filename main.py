@@ -79,6 +79,7 @@ from schedule_bot.starosta_commands import (
     starosta_command,
     votes_command,
 )
+from schedule_bot.legacy_migration import run_legacy_migration_if_configured
 from schedule_bot.sync import sync_institute_link
 from schedule_bot.telegram_utils import send_with_retry
 from schedule_bot.weektype import WeekFormula, fetch_week_formula, load_week_formula, save_week_formula
@@ -137,6 +138,13 @@ def build_application(config: Config, conn) -> Application:
             except Exception as error:
                 logger.warning("main: failed to sync visible commands for chat_id=%s: %s", chat_id, error)
         await _backfill_member_profiles(conn, app.bot)
+
+        async def _notify_admin(text: str) -> None:
+            await send_with_retry(lambda: app.bot.send_message(chat_id=config.admin_chat_id, text=text))
+
+        await run_legacy_migration_if_configured(
+            conn, config, _notify_admin, sync_institute_link_fn, reschedule_institute_jobs_cb,
+        )
 
     application = (
         Application.builder()

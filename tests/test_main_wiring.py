@@ -578,3 +578,59 @@ def test_build_application_registers_report_and_faq_commands(conn, config, monke
     assert {"report", "faq"}.issubset(command_names)
 
     application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_post_init_runs_legacy_migration_when_configured(conn, config, monkeypatch):
+    import main as main_module
+
+    config.legacy_migration_catalog_url = "https://example.com/institut"
+    config.legacy_migration_institute_name = "Институт агробизнеса"
+    config.legacy_migration_group_name = "Б-Мв-101"
+
+    _patch_week_formula(monkeypatch)
+    called_with = {}
+
+    async def fake_migration(conn_, config_, notify_admin, sync_fn, reschedule):
+        called_with["conn"] = conn_
+        called_with["config"] = config_
+        called_with["notify_admin"] = notify_admin
+        called_with["sync_fn"] = sync_fn
+        called_with["reschedule"] = reschedule
+
+    monkeypatch.setattr(main_module, "run_legacy_migration_if_configured", fake_migration)
+
+    # application.bot is a real (frozen) ExtBot instance — TelegramObject
+    # forbids setting instance attributes directly once frozen, so patch
+    # the methods at the class level instead (monkeypatch auto-reverts).
+    application = main_module.build_application(config, conn)
+    monkeypatch.setattr(type(application.bot), "get_chat", AsyncMock(return_value=MagicMock(username=None, full_name=None)))
+    monkeypatch.setattr(type(application.bot), "set_my_commands", AsyncMock(return_value=True))
+
+    await application.post_init(application)
+
+    assert called_with["conn"] is conn
+    assert called_with["config"] is config
+    assert called_with["sync_fn"] is application.bot_data["sync_institute_link_fn"]
+    assert called_with["reschedule"] is application.bot_data["reschedule_institute_jobs"]
+
+    application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_post_init_skips_legacy_migration_when_not_configured(conn, config, monkeypatch):
+    import main as main_module
+
+    _patch_week_formula(monkeypatch)
+    migration_mock = AsyncMock()
+    monkeypatch.setattr(main_module, "run_legacy_migration_if_configured", migration_mock)
+
+    application = main_module.build_application(config, conn)
+    monkeypatch.setattr(type(application.bot), "get_chat", AsyncMock(return_value=MagicMock(username=None, full_name=None)))
+    monkeypatch.setattr(type(application.bot), "set_my_commands", AsyncMock(return_value=True))
+
+    await application.post_init(application)
+
+    migration_mock.assert_awaited_once()  # still called — it's the function's own job to no-op
+
+    application.bot_data["_scheduler"].shutdown(wait=False)
