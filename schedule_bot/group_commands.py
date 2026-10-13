@@ -22,7 +22,7 @@ INSTITUTE_SELECT_PREFIX = "inst:select:"
 INSTITUTE_PAGE_PREFIX = "inst:page:"
 SELECT_PREFIX = "grp:select:"
 PAGE_PREFIX = "grp:page:"
-INSTITUTE_REQUEST_PREFIX = "grpreq:new:"
+GROUP_REQUEST_PREFIX = "grpreq:new:"
 
 INSTITUTE_SELECT_CALLBACK_PATTERN = r"^inst:select:\d+$"
 INSTITUTE_PAGE_CALLBACK_PATTERN = r"^inst:page:\d+$"
@@ -82,7 +82,7 @@ def build_group_picker_keyboard(conn, institute_id: int, page: int = 0) -> Inlin
         nav_row.append(InlineKeyboardButton("Вперёд »", callback_data=f"{PAGE_PREFIX}{institute_id}:{page + 1}"))
     if nav_row:
         rows.append(nav_row)
-    rows.append([InlineKeyboardButton("➕ Моей группы нет", callback_data=f"{INSTITUTE_REQUEST_PREFIX}{institute_id}")])
+    rows.append([InlineKeyboardButton("➕ Моей группы нет", callback_data=f"{GROUP_REQUEST_PREFIX}{institute_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -129,7 +129,7 @@ async def institute_request_start_callback(update: Update, context: ContextTypes
 async def group_request_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    institute_id = int(query.data.removeprefix(INSTITUTE_REQUEST_PREFIX))
+    institute_id = int(query.data.removeprefix(GROUP_REQUEST_PREFIX))
     context.user_data["pending_menu_action"] = {"action": "new_group_text", "institute_id": institute_id}
     await query.message.reply_text("Опишите вашу группу (точное название, форма обучения и т.п.):")
 

@@ -150,6 +150,20 @@ def _can_decide(caller_chat_id: int, target_group, admin_chat_id: int) -> bool:
     return is_admin_caller or is_target_starosta
 
 
+def build_info_decision_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    """Shared by report.py and menu.py's new_institute/new_group dialogs so
+    the callback_data format for kind != 'group_change' requests can never
+    drift from what change_request_approve/reject_callback expect."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Решено", callback_data=f"chgreq:approve:{request_id}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"chgreq:reject:{request_id}"),
+            ]
+        ]
+    )
+
+
 _INFO_REQUEST_NOTIFICATION_TEXT = {
     ("new_institute", "approved"): "Ваша заявка на добавление института рассмотрена.",
     ("new_institute", "rejected"): "Ваша заявка на добавление института отклонена.",
@@ -324,14 +338,7 @@ def _build_all_requests_messages(conn) -> list[tuple[str, "InlineKeyboardMarkup"
         if request.kind != "group_change":
             requester = storage.get_member(conn, request.chat_id)
             label = elections.format_candidate_label(requester) if requester is not None else "Неизвестный"
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton("✅ Решено", callback_data=f"chgreq:approve:{request.id}"),
-                        InlineKeyboardButton("❌ Отклонить", callback_data=f"chgreq:reject:{request.id}"),
-                    ]
-                ]
-            )
+            keyboard = build_info_decision_keyboard(request.id)
             kind_label = _INFO_REQUEST_KIND_LABEL[request.kind]
             entries.append((f"Заявка ({kind_label}) от {label}:\n{request.request_text}", keyboard))
             continue

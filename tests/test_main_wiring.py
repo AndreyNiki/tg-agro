@@ -117,6 +117,27 @@ def test_build_application_registers_all_expected_handlers(conn, config, monkeyp
     assert "set_check_interval" not in command_names
 
 
+def test_build_application_registers_missing_institute_and_group_callbacks(conn, config, monkeypatch):
+    from schedule_bot.group_commands import group_request_start_callback, institute_request_start_callback
+
+    _patch_week_formula(monkeypatch)
+
+    application = build_application(config, conn)
+
+    callback_handlers = [
+        handler
+        for handlers in application.handlers.values()
+        for handler in handlers
+        if hasattr(handler, "pattern") and handler.pattern is not None
+    ]
+
+    institute_matches = [h for h in callback_handlers if h.pattern.match("instreq:new")]
+    assert any(h.callback is institute_request_start_callback for h in institute_matches)
+
+    group_matches = [h for h in callback_handlers if h.pattern.match("grpreq:new:1")]
+    assert any(h.callback is group_request_start_callback for h in group_matches)
+
+
 def test_build_application_seeds_only_weektype_url_default(conn, config, monkeypatch):
     _patch_week_formula(monkeypatch)
 

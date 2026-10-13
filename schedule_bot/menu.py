@@ -19,6 +19,7 @@ from schedule_bot.bot import (
 from schedule_bot.change_group_commands import (
     _build_all_requests_messages,
     _build_requests_messages,
+    build_info_decision_keyboard,
     change_group_command,
 )
 from schedule_bot.classmates import classmates_command
@@ -36,14 +37,7 @@ ROOT_CALLBACK_DATA = "menu:root:_"
 
 
 async def _notify_admin_of_info_request(context, request_id: int, kind_label: str, request_text: str) -> None:
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("✅ Решено", callback_data=f"chgreq:approve:{request_id}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"chgreq:reject:{request_id}"),
-            ]
-        ]
-    )
+    keyboard = build_info_decision_keyboard(request_id)
     try:
         await send_with_retry(
             lambda: context.bot.send_message(
@@ -493,11 +487,12 @@ async def pending_action_followup(update, context) -> None:
     if action == "new_institute_url":
         name = pending["name"]
         url = "—" if value.strip() == "-" else value
+        request_text = f"Институт: {name}\nURL каталога: {url}"
         request_id = storage.create_group_change_request(
             conn, update.effective_chat.id, None, None, datetime.now(timezone.utc).isoformat(),
-            kind="new_institute", request_text=f"Институт: {name}\nURL каталога: {url}",
+            kind="new_institute", request_text=request_text,
         )
-        await _notify_admin_of_info_request(context, request_id, "добавление института", f"Институт: {name}\nURL каталога: {url}")
+        await _notify_admin_of_info_request(context, request_id, "добавление института", request_text)
         await update.message.reply_text("Заявка отправлена, администратор её рассмотрит.")
         return
 
