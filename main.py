@@ -101,6 +101,30 @@ class _LiveWeekFormula:
         return self._holder.formula.compute(on_date)
 
 
+async def _global_error_handler(update, context) -> None:
+    logger.exception("main: unhandled exception while processing update %r", update, exc_info=context.error)
+    config = context.application.bot_data.get("config")
+    if config is None:
+        return
+    chat_id = update.effective_chat.id if getattr(update, "effective_chat", None) else "?"
+    try:
+        await send_with_retry(
+            lambda: context.application.bot.send_message(
+                chat_id=config.admin_chat_id,
+                text=f"Необработанная ошибка при обработке апдейта (chat_id={chat_id}): {context.error}",
+            )
+        )
+    except Exception:
+        logger.exception("main: failed to notify admin about unhandled exception")
+
+    effective_message = getattr(update, "effective_message", None)
+    if effective_message is not None:
+        try:
+            await effective_message.reply_text("Что-то сломалось при обработке запроса, попробуйте позже.")
+        except Exception:
+            logger.exception("main: failed to notify user about unhandled exception")
+
+
 async def _backfill_member_profiles(conn, bot) -> None:
     for chat_id in storage.list_members_missing_profile(conn):
         try:
@@ -160,6 +184,7 @@ def build_application(config: Config, conn) -> Application:
         .concurrent_updates(True)
         .build()
     )
+    application.add_error_handler(_global_error_handler)
     application.bot_data["conn"] = conn
     application.bot_data["config"] = config
     application.bot_data["admin_chat_id"] = config.admin_chat_id

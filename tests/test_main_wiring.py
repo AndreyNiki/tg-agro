@@ -680,3 +680,35 @@ async def test_post_init_survives_legacy_migration_exception(conn, config, monke
     await application.post_init(application)  # must not raise
 
     application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_global_error_handler_notifies_admin_and_logs(conn, config, monkeypatch, caplog):
+    import logging
+
+    from telegram.ext import ContextTypes
+
+    _patch_week_formula(monkeypatch)
+    app = build_application(config, conn)
+    try:
+        monkeypatch.setattr(type(app.bot), "send_message", AsyncMock())
+        context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+        context.bot = app.bot
+        context.application = app
+        context.error = ValueError("boom")
+        update = MagicMock()
+        update.effective_chat.id = 555
+        update.effective_message = None
+
+        handlers = list(app.error_handlers) if hasattr(app, "error_handlers") else []
+        assert handlers, "no error handler registered on Application"
+
+        with caplog.at_level(logging.ERROR):
+            await handlers[0](update, context)
+
+        app.bot.send_message.assert_awaited()
+        _, kwargs = app.bot.send_message.call_args
+        assert kwargs["chat_id"] == 999
+        assert "boom" in kwargs["text"] or "ValueError" in kwargs["text"]
+    finally:
+        app.bot_data["_scheduler"].shutdown(wait=False)
