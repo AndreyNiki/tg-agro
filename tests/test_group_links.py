@@ -119,3 +119,49 @@ def test_expand_group_names_returns_empty_for_leading_number_with_no_prefix():
 
 def test_expand_group_names_ignores_surrounding_whitespace_around_commas():
     assert expand_group_names(" Б-А-301 , 302 ") == ["Б-А-301", "Б-А-302"]
+
+
+from schedule_bot.group_links import list_form_of_study_links
+
+_FORM_NAV_HTML = """
+<html><body>
+<a href="novosti">Новости</a>
+<a href="ochnaya-forma-obucheniya">Очная форма обучения</a>
+<a href="ochno-zaochnaya-forma-obucheniya">Очно-заочная форма обучения</a>
+<a href="zaochnaya-forma-obucheniya">Заочная форма обучения</a>
+</body></html>
+"""
+
+
+def test_list_form_of_study_links_finds_all_three_and_ignores_other_links():
+    links = list_form_of_study_links(_FORM_NAV_HTML, "https://example.com/institut")
+    assert links == [
+        ("https://example.com/ochnaya-forma-obucheniya", "Очная форма обучения"),
+        ("https://example.com/ochno-zaochnaya-forma-obucheniya", "Очно-заочная форма обучения"),
+        ("https://example.com/zaochnaya-forma-obucheniya", "Заочная форма обучения"),
+    ]
+
+
+def test_list_form_of_study_links_returns_empty_when_none_present():
+    html = '<a href="novosti">Новости</a>'
+    assert list_form_of_study_links(html, "https://example.com/institut") == []
+
+
+def test_list_form_of_study_links_is_case_insensitive_on_label():
+    html = '<a href="x">ОЧНАЯ ФОРМА ОБУЧЕНИЯ</a>'
+    assert list_form_of_study_links(html, "https://example.com/institut") == [
+        ("https://example.com/x", "ОЧНАЯ ФОРМА ОБУЧЕНИЯ")
+    ]
+
+
+def test_list_form_of_study_links_resolves_relative_href_against_base_url():
+    html = '<a href="/abs/path">Заочная форма обучения</a>'
+    links = list_form_of_study_links(html, "https://example.com/deep/institut")
+    assert links == [("https://example.com/abs/path", "Заочная форма обучения")]
+
+
+def test_list_form_of_study_links_handles_subset_of_the_three_forms():
+    html = '<a href="x">Очная форма обучения</a>'
+    assert list_form_of_study_links(html, "https://example.com/institut") == [
+        ("https://example.com/x", "Очная форма обучения")
+    ]

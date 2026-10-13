@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 _PDF_LINK_RE = re.compile(
     r'<a\b[^>]*href=["\']([^"\']+\.pdf)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL
 )
+_GENERIC_LINK_RE = re.compile(
+    r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL
+)
+_FORM_OF_STUDY_LABEL_RE = re.compile(r"форма обучения", re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"[\s\xa0]+")
 _TRAILING_DIGITS = re.compile(r"\d+$")
@@ -72,6 +76,22 @@ def list_pdf_links(html: str, base_url: str) -> list[tuple[str, str]]:
     for href, inner_html in _PDF_LINK_RE.findall(html):
         visible_text = _TAG_RE.sub("", inner_html)
         results.append((urljoin(base_url, href), _normalize_label(visible_text)))
+    return results
+
+
+def list_form_of_study_links(html: str, base_url: str) -> list[tuple[str, str]]:
+    """Returns [(url, label), ...] for every <a> on html whose visible
+    text contains "форма обучения" (case-insensitive). The institute's
+    catalog page links to up to three such subpages (Очная/Очно-заочная/
+    Заочная form of study) and ONLY those subpages hold the actual PDF
+    links — not every institute has all three, a form missing from the
+    page's menu simply produces no entry here."""
+    results = []
+    for href, inner_html in _GENERIC_LINK_RE.findall(html):
+        visible_text = _TAG_RE.sub("", inner_html)
+        label = _normalize_label(visible_text)
+        if _FORM_OF_STUDY_LABEL_RE.search(label):
+            results.append((urljoin(base_url, href), label))
     return results
 
 
