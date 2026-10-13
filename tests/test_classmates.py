@@ -81,6 +81,7 @@ def make_update(chat_id):
 def make_context(conn):
     context = MagicMock()
     context.bot_data = {"conn": conn}
+    context.bot.set_my_commands = AsyncMock()
     return context
 
 
@@ -166,6 +167,7 @@ def make_context_with_admin(conn, admin_chat_id=ADMIN_CHAT_ID):
     context = MagicMock()
     context.bot_data = {"conn": conn, "admin_chat_id": admin_chat_id}
     context.bot.send_message = AsyncMock()
+    context.bot.set_my_commands = AsyncMock()
     return context
 
 

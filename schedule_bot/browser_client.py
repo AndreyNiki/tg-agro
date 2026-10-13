@@ -1,3 +1,4 @@
+import os
 import random
 import time
 from urllib.parse import urlsplit
@@ -44,7 +45,14 @@ def fetch_url(url: str, *, timeout: float, referer: str | None = None):
     and no delay is itself a bot signal."""
     from curl_cffi import requests as curl_requests
 
-    session = curl_requests.Session(impersonate=_IMPERSONATE)
+    # Local-testing escape hatch: HTTP_PROXY/HTTPS_PROXY in .env are meant
+    # for the Telegram Bot API traffic (httpx, resolved once at Application
+    # build time and unaffected by this flag). curl_cffi's Session reads the
+    # same env vars by default (trust_env=True) for every site/PDF request,
+    # which is wrong when the proxy can't reach the university's site. Set
+    # DISABLE_SITE_PROXY=1 to make this session ignore them.
+    disable_site_proxy = os.environ.get("DISABLE_SITE_PROXY", "").strip().lower() in ("1", "true", "yes")
+    session = curl_requests.Session(impersonate=_IMPERSONATE, trust_env=not disable_site_proxy)
     headers = dict(BROWSER_HEADERS)
     if referer:
         session.get(referer, headers=headers, timeout=timeout)

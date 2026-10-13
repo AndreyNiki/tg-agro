@@ -159,7 +159,7 @@ async def test_first_subscribe_populates_active_version_via_real_sync(conn, tmp_
 
     update, query = _make_select_update(institute_id, group_id, chat_id)
     context = MagicMock()
-    context.bot = MagicMock(send_message=AsyncMock())
+    context.bot = MagicMock(send_message=AsyncMock(), set_my_commands=AsyncMock())
     context.bot_data = {
         "conn": conn,
         "admin_chat_id": 999,
@@ -195,7 +195,7 @@ async def test_subscribe_to_group_of_stale_link_makes_no_network_call_and_no_adm
     update, query = _make_select_update(institute_id, group_ids[0], 777)
     sync_fn = AsyncMock(return_value=[])
     context = MagicMock()
-    context.bot = MagicMock(send_message=AsyncMock())
+    context.bot = MagicMock(send_message=AsyncMock(), set_my_commands=AsyncMock())
     context.bot_data = {
         "conn": conn,
         "admin_chat_id": 999,
@@ -302,6 +302,7 @@ async def test_validate_failure_excludes_group_from_picker_and_does_not_create_m
 
     bot = MagicMock()
     bot.send_message = AsyncMock(side_effect=fake_send_message)
+    bot.set_my_commands = AsyncMock()
 
     context = MagicMock()
     context.bot = bot

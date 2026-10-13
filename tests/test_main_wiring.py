@@ -284,6 +284,40 @@ async def test_post_init_backfills_missing_member_profiles(conn, config, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_post_init_sets_base_default_scope_and_backfills_member_chat_scopes(conn, config, monkeypatch):
+    """The native "/" command list (the blue Menu button) must stay
+    minimal: BotCommandScopeDefault gets just /menu, and every chat_id
+    that already has a `members` row gets a per-chat override adding
+    /schedule — otherwise a pre-existing member would keep seeing
+    whatever default list was set before this feature existed."""
+    from telegram import BotCommandScopeChat, BotCommandScopeDefault
+
+    from schedule_bot.bot import BASE_VISIBLE_COMMANDS, MEMBER_VISIBLE_COMMANDS
+
+    _patch_week_formula(monkeypatch)
+
+    application = build_application(config, conn)
+    group_id = _make_test_group(conn, "Б-Мв-101")
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+
+    set_my_commands = AsyncMock(return_value=True)
+    monkeypatch.setattr(type(application.bot), "get_chat", AsyncMock(return_value=MagicMock(username=None, full_name=None)))
+    monkeypatch.setattr(type(application.bot), "set_my_commands", set_my_commands)
+
+    await application.post_init(application)
+
+    default_calls = [c for c in set_my_commands.await_args_list if isinstance(c.kwargs.get("scope"), BotCommandScopeDefault)]
+    assert len(default_calls) == 1
+    assert [cmd.command for cmd in default_calls[0].args[0]] == [name for name, _ in BASE_VISIBLE_COMMANDS]
+
+    member_calls = [c for c in set_my_commands.await_args_list if c.kwargs.get("scope") == BotCommandScopeChat(chat_id=111)]
+    assert len(member_calls) == 1
+    assert [cmd.command for cmd in member_calls[0].args[0]] == [name for name, _ in MEMBER_VISIBLE_COMMANDS]
+
+    application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+@pytest.mark.asyncio
 async def test_post_init_backfill_isolates_per_chat_failures(conn, config, monkeypatch):
     _patch_week_formula(monkeypatch)
 

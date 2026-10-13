@@ -3,7 +3,7 @@ import logging
 import re
 from datetime import date, datetime, timedelta, timezone
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from schedule_bot import elections, storage
@@ -20,6 +20,7 @@ DAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
 NOOP_CALLBACK_DATA = "noop"
 
 USER_COMMANDS = [
+    ("menu", "Главное меню"),
     ("start", "Выбрать группу / статус подписки"),
     ("subscribe", "Включить рассылку расписания"),
     ("unsubscribe", "Отключить рассылку (группа остаётся закреплённой)"),
@@ -48,6 +49,27 @@ ADMIN_COMMANDS = [
     ("notify", "Оповестить всех закреплённых за группой: [group_id] <текст>"),
     ("requests", "Заявки на вступление/переход: [group_id] (без аргумента — своя группа)"),
 ]
+
+# Shown in Telegram's native "/" command list / blue Menu button. Kept
+# deliberately minimal — everything else is reachable through /menu's
+# inline keyboard (menu.py); USER_COMMANDS/ADMIN_COMMANDS above stay the
+# full reference used by /help. "schedule" only applies to chats that are
+# already a member of some group (storage.get_member(...) is not None) —
+# see sync_visible_commands, which sets a per-chat BotCommandScopeChat
+# override and must be called every time membership is gained or lost.
+BASE_VISIBLE_COMMANDS = [("menu", "Главное меню")]
+MEMBER_VISIBLE_COMMANDS = BASE_VISIBLE_COMMANDS + [
+    ("schedule", "Показать расписание на выбранный день"),
+]
+
+
+async def sync_visible_commands(bot, conn, chat_id: int) -> None:
+    is_member = storage.get_member(conn, chat_id) is not None
+    commands = MEMBER_VISIBLE_COMMANDS if is_member else BASE_VISIBLE_COMMANDS
+    await bot.set_my_commands(
+        [BotCommand(name, description) for name, description in commands],
+        scope=BotCommandScopeChat(chat_id=chat_id),
+    )
 
 STALE_SCHEDULE_WARNING = (
     "⚠️ Последняя синхронизация с сайтом расписания не удалась — данные могли "

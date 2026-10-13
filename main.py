@@ -2,15 +2,14 @@ import asyncio
 import logging
 import os
 
-from telegram import BotCommand, BotCommandScopeChat
+from telegram import BotCommand, BotCommandScopeDefault
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from schedule_bot import storage
 from schedule_bot.menu import menu_callback, menu_command, pending_action_followup
 from schedule_bot.bot import (
-    ADMIN_COMMANDS,
+    BASE_VISIBLE_COMMANDS,
     NOOP_CALLBACK_DATA,
-    USER_COMMANDS,
     alert_command,
     close_group_command,
     day_callback,
@@ -22,6 +21,7 @@ from schedule_bot.bot import (
     schedule_command,
     remove_starosta_command,
     set_starosta_command,
+    sync_visible_commands,
 )
 from schedule_bot.classmates import classmates_command, exclude_abort_callback, exclude_confirm_callback, exclude_select_callback
 from schedule_bot.faq import faq_command
@@ -113,11 +113,29 @@ def build_application(config: Config, conn) -> Application:
     week_formula_holder = WeekFormulaHolder(formula=week_formula)
 
     async def _post_init(app: Application) -> None:
-        await app.bot.set_my_commands([BotCommand(name, description) for name, description in USER_COMMANDS])
+        # Default scope covers chats with no membership yet (never
+        # interacted, or excluded) — just /menu. Existing members get a
+        # per-chat override below adding /schedule; sync_visible_commands
+        # is also called at every point membership is gained/lost so this
+        # backfill loop only matters for chats whose override predates
+        # this change or was never set (bot restarted without any
+        # membership change in between).
         await app.bot.set_my_commands(
-            [BotCommand(name, description) for name, description in USER_COMMANDS + ADMIN_COMMANDS],
-            scope=BotCommandScopeChat(chat_id=config.admin_chat_id),
+            [BotCommand(name, description) for name, description in BASE_VISIBLE_COMMANDS],
+            scope=BotCommandScopeDefault(),
         )
+        # admin_chat_id used to get its own BotCommandScopeChat override
+        # with the FULL command list (USER_COMMANDS + ADMIN_COMMANDS).
+        # Telegram persists a chat-scope override server-side until it is
+        # explicitly overwritten, so that old override must be reset here
+        # too, even if the admin chat has no `members` row of its own.
+        chat_ids = set(storage.list_all_member_chat_ids(conn))
+        chat_ids.add(config.admin_chat_id)
+        for chat_id in chat_ids:
+            try:
+                await sync_visible_commands(app.bot, conn, chat_id)
+            except Exception as error:
+                logger.warning("main: failed to sync visible commands for chat_id=%s: %s", chat_id, error)
         await _backfill_member_profiles(conn, app.bot)
 
     application = (

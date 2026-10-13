@@ -68,6 +68,7 @@ def make_context(conn):
         "sync_institute_link_fn": AsyncMock(return_value=[]),
     }
     context.bot.send_message = AsyncMock()
+    context.bot.set_my_commands = AsyncMock()
     return context
 
 

@@ -8,6 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from schedule_bot import storage
+from schedule_bot.bot import sync_visible_commands
 from schedule_bot.join_requests import create_join_request_and_notify, requires_approval
 from schedule_bot.pdf_parser import _load_pdf_bytes, find_header_column_index, extract_raw_rows
 from schedule_bot.telegram_utils import reply
@@ -264,9 +265,11 @@ async def group_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
     )
     if not ok:
         _rollback_membership(conn, chat_id, previous_member)
+        await sync_visible_commands(context.bot, conn, chat_id)
         await query.message.reply_text("Группа временно недоступна, администратор уведомлён.")
         return
 
+    await sync_visible_commands(context.bot, conn, chat_id)
     await query.message.reply_text(
         f"Вы подписались на рассылку расписания группы «{group.name}». "
         "Команда /schedule покажет расписание на выбранный день."

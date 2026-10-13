@@ -3,14 +3,19 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from telegram import BotCommandScopeChat
+
 from schedule_bot import storage
 from schedule_bot.bot import (
     ADMIN_COMMANDS,
+    BASE_VISIBLE_COMMANDS,
+    MEMBER_VISIBLE_COMMANDS,
     USER_COMMANDS,
     help_command,
     is_admin,
     refresh_command,
     alert_command,
+    sync_visible_commands,
 )
 
 ADMIN_CHAT_ID = 999
@@ -100,6 +105,32 @@ async def test_help_command_shows_admin_commands_for_admin(conn):
     text = update.message.reply_text.call_args[0][0]
     for name, _ in USER_COMMANDS + ADMIN_COMMANDS:
         assert f"/{name}" in text
+
+
+@pytest.mark.asyncio
+async def test_sync_visible_commands_sets_base_list_for_non_member(conn):
+    bot = MagicMock()
+    bot.set_my_commands = AsyncMock()
+
+    await sync_visible_commands(bot, conn, 12345)
+
+    bot.set_my_commands.assert_awaited_once()
+    names = [c.command for c in bot.set_my_commands.await_args.args[0]]
+    assert names == [name for name, _ in BASE_VISIBLE_COMMANDS]
+    assert bot.set_my_commands.await_args.kwargs["scope"] == BotCommandScopeChat(chat_id=12345)
+
+
+@pytest.mark.asyncio
+async def test_sync_visible_commands_adds_schedule_for_member(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 777, group_id, joined_at="t")
+    bot = MagicMock()
+    bot.set_my_commands = AsyncMock()
+
+    await sync_visible_commands(bot, conn, 777)
+
+    names = [c.command for c in bot.set_my_commands.await_args.args[0]]
+    assert names == [name for name, _ in MEMBER_VISIBLE_COMMANDS]
 
 
 def test_requests_registered_in_admin_commands():

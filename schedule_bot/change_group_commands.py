@@ -5,7 +5,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from schedule_bot import elections, storage
-from schedule_bot.bot import _resolve_admin_group, is_admin
+from schedule_bot.bot import _resolve_admin_group, is_admin, sync_visible_commands
 from schedule_bot.group_commands import (
     GROUPS_PER_PAGE,
     _rollback_membership,
@@ -180,6 +180,7 @@ async def change_request_approve_callback(update: Update, context: ContextTypes.
         institute_link = storage.get_institute_link(conn, target_group.institute_link_id)
         if institute_link is None or institute_link.is_stale:
             _rollback_membership(conn, request.chat_id, previous_member)
+            await sync_visible_commands(context.bot, conn, request.chat_id)
             await query.message.reply_text(
                 "Группа временно недоступна, попробуйте позже. Заявка осталась на рассмотрении."
             )
@@ -199,12 +200,14 @@ async def change_request_approve_callback(update: Update, context: ContextTypes.
         )
         if not ok:
             _rollback_membership(conn, request.chat_id, previous_member)
+            await sync_visible_commands(context.bot, conn, request.chat_id)
             await query.message.reply_text(
                 "Группа временно недоступна, администратор уведомлён. Заявка осталась на рассмотрении."
             )
             return
 
     storage.decide_group_change_request(conn, request_id, "approved", now)
+    await sync_visible_commands(context.bot, conn, request.chat_id)
 
     from_group = storage.get_group(conn, request.from_group_id)
     if from_group is not None and from_group.starosta_chat_id == request.chat_id:

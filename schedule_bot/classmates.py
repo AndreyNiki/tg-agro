@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from schedule_bot import storage
+from schedule_bot.bot import sync_visible_commands
 from schedule_bot.elections import format_candidate_label
 from schedule_bot.telegram_utils import reply, send_with_retry
 
@@ -109,6 +110,7 @@ async def exclude_confirm_callback(update, context) -> None:
     now = datetime.now(timezone.utc).isoformat()
     storage.create_group_exclusion(conn, group.id, target_chat_id, now, caller_chat_id)
     storage.remove_member(conn, target_chat_id)
+    await sync_visible_commands(context.bot, conn, target_chat_id)
     if group.starosta_chat_id == target_chat_id:
         storage.cancel_open_elections_for_group(conn, group.id, now)
         storage.update_group_starosta(conn, group.id, None)
