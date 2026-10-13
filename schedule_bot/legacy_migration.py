@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from schedule_bot import storage
 from schedule_bot.group_commands import validate_and_sync_group_on_first_subscribe
 from schedule_bot.group_links import refresh_institute_catalog
+from schedule_bot.sync import catalog_lock_for
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +14,7 @@ _DONE_SETTING_KEY = "legacy_migration_done_at"
 
 async def run_legacy_migration_if_configured(
     conn, config, notify_admin, sync_institute_link_fn, reschedule_institute_jobs,
+    *, catalog_locks: dict | None = None,
 ) -> None:
     """One-time migration of every existing `members` row onto a single
     target group, gated by three required env vars surfaced as
@@ -41,8 +43,13 @@ async def run_legacy_migration_if_configured(
         institute = storage.get_institute(conn, institute_id)
 
     alerts: list[str] = []
+    lock = catalog_lock_for(catalog_locks, institute.id) if catalog_locks is not None else None
     try:
-        await asyncio.to_thread(refresh_institute_catalog, conn, institute, notify_admin=alerts.append)
+        if lock is None:
+            await asyncio.to_thread(refresh_institute_catalog, conn, institute, notify_admin=alerts.append)
+        else:
+            async with lock:
+                await asyncio.to_thread(refresh_institute_catalog, conn, institute, notify_admin=alerts.append)
     except Exception as error:
         logger.warning("legacy_migration: catalog scan failed for institute_id=%s: %s", institute.id, error)
         await notify_admin(

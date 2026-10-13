@@ -18,7 +18,9 @@ def _resolve_admin_institute(conn, institute_id_str: str):
     return storage.get_institute(conn, int(institute_id_str))
 
 
-async def create_institute_and_scan(conn, config, name: str, catalog_url: str, notify_admin) -> tuple[int, str]:
+async def create_institute_and_scan(
+    conn, config, name: str, catalog_url: str, notify_admin, lock: asyncio.Lock | None = None,
+) -> tuple[int, str]:
     """Creates the institute row and runs its first catalog scan.
 
     Shared by add_institute_command (command path) and menu.py's
@@ -37,9 +39,16 @@ async def create_institute_and_scan(conn, config, name: str, catalog_url: str, n
         # asyncio.to_thread: refresh_institute_catalog does a blocking HTTP
         # fetch (~15s timeout). With concurrent_updates(True) a direct call
         # would stall every other user's update for that whole time.
-        await asyncio.to_thread(
-            refresh_institute_catalog, conn, storage.get_institute(conn, institute_id), notify_admin=notify_admin
-        )
+        async def _do_scan():
+            await asyncio.to_thread(
+                refresh_institute_catalog, conn, storage.get_institute(conn, institute_id), notify_admin=notify_admin
+            )
+
+        if lock is None:
+            await _do_scan()
+        else:
+            async with lock:
+                await _do_scan()
         link_count = len(storage.list_institute_links(conn, institute_id, include_stale=False))
         if link_count:
             scan_status = f"каталог просканирован, ссылок найдено: {link_count}"
@@ -178,9 +187,13 @@ async def refresh_institute_links_command(update: Update, context: ContextTypes.
     if institute is None:
         await update.message.reply_text("Институт с таким id не найден.")
         return
+    from schedule_bot.sync import catalog_lock_for
+
+    lock = catalog_lock_for(context.bot_data["_catalog_locks"], institute.id)
     alerts = []
     try:
-        await asyncio.to_thread(refresh_institute_catalog, conn, institute, notify_admin=alerts.append)
+        async with lock:
+            await asyncio.to_thread(refresh_institute_catalog, conn, institute, notify_admin=alerts.append)
     except Exception as error:
         await update.message.reply_text(f"Сканирование каталога не удалось: {error}")
         return

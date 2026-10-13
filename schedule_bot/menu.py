@@ -430,13 +430,17 @@ async def _handle_institute_scoped_pick(
         await query.message.reply_text(format_institute_links(conn, institute_id))
         return
     if action == "refreshinstitutelinks":
+        from schedule_bot.sync import catalog_lock_for
+
         alerts = []
+        lock = catalog_lock_for(context.bot_data["_catalog_locks"], institute_id)
         try:
             # asyncio.to_thread + try/except mirror
             # institute_commands.refresh_institute_links_command: the fetch
             # is blocking (~15s) and an unreachable catalog page must not
             # raise out of the callback handler.
-            await asyncio.to_thread(refresh_institute_catalog, conn, institute, notify_admin=alerts.append)
+            async with lock:
+                await asyncio.to_thread(refresh_institute_catalog, conn, institute, notify_admin=alerts.append)
         except Exception as error:
             await query.message.reply_text(f"Сканирование каталога не удалось: {error}")
             return

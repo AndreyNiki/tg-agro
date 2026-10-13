@@ -122,10 +122,23 @@ def _catalog_rescan_allowed(catalog_rescan_state: dict[int, float], institute) -
     return True
 
 
+def catalog_lock_for(catalog_locks: dict[int, asyncio.Lock], institute_id: int) -> asyncio.Lock:
+    """One asyncio.Lock per institute_id, shared by every caller that can
+    trigger refresh_institute_catalog for that institute: the manual
+    menu button, /add_institute, /refresh_institute_links, the
+    background institute_catalog_refresh_job, the legacy migration's
+    one-shot scan, and sync.py's own 404-fallback rescan. Two concurrent
+    scans of the same institute would otherwise both read the same
+    pre-scan snapshot of institute_links and independently mutate the
+    DB from it."""
+    return catalog_locks.setdefault(institute_id, asyncio.Lock())
+
+
 async def sync_institute_link(
     conn, institute_link, institute, pdf_cache_dir: str, notify: Notifier,
     *, catalog_rescan_state: dict[int, float],
     notify_admin: AdminNotifier | None = None,
+    catalog_locks: dict[int, asyncio.Lock] | None = None,
 ) -> list[SyncResult]:
     """Fetch + parse the link's PDF exactly once per call (deduplicated
     across however many groups are subscribed to it, design spec 3.1/3.2),
@@ -165,10 +178,17 @@ async def sync_institute_link(
             # and it can never fire again later (the newly-stale diff only
             # considers previously-live links).
             catalog_alerts: list[str] = []
+            lock = catalog_lock_for(catalog_locks, institute.id) if catalog_locks is not None else None
             try:
-                await asyncio.to_thread(
-                    refresh_institute_catalog, conn, institute, notify_admin=catalog_alerts.append
-                )
+                if lock is None:
+                    await asyncio.to_thread(
+                        refresh_institute_catalog, conn, institute, notify_admin=catalog_alerts.append
+                    )
+                else:
+                    async with lock:
+                        await asyncio.to_thread(
+                            refresh_institute_catalog, conn, institute, notify_admin=catalog_alerts.append
+                        )
             except Exception as refresh_error:
                 logger.warning(
                     "sync: catalog refresh fallback failed for institute %r: %s",

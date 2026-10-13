@@ -173,6 +173,7 @@ def build_application(config: Config, conn) -> Application:
         try:
             await run_legacy_migration_if_configured(
                 conn, config, _notify_admin, sync_institute_link_fn, reschedule_institute_jobs_cb,
+                catalog_locks=catalog_locks,
             )
         except Exception:
             logger.exception("main: legacy user migration failed — bot startup continues regardless")
@@ -213,6 +214,12 @@ def build_application(config: Config, conn) -> Application:
     # set) is what makes the limit self-resetting — see
     # sync._catalog_rescan_allowed.
     catalog_rescan_state: dict[int, float] = {}
+    # One asyncio.Lock per institute_id, shared by every entry point that
+    # can trigger refresh_institute_catalog for that institute (manual
+    # menu button, /add_institute, /refresh_institute_links, the
+    # background institute_catalog_refresh_job, legacy migration, and
+    # sync.py's own 404-fallback rescan) — see sync.catalog_lock_for.
+    catalog_locks: dict[int, asyncio.Lock] = {}
 
     async def sync_institute_link_fn(institute_link_id: int):
         institute_link = storage.get_institute_link(conn, institute_link_id)
@@ -234,6 +241,7 @@ def build_application(config: Config, conn) -> Application:
                 conn, institute_link, institute, config.pdf_cache_dir, notify,
                 catalog_rescan_state=catalog_rescan_state,
                 notify_admin=notify_admin,
+                catalog_locks=catalog_locks,
             )
 
     application.bot_data["sync_institute_link_fn"] = sync_institute_link_fn
@@ -250,11 +258,12 @@ def build_application(config: Config, conn) -> Application:
     def reschedule_institute_jobs_cb(institute_id: int) -> None:
         reschedule_institute_jobs(
             scheduler_holder["scheduler"], conn, config, application.bot, institute_id, week_formula_holder, link_locks,
-            catalog_rescan_state,
+            catalog_rescan_state, catalog_locks,
         )
 
     application.bot_data["reschedule_institute_link_jobs"] = reschedule_institute_link_jobs_cb
     application.bot_data["reschedule_institute_jobs"] = reschedule_institute_jobs_cb
+    application.bot_data["_catalog_locks"] = catalog_locks
 
     application.add_handler(CommandHandler("start", start_command, filters=filters.UpdateType.MESSAGE))
     application.add_handler(CommandHandler("subscribe", subscribe_command, filters=filters.UpdateType.MESSAGE))
@@ -327,7 +336,7 @@ def build_application(config: Config, conn) -> Application:
     # separate, internally-created lock.
     scheduler_holder["scheduler"] = build_scheduler(
         conn, config, application.bot, week_formula_holder, locks=link_locks,
-        catalog_rescan_state=catalog_rescan_state,
+        catalog_rescan_state=catalog_rescan_state, catalog_locks=catalog_locks,
     )
     # Exposed so tests (and any future consumer) can assert the scheduled
     # jobs and the manual /refresh path really share ONE rate-limit dict.

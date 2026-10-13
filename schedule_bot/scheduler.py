@@ -13,7 +13,7 @@ from schedule_bot.formatting import format_day_schedule
 from schedule_bot.group_links import refresh_institute_catalog
 from schedule_bot.pdf_parser import DAY_ORDER, schedule_from_dict
 from schedule_bot.screenshot import render_day_image
-from schedule_bot.sync import sync_institute_link
+from schedule_bot.sync import catalog_lock_for, sync_institute_link
 from schedule_bot.telegram_utils import SEND_PACING_SECONDS, send_with_retry
 from schedule_bot.timeutil import today_in_configured_timezone
 from schedule_bot.weektype import WeekFormula, fetch_week_formula, save_week_formula
@@ -156,14 +156,23 @@ async def link_daily_send_job(
             await asyncio.sleep(SEND_PACING_SECONDS)
 
 
-async def institute_catalog_refresh_job(conn, config, bot, institute_id: int, reschedule_links=None) -> None:
+async def institute_catalog_refresh_job(
+    conn, config, bot, institute_id: int, reschedule_links=None, lock: asyncio.Lock | None = None,
+) -> None:
     institute = storage.get_institute(conn, institute_id)
     if institute is None:
         return
 
     alerts: list[str] = []
     try:
-        await asyncio.to_thread(refresh_institute_catalog, conn, institute, notify_admin=alerts.append)
+        async def _do_scan():
+            await asyncio.to_thread(refresh_institute_catalog, conn, institute, notify_admin=alerts.append)
+
+        if lock is None:
+            await _do_scan()
+        else:
+            async with lock:
+                await _do_scan()
     except Exception as error:
         logger.warning("scheduler: institute_catalog_refresh_job failed for institute %r: %s", institute.name, error)
         return
@@ -259,14 +268,17 @@ def schedule_link_jobs(
     )
 
 
-def schedule_institute_catalog_job(scheduler, conn, config, bot, institute, reschedule_links=None) -> None:
+def schedule_institute_catalog_job(
+    scheduler, conn, config, bot, institute, reschedule_links=None, catalog_locks: dict | None = None,
+) -> None:
     interval_minutes = _safe_interval_minutes(
         institute.catalog_refresh_interval_minutes, config.default_catalog_refresh_interval_minutes
     )
+    lock = catalog_lock_for(catalog_locks, institute.id) if catalog_locks is not None else None
     scheduler.add_job(
         institute_catalog_refresh_job,
         IntervalTrigger(minutes=interval_minutes),
-        args=[conn, config, bot, institute.id, reschedule_links],
+        args=[conn, config, bot, institute.id, reschedule_links, lock],
         id=f"institute_catalog_refresh_{institute.id}",
         replace_existing=True,
     )
@@ -309,7 +321,7 @@ def reschedule_institute_link_jobs(
 
 def reschedule_institute_jobs(
     scheduler, conn, config, bot, institute_id: int, week_formula_holder, locks: dict,
-    catalog_rescan_state: dict | None = None,
+    catalog_rescan_state: dict | None = None, catalog_locks: dict | None = None,
 ) -> None:
     institute = storage.get_institute(conn, institute_id)
     if institute is None:
@@ -319,6 +331,7 @@ def reschedule_institute_jobs(
     schedule_institute_catalog_job(
         scheduler, conn, config, bot, institute,
         make_links_rescheduler(scheduler, conn, config, bot, week_formula_holder, locks, catalog_rescan_state),
+        catalog_locks,
     )
     for institute_link in storage.list_institute_links(conn, institute_id, include_stale=False):
         link_lock = locks.setdefault(institute_link.id, asyncio.Lock())
@@ -331,12 +344,14 @@ def reschedule_institute_jobs(
 
 def build_scheduler(
     conn, config, bot, week_formula_holder: WeekFormulaHolder, locks: dict | None = None,
-    catalog_rescan_state: dict | None = None,
+    catalog_rescan_state: dict | None = None, catalog_locks: dict | None = None,
 ) -> AsyncIOScheduler:
     if locks is None:
         locks = {}
     if catalog_rescan_state is None:
         catalog_rescan_state = {}
+    if catalog_locks is None:
+        catalog_locks = {}
 
     scheduler = AsyncIOScheduler(
         timezone=config.default_timezone,
@@ -347,7 +362,7 @@ def build_scheduler(
         scheduler, conn, config, bot, week_formula_holder, locks, catalog_rescan_state
     )
     for institute in storage.list_institutes(conn):
-        schedule_institute_catalog_job(scheduler, conn, config, bot, institute, reschedule_links)
+        schedule_institute_catalog_job(scheduler, conn, config, bot, institute, reschedule_links, catalog_locks)
         for institute_link in storage.list_institute_links(conn, institute.id, include_stale=False):
             link_lock = locks.setdefault(institute_link.id, asyncio.Lock())
             schedule_link_jobs(

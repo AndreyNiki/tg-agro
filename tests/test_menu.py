@@ -100,7 +100,7 @@ def make_callback_update(chat_id, data):
 
 def make_context(conn):
     context = MagicMock()
-    context.bot_data = {"conn": conn, "admin_chat_id": ADMIN_CHAT_ID}
+    context.bot_data = {"conn": conn, "admin_chat_id": ADMIN_CHAT_ID, "_catalog_locks": {}}
     return context
 
 

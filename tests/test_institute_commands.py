@@ -39,6 +39,7 @@ def _context(conn, args, admin_chat_id=999):
         ),
         "reschedule_institute_jobs": MagicMock(),
         "reschedule_institute_link_jobs": MagicMock(),
+        "_catalog_locks": {},
     }
     return context
 

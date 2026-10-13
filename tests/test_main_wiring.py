@@ -612,7 +612,7 @@ async def test_post_init_runs_legacy_migration_when_configured(conn, config, mon
     _patch_week_formula(monkeypatch)
     called_with = {}
 
-    async def fake_migration(conn_, config_, notify_admin, sync_fn, reschedule):
+    async def fake_migration(conn_, config_, notify_admin, sync_fn, reschedule, **kwargs):
         called_with["conn"] = conn_
         called_with["config"] = config_
         called_with["notify_admin"] = notify_admin

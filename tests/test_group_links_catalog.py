@@ -423,3 +423,34 @@ def test_refresh_institute_catalog_skips_unreachable_form_page_but_keeps_others(
     groups = storage.list_all_groups(conn)
     assert {g.name for g in groups} == {"Б-Зв-201"}
     assert alerts == []  # an unreachable form page this cycle is tolerated silently (logged, not alerted)
+
+
+def test_catalog_lock_for_returns_same_lock_for_same_institute():
+    import asyncio
+
+    from schedule_bot.sync import catalog_lock_for
+
+    locks: dict[int, asyncio.Lock] = {}
+    lock_a = catalog_lock_for(locks, 7)
+    lock_b = catalog_lock_for(locks, 7)
+    assert lock_a is lock_b
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_catalog_scans_of_same_institute_serialize():
+    import asyncio
+
+    from schedule_bot.sync import catalog_lock_for
+
+    locks: dict[int, asyncio.Lock] = {}
+    events: list[str] = []
+
+    async def scan(tag: str):
+        lock = catalog_lock_for(locks, 1)
+        async with lock:
+            events.append(f"{tag}:start")
+            await asyncio.sleep(0.01)
+            events.append(f"{tag}:end")
+
+    await asyncio.gather(scan("A"), scan("B"))
+    assert events in (["A:start", "A:end", "B:start", "B:end"], ["B:start", "B:end", "A:start", "A:end"])
