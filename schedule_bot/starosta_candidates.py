@@ -5,6 +5,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from schedule_bot import elections, storage
+from schedule_bot.telegram_utils import safe_edit_reply_markup
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ async def page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     page = int(query.data.removeprefix(_PAGE_PREFIX))
     conn = context.bot_data["conn"]
     member = storage.get_member(conn, update.effective_chat.id)
-    await query.message.edit_reply_markup(reply_markup=build_candidate_keyboard(conn, member.group_id, page))
+    await safe_edit_reply_markup(query, reply_markup=build_candidate_keyboard(conn, member.group_id, page))
 
 
 async def select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

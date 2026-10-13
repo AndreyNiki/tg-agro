@@ -11,7 +11,7 @@ from schedule_bot import storage
 from schedule_bot.bot import sync_visible_commands
 from schedule_bot.join_requests import create_join_request_and_notify, requires_approval
 from schedule_bot.pdf_parser import _load_pdf_bytes, find_header_column_index, extract_raw_rows
-from schedule_bot.telegram_utils import reply
+from schedule_bot.telegram_utils import reply, safe_edit_message_text, safe_edit_reply_markup
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ async def institute_page_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     page = int(query.data.removeprefix(INSTITUTE_PAGE_PREFIX))
     conn = context.bot_data["conn"]
-    await query.message.edit_reply_markup(reply_markup=build_institute_picker_keyboard(conn, page))
+    await safe_edit_reply_markup(query, reply_markup=build_institute_picker_keyboard(conn, page))
 
 
 async def institute_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -103,7 +103,7 @@ async def institute_select_callback(update: Update, context: ContextTypes.DEFAUL
     if institute is None:
         await query.message.reply_text("Этот институт больше не существует.")
         return
-    await query.message.edit_text(
+    await safe_edit_message_text(query, 
         f"Институт «{institute.name}». Выберите группу:",
         reply_markup=build_group_picker_keyboard(conn, institute_id),
     )
@@ -114,7 +114,7 @@ async def group_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     institute_id_str, page_str = query.data.removeprefix(PAGE_PREFIX).split(":")
     conn = context.bot_data["conn"]
-    await query.message.edit_reply_markup(
+    await safe_edit_reply_markup(query, 
         reply_markup=build_group_picker_keyboard(conn, int(institute_id_str), int(page_str))
     )
 

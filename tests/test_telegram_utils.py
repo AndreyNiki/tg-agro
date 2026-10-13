@@ -1,9 +1,9 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from telegram.error import RetryAfter, TimedOut
+from telegram.error import BadRequest, RetryAfter, TimedOut
 
-from schedule_bot.telegram_utils import send_with_retry, reply
+from schedule_bot.telegram_utils import safe_edit_message_text, safe_edit_reply_markup, send_with_retry, reply
 
 
 @pytest.mark.asyncio
@@ -81,3 +81,27 @@ async def test_reply_falls_back_to_callback_query_message_when_no_message():
     await reply(update, "hello", reply_markup="kb")
 
     update.callback_query.message.reply_text.assert_awaited_once_with("hello", reply_markup="kb")
+
+
+@pytest.mark.asyncio
+async def test_safe_edit_message_text_swallows_not_modified_error():
+    query = MagicMock()
+    query.edit_message_text = AsyncMock(side_effect=BadRequest("Message is not modified"))
+    await safe_edit_message_text(query, "same text")
+    query.edit_message_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_safe_edit_message_text_reraises_other_bad_request():
+    query = MagicMock()
+    query.edit_message_text = AsyncMock(side_effect=BadRequest("Chat not found"))
+    with pytest.raises(BadRequest):
+        await safe_edit_message_text(query, "text")
+
+
+@pytest.mark.asyncio
+async def test_safe_edit_reply_markup_swallows_not_modified_error():
+    query = MagicMock()
+    query.message.edit_reply_markup = AsyncMock(side_effect=BadRequest("Message is not modified"))
+    await safe_edit_reply_markup(query, reply_markup=None)
+    query.message.edit_reply_markup.assert_awaited_once()

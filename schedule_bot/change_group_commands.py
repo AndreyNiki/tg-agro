@@ -12,7 +12,7 @@ from schedule_bot.group_commands import (
     validate_and_sync_group_on_first_subscribe,
 )
 from schedule_bot.join_requests import notify_approvers
-from schedule_bot.telegram_utils import reply, send_with_retry
+from schedule_bot.telegram_utils import reply, safe_edit_reply_markup, send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ async def change_group_page_callback(update: Update, context: ContextTypes.DEFAU
     page = int(query.data.removeprefix(_PAGE_PREFIX))
     conn = context.bot_data["conn"]
     member = storage.get_member(conn, update.effective_chat.id)
-    await query.message.edit_reply_markup(reply_markup=build_change_group_keyboard(conn, member.group_id, page))
+    await safe_edit_reply_markup(query, reply_markup=build_change_group_keyboard(conn, member.group_id, page))
 
 
 async def change_group_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

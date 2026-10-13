@@ -2,11 +2,13 @@ import asyncio
 import logging
 from typing import Awaitable, Callable, TypeVar
 
-from telegram.error import RetryAfter, TimedOut
+from telegram.error import BadRequest, RetryAfter, TimedOut
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+_NOT_MODIFIED_MARKER = "message is not modified"
 
 # Telegram's bulk-broadcast ceiling is ~30 messages/sec; pacing sends below
 # that keeps loops with many subscribers from tripping RetryAfter at all.
@@ -40,3 +42,24 @@ async def reply(update, text, **kwargs) -> None:
         await update.message.reply_text(text, **kwargs)
     else:
         await update.callback_query.message.reply_text(text, **kwargs)
+
+
+async def safe_edit_message_text(query, text: str, **kwargs) -> None:
+    """Wraps query.edit_message_text, swallowing the extremely common
+    "Message is not modified" BadRequest a double-tapped navigation
+    button produces (the second tap re-sends identical text+markup).
+    Any other BadRequest (stale query, chat not found, ...) propagates
+    to the Application's global error handler."""
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except BadRequest as error:
+        if _NOT_MODIFIED_MARKER not in str(error).lower():
+            raise
+
+
+async def safe_edit_reply_markup(query, **kwargs) -> None:
+    try:
+        await query.message.edit_reply_markup(**kwargs)
+    except BadRequest as error:
+        if _NOT_MODIFIED_MARKER not in str(error).lower():
+            raise

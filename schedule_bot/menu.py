@@ -29,7 +29,7 @@ from schedule_bot.group_commands import build_institute_picker_keyboard, subscri
 from schedule_bot.institute_commands import create_institute_and_scan, format_institute_links
 from schedule_bot.report import _apply_report
 from schedule_bot.starosta_commands import starosta_command, votes_command
-from schedule_bot.telegram_utils import send_with_retry
+from schedule_bot.telegram_utils import safe_edit_message_text, send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ def _group_section_keyboard() -> InlineKeyboardMarkup:
 async def _handle_schedule_section(update, context, conn, chat_id: int, action: str) -> None:
     query = update.callback_query
     if action == "root":
-        await query.edit_message_text("Расписание:", reply_markup=_schedule_section_keyboard())
+        await safe_edit_message_text(query, "Расписание:", reply_markup=_schedule_section_keyboard())
         return
     if action == "daypicker":
         await schedule_command(update, context)
@@ -118,7 +118,7 @@ async def _handle_schedule_section(update, context, conn, chat_id: int, action: 
 async def _handle_group_section(update, context, conn, chat_id: int, action: str) -> None:
     query = update.callback_query
     if action == "root":
-        await query.edit_message_text("Группа:", reply_markup=_group_section_keyboard())
+        await safe_edit_message_text(query, "Группа:", reply_markup=_group_section_keyboard())
         return
     if action == "classmates":
         await classmates_command(update, context)
@@ -154,7 +154,7 @@ async def _handle_starosta_section(update, context, conn, chat_id: int, action: 
         if group is None:
             await starosta_command(update, context)
             return
-        await query.edit_message_text("Привилегии старосты:", reply_markup=_starosta_privileges_keyboard(group))
+        await safe_edit_message_text(query, "Привилегии старосты:", reply_markup=_starosta_privileges_keyboard(group))
         return
 
     if group is None:
@@ -167,7 +167,7 @@ async def _handle_starosta_section(update, context, conn, chat_id: int, action: 
     if action == "toggleclosed":
         storage.update_group_closed(conn, group.id, not group.is_closed)
         group = storage.get_group(conn, group.id)
-        await query.edit_message_text("Привилегии старосты:", reply_markup=_starosta_privileges_keyboard(group))
+        await safe_edit_message_text(query, "Привилегии старосты:", reply_markup=_starosta_privileges_keyboard(group))
         return
     if action == "requests":
         entries = _build_requests_messages(conn, group)
@@ -281,37 +281,37 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
         return
 
     if action == "root":
-        await query.edit_message_text("Админ-меню:", reply_markup=_admin_root_keyboard())
+        await safe_edit_message_text(query, "Админ-меню:", reply_markup=_admin_root_keyboard())
         return
     if action == "alert":
         context.user_data["pending_menu_action"] = {"action": "alert"}
         await query.message.reply_text("Отправьте текст объявления:")
         return
     if action == "institutes":
-        await query.edit_message_text("Выберите институт:", reply_markup=_institute_picker_keyboard(conn))
+        await safe_edit_message_text(query, "Выберите институт:", reply_markup=_institute_picker_keyboard(conn))
         return
     if action == "createinstitute":
         context.user_data["pending_menu_action"] = {"action": "create_institute_name"}
         await query.message.reply_text("Отправьте название нового института:")
         return
     if action == "groupsettings":
-        await query.edit_message_text("Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickgroup"))
+        await safe_edit_message_text(query, "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickgroup"))
         return
     if action == "starostas":
-        await query.edit_message_text(
+        await safe_edit_message_text(query, 
             "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickstarostagroup")
         )
         return
     if action == "closedtoggle":
-        await query.edit_message_text(
+        await safe_edit_message_text(query, 
             "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "toggleclosed")
         )
         return
     if action == "requests":
-        await query.edit_message_text("Заявки:", reply_markup=_requests_submenu_keyboard())
+        await safe_edit_message_text(query, "Заявки:", reply_markup=_requests_submenu_keyboard())
         return
     if action == "requestsbygroup":
-        await query.edit_message_text(
+        await safe_edit_message_text(query, 
             "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickrequestsgroup")
         )
         return
@@ -336,18 +336,18 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
         return
 
     if action == "pickgroup":
-        await query.edit_message_text(
+        await safe_edit_message_text(query, 
             f"Настройки группы «{group.name}»:", reply_markup=_group_settings_submenu(group_id)
         )
         return
     if action == "pickstarostagroup":
-        await query.edit_message_text(
+        await safe_edit_message_text(query, 
             f"Старосты группы «{group.name}»:", reply_markup=_starosta_pick_submenu(group_id)
         )
         return
     if action == "toggleclosed":
         storage.update_group_closed(conn, group.id, not group.is_closed)
-        await query.edit_message_text(
+        await safe_edit_message_text(query, 
             f"Группа «{group.name}»: состояние обновлено.",
             reply_markup=_build_admin_group_picker(conn, "toggleclosed"),
         )
@@ -365,7 +365,7 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
         await query.message.reply_text("Отправьте chat_id нового старосты:")
         return
     if action == "removestarosta":
-        await query.edit_message_text(
+        await safe_edit_message_text(query, 
             _apply_remove_starosta(conn, group),
             reply_markup=_starosta_pick_submenu(group_id),
         )
@@ -398,7 +398,7 @@ async def _handle_institute_scoped_pick(
         return
 
     if action == "pickinstitute":
-        await query.edit_message_text(
+        await safe_edit_message_text(query, 
             f"Настройки института «{institute.name}»:", reply_markup=_institute_settings_submenu(institute_id)
         )
         return
@@ -603,14 +603,14 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await query.message.reply_text("Недостаточно прав.")
             return
         pick_action = section[: -len("page")]
-        await query.edit_message_text(
+        await safe_edit_message_text(query, 
             admin_picker_prompts[section],
             reply_markup=_build_admin_group_picker(conn, pick_action, page=int(action)),
         )
         return
 
     if section == "root":
-        await query.edit_message_text("Главное меню:", reply_markup=build_root_keyboard(conn, chat_id, admin_chat_id))
+        await safe_edit_message_text(query, "Главное меню:", reply_markup=build_root_keyboard(conn, chat_id, admin_chat_id))
         return
     if section == "schedule":
         await _handle_schedule_section(update, context, conn, chat_id, action)
