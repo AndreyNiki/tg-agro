@@ -385,7 +385,9 @@ async def test_institute_request_start_callback_stashes_pending_action():
 
     await institute_request_start_callback(update, context)
 
-    assert context.user_data["pending_menu_action"] == {"action": "new_institute_name"}
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "new_institute_name"
+    assert "started_at" in pending
     update.callback_query.message.reply_text.assert_awaited_once()
 
 
@@ -400,5 +402,8 @@ async def test_group_request_start_callback_stashes_pending_action_with_institut
 
     await group_request_start_callback(update, context)
 
-    assert context.user_data["pending_menu_action"] == {"action": "new_group_text", "institute_id": 42}
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "new_group_text"
+    assert pending["institute_id"] == 42
+    assert "started_at" in pending
     update.callback_query.message.reply_text.assert_awaited_once()

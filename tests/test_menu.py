@@ -314,7 +314,10 @@ async def test_menu_callback_starosta_notify_prompts_for_text(conn):
 
     await menu_callback(update, context)
 
-    assert context.user_data["pending_menu_action"] == {"action": "notify", "group_id": group_id}
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "notify"
+    assert pending["group_id"] == group_id
+    assert "started_at" in pending
     update.callback_query.message.reply_text.assert_awaited_once()
 
 
@@ -347,7 +350,9 @@ async def test_menu_callback_admin_alert_prompts_for_text(conn):
 
     await menu_callback(update, context)
 
-    assert context.user_data["pending_menu_action"] == {"action": "alert"}
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "alert"
+    assert "started_at" in pending
 
 
 @pytest.mark.asyncio
@@ -453,9 +458,10 @@ async def test_institute_scoped_pick_sets_pending_catalog_url_action(conn):
 
     await menu_callback(update, context)
 
-    assert context.user_data["pending_menu_action"] == {
-        "action": "set_institute_catalog_url", "institute_id": institute_id,
-    }
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "set_institute_catalog_url"
+    assert pending["institute_id"] == institute_id
+    assert "started_at" in pending
 
 
 @pytest.mark.asyncio
@@ -783,7 +789,9 @@ async def test_menu_callback_report_start_stashes_pending_and_prompts(conn):
 
     await menu_callback(update, context)
 
-    assert context.user_data["pending_menu_action"] == {"action": "report"}
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "report"
+    assert "started_at" in pending
     update.callback_query.message.reply_text.assert_awaited_once()
 
 
@@ -936,7 +944,9 @@ async def test_menu_callback_admin_createinstitute_stashes_pending_name(conn):
 
     await menu_callback(update, context)
 
-    assert context.user_data["pending_menu_action"] == {"action": "create_institute_name"}
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "create_institute_name"
+    assert "started_at" in pending
     update.callback_query.message.reply_text.assert_awaited_once()
 
 
@@ -964,7 +974,10 @@ async def test_pending_action_followup_create_institute_name_prompts_for_url(con
 
     await pending_action_followup(update, context)
 
-    assert context.user_data["pending_menu_action"] == {"action": "create_institute_url", "name": "Новый ИТ"}
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "create_institute_url"
+    assert pending["name"] == "Новый ИТ"
+    assert "started_at" in pending
     update.message.reply_text.assert_awaited_once()
 
 
@@ -1001,7 +1014,10 @@ async def test_pending_action_followup_new_institute_name_prompts_for_url(conn):
 
     await pending_action_followup(update, context)
 
-    assert context.user_data["pending_menu_action"] == {"action": "new_institute_url", "name": "Институт X"}
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "new_institute_url"
+    assert pending["name"] == "Институт X"
+    assert "started_at" in pending
     update.message.reply_text.assert_awaited_once()
 
 
@@ -1169,7 +1185,10 @@ async def test_menu_callback_notifygroup_stashes_pending_notify_admin(conn):
 
     await menu_callback(update, context)
 
-    assert context.user_data["pending_menu_action"] == {"action": "notify_admin", "group_id": group_id}
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "notify_admin"
+    assert pending["group_id"] == group_id
+    assert "started_at" in pending
 
 
 @pytest.mark.asyncio
@@ -1187,4 +1206,29 @@ async def test_pending_action_followup_notify_admin_sends_to_group_members(conn)
     await pending_action_followup(update, context)
 
     context.bot.send_message.assert_awaited()
+    assert "pending_menu_action" not in context.user_data
+
+
+from datetime import datetime, timedelta, timezone
+
+from schedule_bot.menu import PENDING_ACTION_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_discards_expired_alert_instead_of_broadcasting(conn):
+    stale_started_at = (datetime.now(timezone.utc) - timedelta(seconds=PENDING_ACTION_TTL_SECONDS + 1)).isoformat()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "alert", "started_at": stale_started_at}}
+    context.bot.send_message = AsyncMock()
+
+    update = MagicMock()
+    update.message.text = "это случайный текст, а не объявление"
+    update.effective_chat.id = 123
+    update.message.reply_text = AsyncMock()
+
+    await pending_action_followup(update, context)
+
+    context.bot.send_message.assert_not_awaited()
+    update.message.reply_text.assert_awaited_once()
+    assert "истекло" in update.message.reply_text.call_args.args[0].lower()
     assert "pending_menu_action" not in context.user_data

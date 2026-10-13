@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 
 ROOT_CALLBACK_DATA = "menu:root:_"
 
+PENDING_ACTION_TTL_SECONDS = 300  # 5 minutes — long enough to type a message, short enough that an
+# abandoned "Отправьте текст..." prompt can't be reactivated by an unrelated later message.
+
+
+def _pending_action(action: str, **extra) -> dict:
+    return {"action": action, "started_at": datetime.now(timezone.utc).isoformat(), **extra}
+
 
 async def _notify_admin_of_info_request(context, request_id: int, kind_label: str, request_text: str) -> None:
     keyboard = build_info_decision_keyboard(request_id)
@@ -68,6 +75,7 @@ def build_root_keyboard(conn, chat_id: int, admin_chat_id: int) -> InlineKeyboar
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("pending_menu_action", None)
     conn = context.bot_data["conn"]
     chat_id = update.effective_chat.id
     keyboard = build_root_keyboard(conn, chat_id, context.bot_data["admin_chat_id"])
@@ -178,7 +186,7 @@ async def _handle_starosta_section(update, context, conn, chat_id: int, action: 
             await query.message.reply_text(text, reply_markup=keyboard)
         return
     if action == "notify":
-        context.user_data["pending_menu_action"] = {"action": "notify", "group_id": group.id}
+        context.user_data["pending_menu_action"] = _pending_action("notify", group_id=group.id)
         await query.message.reply_text("Отправьте текст оповещения:")
         return
 
@@ -284,14 +292,14 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
         await safe_edit_message_text(query, "Админ-меню:", reply_markup=_admin_root_keyboard())
         return
     if action == "alert":
-        context.user_data["pending_menu_action"] = {"action": "alert"}
+        context.user_data["pending_menu_action"] = _pending_action("alert")
         await query.message.reply_text("Отправьте текст объявления:")
         return
     if action == "institutes":
         await safe_edit_message_text(query, "Выберите институт:", reply_markup=_institute_picker_keyboard(conn))
         return
     if action == "createinstitute":
-        context.user_data["pending_menu_action"] = {"action": "create_institute_name"}
+        context.user_data["pending_menu_action"] = _pending_action("create_institute_name")
         await query.message.reply_text("Отправьте название нового института:")
         return
     if action == "groupsettings":
@@ -361,7 +369,7 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
             await query.message.reply_text(text, reply_markup=keyboard)
         return
     if action == "setstarosta":
-        context.user_data["pending_menu_action"] = {"action": "set_starosta", "group_id": group_id}
+        context.user_data["pending_menu_action"] = _pending_action("set_starosta", group_id=group_id)
         await query.message.reply_text("Отправьте chat_id нового старосты:")
         return
     if action == "removestarosta":
@@ -380,7 +388,7 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
         await query.message.reply_text(format_refresh_result(results, group))
         return
     if action == "notifygroup":
-        context.user_data["pending_menu_action"] = {"action": "notify_admin", "group_id": group_id}
+        context.user_data["pending_menu_action"] = _pending_action("notify_admin", group_id=group_id)
         await query.message.reply_text("Отправьте текст оповещения:")
         return
 
@@ -403,19 +411,19 @@ async def _handle_institute_scoped_pick(
         )
         return
     if action == "setinstitutecatalogurl":
-        context.user_data["pending_menu_action"] = {"action": "set_institute_catalog_url", "institute_id": institute_id}
+        context.user_data["pending_menu_action"] = _pending_action("set_institute_catalog_url", institute_id=institute_id)
         await query.message.reply_text("Отправьте новый url каталога:")
         return
     if action == "setinstitutesendtime":
-        context.user_data["pending_menu_action"] = {"action": "set_institute_send_time", "institute_id": institute_id}
+        context.user_data["pending_menu_action"] = _pending_action("set_institute_send_time", institute_id=institute_id)
         await query.message.reply_text("Отправьте новое время (HH:MM):")
         return
     if action == "setinstitutecheckinterval":
-        context.user_data["pending_menu_action"] = {"action": "set_institute_check_interval", "institute_id": institute_id}
+        context.user_data["pending_menu_action"] = _pending_action("set_institute_check_interval", institute_id=institute_id)
         await query.message.reply_text("Отправьте новый интервал проверки в минутах:")
         return
     if action == "setinstitutecataloginterval":
-        context.user_data["pending_menu_action"] = {"action": "set_institute_catalog_interval", "institute_id": institute_id}
+        context.user_data["pending_menu_action"] = _pending_action("set_institute_catalog_interval", institute_id=institute_id)
         await query.message.reply_text("Отправьте новый интервал сканирования каталога в минутах:")
         return
     if action == "institutelinks":
@@ -444,6 +452,16 @@ async def pending_action_followup(update, context) -> None:
     if pending is None:
         return
 
+    started_at = pending.get("started_at")
+    if started_at is not None:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(started_at)
+        if age.total_seconds() > PENDING_ACTION_TTL_SECONDS:
+            del context.user_data["pending_menu_action"]
+            await update.message.reply_text(
+                "Время ожидания истекло, действие отменено. Откройте /menu заново, если оно ещё нужно."
+            )
+            return
+
     conn = context.bot_data["conn"]
     action = pending["action"]
     value = update.message.text
@@ -461,7 +479,7 @@ async def pending_action_followup(update, context) -> None:
         return
 
     if action == "create_institute_name":
-        context.user_data["pending_menu_action"] = {"action": "create_institute_url", "name": value}
+        context.user_data["pending_menu_action"] = _pending_action("create_institute_url", name=value)
         await update.message.reply_text("Отправьте url каталога нового института:")
         return
 
@@ -477,7 +495,7 @@ async def pending_action_followup(update, context) -> None:
         return
 
     if action == "new_institute_name":
-        context.user_data["pending_menu_action"] = {"action": "new_institute_url", "name": value}
+        context.user_data["pending_menu_action"] = _pending_action("new_institute_url", name=value)
         await update.message.reply_text(
             "Отправьте URL каталога института (на этой странице должны быть ссылки на страницы форм "
             "обучения — Очная/Очно-заочная/Заочная). Если не знаете — отправьте «-»."
@@ -625,7 +643,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _handle_admin_section(update, context, conn, chat_id, admin_chat_id, action)
         return
     if section == "report":
-        context.user_data["pending_menu_action"] = {"action": "report"}
+        context.user_data["pending_menu_action"] = _pending_action("report")
         await query.message.reply_text("Отправьте текст сообщения администратору:")
         return
     if section == "faq":

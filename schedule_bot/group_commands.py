@@ -120,17 +120,21 @@ async def group_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def institute_request_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from schedule_bot.menu import _pending_action
+
     query = update.callback_query
     await query.answer()
-    context.user_data["pending_menu_action"] = {"action": "new_institute_name"}
+    context.user_data["pending_menu_action"] = _pending_action("new_institute_name")
     await query.message.reply_text("Отправьте название института, который нужно добавить:")
 
 
 async def group_request_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from schedule_bot.menu import _pending_action
+
     query = update.callback_query
     await query.answer()
     institute_id = int(query.data.removeprefix(GROUP_REQUEST_PREFIX))
-    context.user_data["pending_menu_action"] = {"action": "new_group_text", "institute_id": institute_id}
+    context.user_data["pending_menu_action"] = _pending_action("new_group_text", institute_id=institute_id)
     await query.message.reply_text("Опишите вашу группу (точное название, форма обучения и т.п.):")
 
 
