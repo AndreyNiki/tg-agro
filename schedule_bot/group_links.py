@@ -205,10 +205,24 @@ def refresh_institute_catalog(conn, institute, *, notify_admin: Callable[[str], 
     admin alert, then return.
     """
     html = fetch_source_page_html(institute.catalog_url)
-    raw_entries = list_pdf_links(html, institute.catalog_url)
+    form_links = list_form_of_study_links(html, institute.catalog_url)
+
+    if not form_links:
+        logger.warning("group_links: catalog for institute %r returned 0 form-of-study links", institute.name)
+        notify_admin(f"Каталог института {institute.name} (id={institute.id}) вернул 0 ссылок на страницы форм обучения")
+        return
+
+    raw_entries: list[tuple[str, str]] = []
+    for form_url, form_label in form_links:
+        try:
+            form_html = fetch_source_page_html(form_url)
+        except SourcePageUnreachableError as error:
+            logger.warning("group_links: form-of-study page %r (%s) unreachable: %s", form_label, form_url, error)
+            continue
+        raw_entries.extend(list_pdf_links(form_html, form_url))
 
     if not raw_entries:
-        logger.warning("group_links: catalog for institute %r returned 0 links", institute.name)
+        logger.warning("group_links: catalog for institute %r returned 0 PDF links across all form-of-study pages", institute.name)
         notify_admin(f"Каталог института {institute.name} (id={institute.id}) вернул 0 ссылок")
         return
 
