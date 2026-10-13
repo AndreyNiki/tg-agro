@@ -93,15 +93,17 @@ def test_day_bbox_spans_min_y0_to_max_y1_across_all_rows():
 
 
 def test_stops_after_sixth_day_marker_ignoring_footer_row():
+    day_labels = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
     rows = []
-    for day_index in range(6):
+    for label in day_labels:
         rows.append(
-            day_row(None, [Cell(f"day{day_index}", 0, 30), None, None], day_marker=True, y0=0, y1=10)
+            day_row(None, [Cell(label, 0, 30), None, None], day_marker=True, y0=0, y1=10)
         )
         rows.append(
             day_row("8.30-10.00", [None, Cell("8.30-10.00", 30, 60), Cell("Урок", 300, 500)], y0=0, y1=10)
         )
-    # a 7th "day marker" row, e.g. a footer signature line
+    # a 7th "day marker" row, e.g. a footer signature line, must not be
+    # mistaken for a day label and must not crash/extend the result.
     rows.append(day_row(None, [Cell("Начальник отдела", 0, 30), None, None], day_marker=True, y0=0, y1=10))
     schedule = build_schedule(rows, GROUP_COL, TABLE_X1)
     assert set(schedule.keys()) == {
@@ -197,3 +199,19 @@ def test_day_schedule_x_bounds_are_none_when_no_lesson_found():
     assert day.group_col_x1 is None
     assert day.y0 == 0  # y bounds still touched even with no lesson found (spec 5.2)
     assert day.y1 == 20
+
+
+def test_build_schedule_ignores_a_sub_header_row_before_the_first_real_day():
+    # A day_marker row whose cells[0] text is NOT an actual day name (a
+    # stray sub-header like "Часы/1 подгр/2 подгр" that also happens to
+    # have a non-None cells[0]) must NOT consume a slot from DAY_ORDER.
+    rows = [
+        day_row(None, [Cell("Часы", 0, 10), Cell("1 подгр", 10, 20), Cell("2 подгр", 20, 30)], day_marker=True, y0=0, y1=5),
+        day_row("8.30-10.00", [Cell("Понедельник", 0, 10), Cell("8.30-10.00", 10, 20), Cell("Лекция", 20, 30)], day_marker=True, y0=5, y1=15),
+        day_row("8.30-10.00", [Cell("Вторник", 0, 10), Cell("8.30-10.00", 10, 20), Cell("Семинар", 20, 30)], day_marker=True, y0=15, y1=25),
+    ]
+    result = build_schedule(rows, group_column_index=2, table_x1=30.0, time_column_index=1)
+    assert "Понедельник" in result
+    assert result["Понедельник"].lessons[0].upper == "Лекция"
+    assert "Вторник" in result
+    assert result["Вторник"].lessons[0].upper == "Семинар"

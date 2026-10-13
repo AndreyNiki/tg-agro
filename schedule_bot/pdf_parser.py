@@ -180,6 +180,32 @@ class _DayAccumulator:
         )
 
 
+_DAY_ABBREVIATIONS = {"Пн": "Понедельник", "Вт": "Вторник", "Ср": "Среда", "Чт": "Четверг", "Пт": "Пятница", "Сб": "Суббота"}
+
+
+def _match_day(day_text: str | None) -> str | None:
+    """Matches a day_marker row's cells[0] text against DAY_ORDER by
+    name, not by position — a row's position among day_marker rows is
+    not reliable evidence it's a real day label (e.g. an extra
+    sub-header row like "Часы/1 подгр/2 подгр" also has cells[0] not
+    None). The real PDF renders this cell's day name VERTICALLY, so
+    pdfplumber's extraction comes back as one character/chunk per line,
+    top-to-bottom — which is the day name's letters in REVERSE reading
+    order (e.g. "Понедельник" extracts as "л\\nнеде\\nПо"). Reversing the
+    line order before matching recovers the (possibly cell-height
+    truncated, hence prefix-matched) real name; a short synthetic test
+    label ("Пн") is handled via the abbreviation map instead."""
+    if not day_text:
+        return None
+    normalized = "".join(reversed(day_text.split("\n"))).strip()
+    if not normalized:
+        return None
+    for day in DAY_ORDER:
+        if day.startswith(normalized):
+            return day
+    return _DAY_ABBREVIATIONS.get(normalized)
+
+
 def build_schedule(
     rows: list[RawRow],
     group_column_index: int,
@@ -187,20 +213,23 @@ def build_schedule(
     time_column_index: int = 1,
     epsilon: float = 2.0,
 ) -> dict[str, DaySchedule]:
-    day_names = iter(DAY_ORDER)
     current_day: str | None = None
     current_time: str | None = None
     accumulators: dict[str, _DayAccumulator] = {}
 
     for row in rows:
         if row.day_marker:
-            try:
-                current_day = next(day_names)
-            except StopIteration:
-                current_day = None
-            current_time = None
-            if current_day is not None and current_day not in accumulators:
-                accumulators[current_day] = _DayAccumulator()
+            day_cell = row.cells[0] if row.cells else None
+            matched_day = _match_day(day_cell.text if day_cell is not None else None)
+            if matched_day is not None:
+                current_day = matched_day
+                current_time = None
+                if current_day not in accumulators:
+                    accumulators[current_day] = _DayAccumulator()
+            # A day_marker row whose cells[0] text doesn't match any known
+            # day name (a stray sub-header, or a trailing footer line) is
+            # NOT a day transition — fall through and keep accumulating
+            # into whichever day is already current (or skip, if none yet).
 
         if current_day is None:
             continue
