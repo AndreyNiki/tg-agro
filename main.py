@@ -255,7 +255,7 @@ def build_application(config: Config, conn) -> Application:
         lock = link_locks.setdefault(institute_link_id, asyncio.Lock())
         reschedule_institute_link_jobs(
             scheduler_holder["scheduler"], conn, config, application.bot, institute_link_id, week_formula_holder, lock,
-            catalog_rescan_state,
+            catalog_rescan_state, catalog_locks,
         )
 
     def reschedule_institute_jobs_cb(institute_id: int) -> None:

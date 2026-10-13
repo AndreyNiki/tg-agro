@@ -311,8 +311,8 @@ def test_build_scheduler_gives_each_link_its_own_lock(conn, shutdown_scheduler):
 
     scheduler = shutdown_scheduler(build_scheduler(conn, _config(), bot, holder))
 
-    lock_a = scheduler.get_job(f"link_check_{link_a}").args[-2]
-    lock_b = scheduler.get_job(f"link_check_{link_b}").args[-2]
+    lock_a = scheduler.get_job(f"link_check_{link_a}").args[-3]
+    lock_b = scheduler.get_job(f"link_check_{link_b}").args[-3]
     assert lock_a is not lock_b
 
 
@@ -399,7 +399,7 @@ async def test_link_check_job_shares_catalog_rescan_state_across_calls(conn, mon
 
     seen_states = []
 
-    async def recording_sync(conn_, institute_link, institute, pdf_cache_dir, notify, *, catalog_rescan_state, notify_admin=None):
+    async def recording_sync(conn_, institute_link, institute, pdf_cache_dir, notify, *, catalog_rescan_state, notify_admin=None, catalog_locks=None):
         seen_states.append(catalog_rescan_state)
         catalog_rescan_state[institute.id] = 1.0
         return []
@@ -544,3 +544,66 @@ async def test_link_daily_send_job_sends_to_second_group_even_if_first_groups_pa
 
     sent_chat_ids = {call.kwargs["chat_id"] for call in bot.send_message.await_args_list}
     assert 2222 in sent_chat_ids
+
+
+@pytest.mark.asyncio
+async def test_link_check_job_forwards_catalog_locks_to_sync_institute_link(conn, monkeypatch):
+    """The per-institute catalog_locks dict built in build_scheduler must
+    reach sync_institute_link's 404-fallback rescan through link_check_job
+    — otherwise the highest-frequency catalog-rescan trigger (the hourly
+    link check) runs its rescan unserialized against a manual
+    /refresh_institute_links or menu rescan of the same institute."""
+    import schedule_bot.scheduler as scheduler_module
+
+    institute_id = _make_institute(conn)
+    link_id, group_id = _make_link_and_group(conn, institute_id)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+
+    seen = {}
+
+    async def fake_sync_institute_link(conn_, institute_link, institute, *args, catalog_locks=None, **kwargs):
+        seen["catalog_locks"] = catalog_locks
+        return []
+
+    monkeypatch.setattr(scheduler_module, "sync_institute_link", fake_sync_institute_link)
+
+    bot = MagicMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+    catalog_locks: dict = {}
+    scheduler = build_scheduler(conn, _config(), bot, holder, catalog_locks=catalog_locks)
+    try:
+        job = scheduler.get_job(f"link_check_{link_id}")
+        await job.func(*job.args)
+    finally:
+        scheduler.shutdown(wait=False)  # bound to the pytest-asyncio loop; shut down inside the test
+
+    assert seen["catalog_locks"] is catalog_locks
+
+
+@pytest.mark.asyncio
+async def test_link_daily_send_job_forwards_catalog_locks_to_sync_institute_link(conn, monkeypatch):
+    import schedule_bot.scheduler as scheduler_module
+
+    institute_id = _make_institute(conn)
+    link_id, group_id = _make_link_and_group(conn, institute_id)
+    _seed_active_version(conn, group_id)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+
+    seen = {}
+
+    async def fake_sync_institute_link(conn_, institute_link, institute, *args, catalog_locks=None, **kwargs):
+        seen["catalog_locks"] = catalog_locks
+        return []
+
+    monkeypatch.setattr(scheduler_module, "sync_institute_link", fake_sync_institute_link)
+    monkeypatch.setattr(scheduler_module, "today_in_configured_timezone", lambda tz: FixedMonday.today())
+    monkeypatch.setattr(scheduler_module, "render_day_image", lambda *a, **k: None)
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+    catalog_locks: dict = {}
+
+    await link_daily_send_job(conn, _config(), bot, link_id, holder, catalog_locks=catalog_locks)
+
+    assert seen["catalog_locks"] is catalog_locks

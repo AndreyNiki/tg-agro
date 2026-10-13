@@ -200,9 +200,13 @@ def _match_day(day_text: str | None) -> str | None:
     normalized = "".join(reversed(day_text.split("\n"))).strip()
     if not normalized:
         return None
-    for day in DAY_ORDER:
-        if day.startswith(normalized):
-            return day
+    matches = [day for day in DAY_ORDER if day.startswith(normalized)]
+    if len(matches) == 1:
+        return matches[0]
+    # Zero matches, or more than one (e.g. "С" prefixes both "Среда" and
+    # "Суббота") — an ambiguous short prefix must never be silently
+    # resolved to whichever day happens first in DAY_ORDER, so fall back
+    # to the exact (unambiguous) two-letter abbreviation map only.
     return _DAY_ABBREVIATIONS.get(normalized)
 
 
@@ -220,16 +224,28 @@ def build_schedule(
     for row in rows:
         if row.day_marker:
             day_cell = row.cells[0] if row.cells else None
-            matched_day = _match_day(day_cell.text if day_cell is not None else None)
+            day_text = (day_cell.text or "").strip() if day_cell is not None else ""
+            matched_day = _match_day(day_text)
             if matched_day is not None:
                 current_day = matched_day
                 current_time = None
                 if current_day not in accumulators:
                     accumulators[current_day] = _DayAccumulator()
-            # A day_marker row whose cells[0] text doesn't match any known
-            # day name (a stray sub-header, or a trailing footer line) is
-            # NOT a day transition — fall through and keep accumulating
-            # into whichever day is already current (or skip, if none yet).
+            elif day_text:
+                # A day_marker row with non-empty cells[0] text that
+                # doesn't match any known day name is either a stray
+                # sub-header BEFORE the first real day (harmless no-op,
+                # current_day is already None) or a trailing footer/
+                # signature line AFTER the last real day — in the real
+                # fixture, a wide cell like "Начальник отдела..." that
+                # would otherwise be absorbed as a lesson of the current
+                # day via the merged-cell-to-table-edge fallback below.
+                # Terminating current_day here is what makes that case
+                # safe; an EMPTY cells[0] (shouldn't happen per the
+                # day_marker invariant, but handled defensively) falls
+                # through and keeps accumulating instead.
+                current_day = None
+                continue
 
         if current_day is None:
             continue

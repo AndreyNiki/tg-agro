@@ -426,3 +426,22 @@ def test_sync_institute_link_continues_to_next_group_after_one_groups_insert_fai
 
     assert len(results) == 2
     assert {r.group_id for r in results} == set(group_ids)
+
+
+def test_sync_institute_link_sets_last_sync_failed_at_when_per_group_apply_raises(conn, tmp_path, monkeypatch):
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, FIXTURE_PATH, ["Б-Мв-101"])
+    storage.upsert_member(conn, 111, group_ids[0], joined_at="t")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(storage, "insert_new_version", boom)
+
+    asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
+    ))
+
+    group = storage.get_group(conn, group_ids[0])
+    assert group.last_sync_failed_at

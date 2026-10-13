@@ -103,12 +103,20 @@ def test_stops_after_sixth_day_marker_ignoring_footer_row():
             day_row("8.30-10.00", [None, Cell("8.30-10.00", 30, 60), Cell("Урок", 300, 500)], y0=0, y1=10)
         )
     # a 7th "day marker" row, e.g. a footer signature line, must not be
-    # mistaken for a day label and must not crash/extend the result.
-    rows.append(day_row(None, [Cell("Начальник отдела", 0, 30), None, None], day_marker=True, y0=0, y1=10))
+    # mistaken for a day label, must not crash/extend the result, and —
+    # since its cell spans to the table's right edge, exactly like a real
+    # merged lesson cell — must not be absorbed as a lesson of whichever
+    # day was current (real-fixture regression: schedule_sample.pdf's
+    # footer row has this exact shape and was wrongly absorbed into
+    # Суббота before this was fixed).
+    rows.append(day_row(None, [Cell("Начальник отдела", 0, 500), None, None], day_marker=True, y0=0, y1=10))
     schedule = build_schedule(rows, GROUP_COL, TABLE_X1)
     assert set(schedule.keys()) == {
         "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"
     }
+    saturday_lessons = schedule["Суббота"].lessons
+    assert all("Начальник отдела" not in (l.upper or "") and "Начальник отдела" not in (l.lower or "") for l in saturday_lessons)
+    assert schedule["Суббота"].y1 == 10  # footer row's bbox must not extend Суббота's bounds
 
 
 def test_find_header_column_index_ignores_group_name_appearing_in_body_text():
@@ -215,3 +223,16 @@ def test_build_schedule_ignores_a_sub_header_row_before_the_first_real_day():
     assert result["Понедельник"].lessons[0].upper == "Лекция"
     assert "Вторник" in result
     assert result["Вторник"].lessons[0].upper == "Семинар"
+
+
+def test_build_schedule_does_not_misassign_an_ambiguous_single_letter_day_prefix():
+    # "С" is a prefix of both "Среда" and "Суббота" — a day_marker row
+    # whose (reversed-line-normalized) text is this short must not be
+    # silently assigned to whichever day happens first in DAY_ORDER.
+    rows = [
+        day_row(None, [Cell("С", 0, 30), None, None], day_marker=True, y0=0, y1=10),
+        day_row("8.30-10.00", [None, Cell("8.30-10.00", 30, 60), Cell("Матан", 300, 500)], y0=0, y1=10),
+    ]
+    schedule = build_schedule(rows, GROUP_COL, TABLE_X1)
+    assert "Среда" not in schedule
+    assert "Суббота" not in schedule

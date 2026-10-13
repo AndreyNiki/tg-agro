@@ -48,6 +48,23 @@ def test_saturday_8_30_slot_is_fully_empty_and_omitted(schedule):
     assert "8.30-10.00" not in lessons
 
 
+def test_saturday_does_not_absorb_the_footer_signature_row(schedule):
+    """The real fixture's last row is a footer signature line
+    ("Начальник отдела ОУП УОКО Юдина М.Р.") whose day_marker is True
+    (cells[0] is not None) but whose text is not a day name. _match_day
+    correctly declines to start a new day for it, but build_schedule must
+    also stop accumulating into the CURRENT day (Суббота) once such a
+    row appears — otherwise the footer's wide cell gets absorbed as a
+    13.40-15.10 lesson via the merged-cell-to-table-edge fallback, and
+    Суббота's y1 silently expands past its last real lesson row."""
+    lessons = {l.time: (l.upper, l.lower) for l in schedule.days["Суббота"].lessons}
+    assert "13.40-15.10" not in lessons
+    for upper, lower in lessons.values():
+        assert "Начальник отдела" not in (upper or "")
+        assert "Начальник отдела" not in (lower or "")
+    assert schedule.days["Суббота"].y1 < 570.0
+
+
 def test_parse_schedule_raises_for_unknown_group():
     with pytest.raises(ValueError):
         parse_schedule(FIXTURE_PATH, "NO-SUCH-GROUP")

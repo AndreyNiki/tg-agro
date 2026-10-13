@@ -278,6 +278,10 @@ async def sync_institute_link(
             results.append(SyncResult(group_id=group.id, status="applied", changes=changes))
         except Exception as error:
             logger.exception("sync: failed to apply sync result for group %r (id=%s): %s", group.name, group.id, error)
+            try:
+                storage.set_group_last_sync_failed_at(conn, group.id, datetime.now(timezone.utc).isoformat())
+            except Exception:
+                logger.exception("sync: failed to record last_sync_failed_at for group %r (id=%s)", group.name, group.id)
             results.append(SyncResult(group_id=group.id, status="error"))
 
     return results

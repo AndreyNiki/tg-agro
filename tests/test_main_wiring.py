@@ -402,7 +402,7 @@ async def test_build_application_shares_one_lock_per_link_between_refresh_and_sc
     stub = AsyncMock(return_value=[])
     monkeypatch.setattr("main.sync_institute_link", stub)
 
-    job_lock = scheduler.get_job(f"link_check_{institute_link_id}").args[-2]
+    job_lock = scheduler.get_job(f"link_check_{institute_link_id}").args[-3]
     assert isinstance(job_lock, asyncio.Lock)
 
     # Acquire the scheduled job's lock first (uncontended acquire on an
@@ -443,8 +443,8 @@ def test_build_application_still_gives_different_links_independent_locks(conn, c
     application = build_application(config, conn)
     scheduler = application.bot_data["_scheduler"]
 
-    lock_a = scheduler.get_job(f"link_check_{link_a}").args[-2]
-    lock_b = scheduler.get_job(f"link_check_{link_b}").args[-2]
+    lock_a = scheduler.get_job(f"link_check_{link_a}").args[-3]
+    lock_b = scheduler.get_job(f"link_check_{link_b}").args[-3]
     assert lock_a is not lock_b
 
     scheduler.shutdown(wait=False)
@@ -555,7 +555,7 @@ async def test_manual_refresh_and_scheduled_jobs_share_one_catalog_rescan_state(
 
     scheduled_state = application.bot_data["_scheduler"].get_job(
         f"link_check_{group.institute_link_id}"
-    ).args[-1]
+    ).args[-2]
     assert scheduled_state is application.bot_data["_catalog_rescan_state"]
 
     seen = []

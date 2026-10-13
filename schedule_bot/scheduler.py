@@ -32,7 +32,7 @@ async def _notify(bot, chat_id: int, text: str) -> None:
 
 async def link_check_job(
     conn, config, bot, institute_link_id: int, lock: asyncio.Lock | None = None,
-    catalog_rescan_state: dict | None = None,
+    catalog_rescan_state: dict | None = None, catalog_locks: dict | None = None,
 ) -> None:
     # Must be the dict owned by build_scheduler/main.py and shared by every
     # job of every link, otherwise the 404-rescan rate limit degenerates
@@ -58,6 +58,7 @@ async def link_check_job(
             lambda chat_id, text: _notify(bot, chat_id, text),
             catalog_rescan_state=rescan_state,
             notify_admin=lambda text: _notify(bot, config.admin_chat_id, text),
+            catalog_locks=catalog_locks,
         )
 
     logger.info("scheduler: link_check_job starting for link id=%s", institute_link_id)
@@ -82,7 +83,7 @@ async def link_check_job(
 
 async def link_daily_send_job(
     conn, config, bot, institute_link_id: int, week_formula_holder: WeekFormulaHolder, lock: asyncio.Lock | None = None,
-    catalog_rescan_state: dict | None = None,
+    catalog_rescan_state: dict | None = None, catalog_locks: dict | None = None,
 ) -> None:
     rescan_state = catalog_rescan_state if catalog_rescan_state is not None else {}
     state: dict = {}
@@ -104,6 +105,7 @@ async def link_daily_send_job(
             lambda chat_id, text: _notify(bot, chat_id, text),
             catalog_rescan_state=rescan_state,
             notify_admin=lambda text: _notify(bot, config.admin_chat_id, text),
+            catalog_locks=catalog_locks,
         )
 
     try:
@@ -260,7 +262,7 @@ def _safe_interval_minutes(value: int | str, default: int) -> int:
 
 def schedule_link_jobs(
     scheduler, conn, config, bot, institute_link, institute, week_formula_holder, lock,
-    catalog_rescan_state: dict | None = None,
+    catalog_rescan_state: dict | None = None, catalog_locks: dict | None = None,
 ) -> None:
     check_id = f"link_check_{institute_link.id}"
     daily_id = f"link_daily_send_{institute_link.id}"
@@ -275,7 +277,7 @@ def schedule_link_jobs(
     scheduler.add_job(
         link_daily_send_job,
         CronTrigger(hour=hour, minute=minute, timezone=institute.timezone),
-        args=[conn, config, bot, institute_link.id, week_formula_holder, lock, catalog_rescan_state],
+        args=[conn, config, bot, institute_link.id, week_formula_holder, lock, catalog_rescan_state, catalog_locks],
         id=daily_id,
         replace_existing=True,
     )
@@ -284,7 +286,7 @@ def schedule_link_jobs(
     scheduler.add_job(
         link_check_job,
         IntervalTrigger(minutes=interval_minutes),
-        args=[conn, config, bot, institute_link.id, lock, catalog_rescan_state],
+        args=[conn, config, bot, institute_link.id, lock, catalog_rescan_state, catalog_locks],
         id=check_id,
         replace_existing=True,
     )
@@ -306,11 +308,15 @@ def schedule_institute_catalog_job(
     )
 
 
-def make_links_rescheduler(scheduler, conn, config, bot, week_formula_holder, locks: dict, catalog_rescan_state: dict):
+def make_links_rescheduler(
+    scheduler, conn, config, bot, week_formula_holder, locks: dict, catalog_rescan_state: dict,
+    catalog_locks: dict | None = None,
+):
     """Callback handed to institute_catalog_refresh_job so a link found by
     the BACKGROUND catalog scan immediately gets its own
     link_check_*/link_daily_send_* jobs, wired to the same per-link Lock
-    and the same shared catalog_rescan_state as everything else."""
+    and the same shared catalog_rescan_state/catalog_locks as everything
+    else."""
 
     def reschedule_links(institute_id: int) -> None:
         institute = storage.get_institute(conn, institute_id)
@@ -320,7 +326,7 @@ def make_links_rescheduler(scheduler, conn, config, bot, week_formula_holder, lo
             link_lock = locks.setdefault(institute_link.id, asyncio.Lock())
             schedule_link_jobs(
                 scheduler, conn, config, bot, institute_link, institute, week_formula_holder, link_lock,
-                catalog_rescan_state,
+                catalog_rescan_state, catalog_locks,
             )
 
     return reschedule_links
@@ -328,7 +334,7 @@ def make_links_rescheduler(scheduler, conn, config, bot, week_formula_holder, lo
 
 def reschedule_institute_link_jobs(
     scheduler, conn, config, bot, institute_link_id: int, week_formula_holder, lock,
-    catalog_rescan_state: dict | None = None,
+    catalog_rescan_state: dict | None = None, catalog_locks: dict | None = None,
 ) -> None:
     institute_link = storage.get_institute_link(conn, institute_link_id)
     if institute_link is None:
@@ -337,7 +343,8 @@ def reschedule_institute_link_jobs(
     if institute is None:
         return
     schedule_link_jobs(
-        scheduler, conn, config, bot, institute_link, institute, week_formula_holder, lock, catalog_rescan_state
+        scheduler, conn, config, bot, institute_link, institute, week_formula_holder, lock, catalog_rescan_state,
+        catalog_locks,
     )
 
 
@@ -352,14 +359,14 @@ def reschedule_institute_jobs(
         catalog_rescan_state = {}
     schedule_institute_catalog_job(
         scheduler, conn, config, bot, institute,
-        make_links_rescheduler(scheduler, conn, config, bot, week_formula_holder, locks, catalog_rescan_state),
+        make_links_rescheduler(scheduler, conn, config, bot, week_formula_holder, locks, catalog_rescan_state, catalog_locks),
         catalog_locks,
     )
     for institute_link in storage.list_institute_links(conn, institute_id, include_stale=False):
         link_lock = locks.setdefault(institute_link.id, asyncio.Lock())
         schedule_link_jobs(
             scheduler, conn, config, bot, institute_link, institute, week_formula_holder, link_lock,
-            catalog_rescan_state,
+            catalog_rescan_state, catalog_locks,
         )
 
 
@@ -381,7 +388,7 @@ def build_scheduler(
     )
 
     reschedule_links = make_links_rescheduler(
-        scheduler, conn, config, bot, week_formula_holder, locks, catalog_rescan_state
+        scheduler, conn, config, bot, week_formula_holder, locks, catalog_rescan_state, catalog_locks
     )
     for institute in storage.list_institutes(conn):
         schedule_institute_catalog_job(scheduler, conn, config, bot, institute, reschedule_links, catalog_locks)
@@ -389,7 +396,7 @@ def build_scheduler(
             link_lock = locks.setdefault(institute_link.id, asyncio.Lock())
             schedule_link_jobs(
                 scheduler, conn, config, bot, institute_link, institute, week_formula_holder, link_lock,
-                catalog_rescan_state,
+                catalog_rescan_state, catalog_locks,
             )
 
     scheduler.add_job(
