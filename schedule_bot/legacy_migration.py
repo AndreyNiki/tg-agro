@@ -98,9 +98,19 @@ async def run_legacy_migration_if_configured(
             )
         return
 
-    chat_ids = storage.list_all_member_chat_ids(conn)
+    # Only genuinely still-unmigrated legacy users move: a chat_id that
+    # re-subscribed via /start after the destructive schema rebuild (its
+    # own fresh `members` row already exists) must never be silently
+    # reassigned onto the legacy target group, overwriting their own
+    # deliberate choice. `upsert_member` (not `reassign_member_group`) is
+    # required because these chat_ids have no `members` row at all —
+    # reassign_member_group's UPDATE would silently affect zero rows.
+    backed_up_chat_ids = set(storage.list_legacy_member_chat_ids_backup(conn))
+    already_subscribed_chat_ids = set(storage.list_all_member_chat_ids(conn))
+    chat_ids = backed_up_chat_ids - already_subscribed_chat_ids
+    now = datetime.now(timezone.utc).isoformat()
     for chat_id in chat_ids:
-        storage.reassign_member_group(conn, chat_id, group.id)
+        storage.upsert_member(conn, chat_id, group.id, joined_at=now, subscribed=True)
 
     # validate_and_sync_group_on_first_subscribe's own immediate sync ran
     # BEFORE any member was reassigned onto this group, so it was a

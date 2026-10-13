@@ -737,3 +737,25 @@ def test_reassign_member_group_updates_group_id_only(conn):
     assert member.subscribed is False  # untouched
     assert member.joined_at == "2026-01-01T00:00:00+00:00"  # untouched
     assert member.telegram_username == "bob"  # untouched
+
+
+def test_init_db_backs_up_member_chat_ids_before_dropping_legacy_schema(tmp_path):
+    db_path = tmp_path / "legacy.db"
+    old_conn = sqlite3.connect(str(db_path))
+    old_conn.executescript(
+        """
+        CREATE TABLE groups (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+        CREATE TABLE members (chat_id INTEGER PRIMARY KEY, group_id INTEGER NOT NULL REFERENCES groups(id));
+        INSERT INTO groups (id, name) VALUES (1, 'ОлдГруппа');
+        INSERT INTO members (chat_id, group_id) VALUES (111, 1), (222, 1);
+        """
+    )
+    old_conn.commit()
+    old_conn.close()
+
+    new_conn = sqlite3.connect(str(db_path))
+    storage.init_db(new_conn)
+
+    backed_up = sorted(storage.list_legacy_member_chat_ids_backup(new_conn))
+    assert backed_up == [111, 222]
+    assert storage.list_all_member_chat_ids(new_conn) == []

@@ -12,7 +12,27 @@ def _needs_institute_schema_rebuild(conn: sqlite3.Connection) -> bool:
     return "institute_id" not in columns
 
 
+def _backup_legacy_member_chat_ids(conn: sqlite3.Connection) -> None:
+    info = conn.execute("PRAGMA table_info(members)").fetchall()
+    if not info:
+        return  # no members table existed yet in the old schema — nothing to back up
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS legacy_members_backup (chat_id INTEGER PRIMARY KEY);
+        INSERT OR IGNORE INTO legacy_members_backup (chat_id) SELECT chat_id FROM members;
+        """
+    )
+    conn.commit()
+
+
 def _rebuild_groups_members_schedule_versions(conn: sqlite3.Connection) -> None:
+    # Every existing members.chat_id is preserved in legacy_members_backup
+    # BEFORE the drop, specifically so run_legacy_migration_if_configured
+    # (which runs much later, inside post_init) has something to migrate
+    # from — without this, every subscriber from a pre-institutes-schema
+    # database is silently and permanently lost the moment this rebuild
+    # runs.
+    _backup_legacy_member_chat_ids(conn)
     # FK-safe drop order: schedule_versions/members reference groups(id).
     conn.executescript(
         """
@@ -22,6 +42,14 @@ def _rebuild_groups_members_schedule_versions(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+
+
+def list_legacy_member_chat_ids_backup(conn: sqlite3.Connection) -> list[int]:
+    info = conn.execute("PRAGMA table_info(legacy_members_backup)").fetchall()
+    if not info:
+        return []
+    rows = conn.execute("SELECT chat_id FROM legacy_members_backup").fetchall()
+    return [row[0] for row in rows]
 
 
 def init_db(conn: sqlite3.Connection) -> None:
