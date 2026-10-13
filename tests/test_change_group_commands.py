@@ -30,13 +30,18 @@ def _make_institute(conn, name="ИТ"):
     )
 
 
-def _make_group(conn, name):
+def _make_group(conn, name, is_verified=1, pdf_url=None):
+    # Default is_verified=1: these tests exercise the switch mechanics, not
+    # the subscribe-time PDF validation (which has its own tests below and
+    # in test_group_commands.py).
     institute_id = _make_institute(conn, f"ИТ-{name}")
     link_id = storage.create_institute_link(
-        conn, institute_id=institute_id, pdf_url=f"https://example.com/{name}.pdf",
+        conn, institute_id=institute_id, pdf_url=pdf_url or f"https://example.com/{name}.pdf",
         group_names=[name], raw_label=name, last_seen_at="t",
     )
-    return storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name)
+    group_id = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name)
+    storage.update_group_is_verified(conn, group_id, is_verified)
+    return group_id
 
 
 def make_message_update(chat_id):
@@ -57,7 +62,11 @@ def make_callback_update(chat_id, data):
 
 def make_context(conn):
     context = MagicMock()
-    context.bot_data = {"conn": conn, "admin_chat_id": ADMIN_CHAT_ID}
+    context.bot_data = {
+        "conn": conn, "admin_chat_id": ADMIN_CHAT_ID,
+        "config": MagicMock(pdf_cache_dir="/tmp/cache"),
+        "sync_institute_link_fn": AsyncMock(return_value=[]),
+    }
     context.bot.send_message = AsyncMock()
     return context
 
@@ -74,8 +83,7 @@ async def test_change_group_command_shows_picker_excluding_current_group(conn):
 
     _, kwargs = update.message.reply_text.call_args
     texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
-    assert "A" not in texts
-    assert "B" in texts
+    assert texts == ["ИТ-B / B"]  # institute-prefixed label, current group excluded
 
 
 @pytest.mark.asyncio
@@ -349,3 +357,92 @@ def test_build_requests_messages_returns_one_entry_per_pending_request(conn):
 def test_build_requests_messages_empty_for_group_without_pending(conn):
     group_b = storage.get_group(conn, _make_group(conn, "B"))
     assert _build_requests_messages(conn, group_b) == []
+
+
+@pytest.mark.asyncio
+async def test_change_group_picker_hides_not_found_groups(conn):
+    """is_verified == -1 ("не найдена в PDF") must be hidden from THIS
+    picker too, not only from the subscribe-flow one."""
+    group_a = _make_group(conn, "A")
+    _make_group(conn, "B")
+    _make_group(conn, "Bad", is_verified=-1)
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    update = make_message_update(111)
+    context = make_context(conn)
+
+    await change_group_command(update, context)
+
+    _, kwargs = update.message.reply_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert not any("Bad" in text for text in texts)
+    assert any("B" in text for text in texts)
+
+
+@pytest.mark.asyncio
+async def test_approve_validates_unverified_target_group_before_switching(conn):
+    """Switching into an is_verified == 0 group must run the same
+    validation + immediate first sync as a first subscribe; a group whose
+    name isn't in the PDF must not be switched into silently."""
+    from pathlib import Path
+
+    fixture = str(Path(__file__).parent / "fixtures" / "schedule_sample.pdf")
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "НЕТ-ТАКОЙ-ГРУППЫ", is_verified=0, pdf_url=fixture)
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    request_id = storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+    update = make_callback_update(ADMIN_CHAT_ID, f"chgreq:approve:{request_id}")
+    context = make_context(conn)
+
+    await change_request_approve_callback(update, context)
+
+    assert storage.get_member(conn, 111).group_id == group_a  # rolled back
+    assert storage.get_group(conn, group_b).is_verified == -1
+    assert storage.get_group_change_request(conn, request_id).status == "pending"
+    context.bot_data["sync_institute_link_fn"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_approve_syncs_unverified_target_group_on_success(conn):
+    from pathlib import Path
+
+    fixture = str(Path(__file__).parent / "fixtures" / "schedule_sample.pdf")
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "Б-Мв-101", is_verified=0, pdf_url=fixture)
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    request_id = storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+    update = make_callback_update(ADMIN_CHAT_ID, f"chgreq:approve:{request_id}")
+    context = make_context(conn)
+
+    await change_request_approve_callback(update, context)
+
+    assert storage.get_member(conn, 111).group_id == group_b
+    assert storage.get_group(conn, group_b).is_verified == 1
+    assert storage.get_group_change_request(conn, request_id).status == "approved"
+    context.bot_data["sync_institute_link_fn"].assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_approve_into_stale_link_group_makes_no_network_call(conn, monkeypatch):
+    import schedule_bot.group_commands as group_commands_module
+
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B2", is_verified=0)
+    link_id = storage.get_group(conn, group_b).institute_link_id
+    institute_id = storage.get_group(conn, group_b).institute_id
+    storage.mark_stale_links_not_in(conn, institute_id, confirmed_link_ids=[])
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    request_id = storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+
+    monkeypatch.setattr(
+        group_commands_module, "_load_pdf_bytes",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("stale link must not be fetched")),
+    )
+
+    update = make_callback_update(ADMIN_CHAT_ID, f"chgreq:approve:{request_id}")
+    context = make_context(conn)
+
+    await change_request_approve_callback(update, context)
+
+    assert storage.get_member(conn, 111).group_id == group_a
+    assert storage.get_group_change_request(conn, request_id).status == "pending"
+    context.bot.send_message.assert_not_awaited()

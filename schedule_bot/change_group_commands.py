@@ -6,7 +6,11 @@ from telegram.ext import ContextTypes
 
 from schedule_bot import elections, storage
 from schedule_bot.bot import _resolve_admin_group, is_admin
-from schedule_bot.group_commands import GROUPS_PER_PAGE
+from schedule_bot.group_commands import (
+    GROUPS_PER_PAGE,
+    _rollback_membership,
+    validate_and_sync_group_on_first_subscribe,
+)
 from schedule_bot.join_requests import notify_approvers
 from schedule_bot.telegram_utils import reply, send_with_retry
 
@@ -18,12 +22,34 @@ _CONFIRM_PREFIX = "chgconfirm:"
 _ABORT_CALLBACK_DATA = "chgabort"
 
 
+def _group_button_label(conn, group, institute_names: dict) -> str:
+    """This picker is deliberately flat/cross-institute (a user may move
+    to any group in the system), so the institute name is prefixed to
+    disambiguate same-named groups of two different institutes — a
+    two-step institute->group picker here would be a UX redesign beyond
+    the scope of this fix."""
+    if group.institute_id not in institute_names:
+        institute = storage.get_institute(conn, group.institute_id)
+        institute_names[group.institute_id] = institute.name if institute is not None else "?"
+    return f"{institute_names[group.institute_id]} / {group.name}"
+
+
 def build_change_group_keyboard(conn, exclude_group_id: int, page: int = 0) -> InlineKeyboardMarkup:
-    candidates = [g for g in storage.list_all_groups(conn) if g.id != exclude_group_id]
+    # is_verified == -1 means "name not found in the PDF" and MUST stay
+    # hidden from every picker (global constraint (e)) — not just the
+    # subscribe-flow one.
+    candidates = [
+        g for g in storage.list_all_groups(conn)
+        if g.id != exclude_group_id and g.is_verified != -1
+    ]
     offset = page * GROUPS_PER_PAGE
     page_groups = candidates[offset : offset + GROUPS_PER_PAGE]
 
-    rows = [[InlineKeyboardButton(g.name, callback_data=f"{_SELECT_PREFIX}{g.id}")] for g in page_groups]
+    institute_names: dict = {}
+    rows = [
+        [InlineKeyboardButton(_group_button_label(conn, g, institute_names), callback_data=f"{_SELECT_PREFIX}{g.id}")]
+        for g in page_groups
+    ]
 
     nav_row = []
     if page > 0:
@@ -140,8 +166,45 @@ async def change_request_approve_callback(update: Update, context: ContextTypes.
         return
 
     now = datetime.now(timezone.utc).isoformat()
-    storage.decide_group_change_request(conn, request_id, "approved", now)
+    # Same contract as the first-subscribe picker (spec 1.5/4.2): an
+    # is_verified == 0 group must be validated against the real PDF and
+    # get its immediate first sync before the switch is considered done,
+    # and a stale link must never be fetched. The membership row is
+    # written first because sync_institute_link only syncs links that
+    # have at least one member; it is rolled back if validation fails.
+    previous_member = storage.get_member(conn, request.chat_id)
     storage.upsert_member(conn, request.chat_id, request.to_group_id, joined_at=now, subscribed=True)
+
+    target_group = storage.get_group(conn, request.to_group_id)
+    if target_group.is_verified == 0:
+        institute_link = storage.get_institute_link(conn, target_group.institute_link_id)
+        if institute_link is None or institute_link.is_stale:
+            _rollback_membership(conn, request.chat_id, previous_member)
+            await query.message.reply_text(
+                "Группа временно недоступна, попробуйте позже. Заявка осталась на рассмотрении."
+            )
+            return
+
+        async def notify_admin(text: str) -> None:
+            try:
+                await send_with_retry(
+                    lambda: context.bot.send_message(chat_id=context.bot_data["admin_chat_id"], text=text)
+                )
+            except Exception as error:
+                logger.warning("change_group_commands: failed to notify admin: %s", error)
+
+        ok = await validate_and_sync_group_on_first_subscribe(
+            conn, target_group, context.bot_data["config"].pdf_cache_dir, notify_admin,
+            context.bot_data["sync_institute_link_fn"],
+        )
+        if not ok:
+            _rollback_membership(conn, request.chat_id, previous_member)
+            await query.message.reply_text(
+                "Группа временно недоступна, администратор уведомлён. Заявка осталась на рассмотрении."
+            )
+            return
+
+    storage.decide_group_change_request(conn, request_id, "approved", now)
 
     from_group = storage.get_group(conn, request.from_group_id)
     if from_group is not None and from_group.starosta_chat_id == request.chat_id:
