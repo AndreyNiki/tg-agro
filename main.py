@@ -222,11 +222,6 @@ def build_application(config: Config, conn) -> Application:
     catalog_locks: dict[int, asyncio.Lock] = {}
 
     async def sync_institute_link_fn(institute_link_id: int):
-        institute_link = storage.get_institute_link(conn, institute_link_id)
-        if institute_link is None:
-            raise ValueError(f"Institute link {institute_link_id} not found")
-        institute = storage.get_institute(conn, institute_link.institute_id)
-
         async def notify(chat_id, text):
             await send_with_retry(lambda: application.bot.send_message(chat_id=chat_id, text=text))
 
@@ -237,6 +232,14 @@ def build_application(config: Config, conn) -> Application:
 
         lock = link_locks.setdefault(institute_link_id, asyncio.Lock())
         async with lock:
+            # Re-read institute_link/institute AFTER acquiring the lock —
+            # a concurrent catalog rescan or scheduled sync holding the
+            # same lock may have just mutated institute_links.pdf_url, and
+            # a snapshot taken before queuing for the lock would be stale.
+            institute_link = storage.get_institute_link(conn, institute_link_id)
+            if institute_link is None:
+                raise ValueError(f"Institute link {institute_link_id} not found")
+            institute = storage.get_institute(conn, institute_link.institute_id)
             return await sync_institute_link(
                 conn, institute_link, institute, config.pdf_cache_dir, notify,
                 catalog_rescan_state=catalog_rescan_state,

@@ -474,3 +474,37 @@ async def test_sync_rate_limits_second_404_for_same_institute_through_scheduler_
     scheduler.shutdown(wait=False)  # bound to the pytest-asyncio loop; see note above
 
     assert refresh_calls == [institute_id]
+
+
+@pytest.mark.asyncio
+async def test_link_check_job_sees_pdf_url_change_that_happened_while_waiting_for_the_lock(conn, monkeypatch):
+    """If another holder of the lock changes institute_links.pdf_url while
+    this job is waiting to acquire the lock, the job must sync against
+    the NEW pdf_url, not a stale snapshot taken before it queued."""
+    institute_id = _make_institute(conn)
+    link_id, group_id = _make_link_and_group(conn, institute_id, pdf_url="/old.pdf")
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+
+    lock = asyncio.Lock()
+    seen_urls = []
+
+    async def fake_sync_institute_link(conn_, institute_link, institute, *args, **kwargs):
+        seen_urls.append(institute_link.pdf_url)
+        return []
+
+    monkeypatch.setattr("schedule_bot.scheduler.sync_institute_link", fake_sync_institute_link)
+
+    # Hold the lock before starting the job, so the job's institute_link
+    # lookup (if it happens before acquiring the lock) reads the OLD url,
+    # then blocks on the lock — deterministically reproducing the race,
+    # unlike a plain asyncio.gather of two unordered coroutines.
+    await lock.acquire()
+    task = asyncio.create_task(
+        link_check_job(conn, _config(), MagicMock(), link_id, lock=lock, catalog_rescan_state={})
+    )
+    await asyncio.sleep(0)  # let the job run up to the point it blocks on the lock
+    storage.update_institute_link_pdf_url(conn, link_id, "/new.pdf")
+    lock.release()
+    await task
+
+    assert seen_urls == ["/new.pdf"]

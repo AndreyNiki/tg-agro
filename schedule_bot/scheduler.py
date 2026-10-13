@@ -34,14 +34,6 @@ async def link_check_job(
     conn, config, bot, institute_link_id: int, lock: asyncio.Lock | None = None,
     catalog_rescan_state: dict | None = None,
 ) -> None:
-    institute_link = storage.get_institute_link(conn, institute_link_id)
-    if institute_link is None:
-        logger.warning("scheduler: link_check_job skipped, institute_link_id=%s no longer exists", institute_link_id)
-        return
-    institute = storage.get_institute(conn, institute_link.institute_id)
-    if institute is None:
-        return
-
     # Must be the dict owned by build_scheduler/main.py and shared by every
     # job of every link, otherwise the 404-rescan rate limit degenerates
     # into "once per link per call", i.e. no limit at all. The local
@@ -49,6 +41,18 @@ async def link_check_job(
     rescan_state = catalog_rescan_state if catalog_rescan_state is not None else {}
 
     async def _do_sync():
+        # Re-read institute_link/institute AFTER acquiring the lock (not
+        # before it): a concurrent catalog rescan or /refresh holding the
+        # same lock may have just mutated institute_links.pdf_url, and a
+        # snapshot taken before queuing for the lock would sync against a
+        # now-stale url.
+        institute_link = storage.get_institute_link(conn, institute_link_id)
+        if institute_link is None:
+            logger.warning("scheduler: link_check_job skipped, institute_link_id=%s no longer exists", institute_link_id)
+            return
+        institute = storage.get_institute(conn, institute_link.institute_id)
+        if institute is None:
+            return
         return await sync_institute_link(
             conn, institute_link, institute, config.pdf_cache_dir,
             lambda chat_id, text: _notify(bot, chat_id, text),
@@ -80,18 +84,22 @@ async def link_daily_send_job(
     conn, config, bot, institute_link_id: int, week_formula_holder: WeekFormulaHolder, lock: asyncio.Lock | None = None,
     catalog_rescan_state: dict | None = None,
 ) -> None:
-    institute_link = storage.get_institute_link(conn, institute_link_id)
-    if institute_link is None:
-        logger.warning("scheduler: link_daily_send_job skipped, institute_link_id=%s no longer exists", institute_link_id)
-        return
-    institute = storage.get_institute(conn, institute_link.institute_id)
-    if institute is None:
-        return
-
     rescan_state = catalog_rescan_state if catalog_rescan_state is not None else {}
+    state: dict = {}
 
     async def _do_sync():
-        return await sync_institute_link(
+        # Re-read institute_link/institute AFTER acquiring the lock — see
+        # link_check_job's identical comment for why a pre-lock snapshot
+        # would be a TOCTOU bug here.
+        institute_link = storage.get_institute_link(conn, institute_link_id)
+        if institute_link is None:
+            logger.warning("scheduler: link_daily_send_job skipped, institute_link_id=%s no longer exists", institute_link_id)
+            return
+        institute = storage.get_institute(conn, institute_link.institute_id)
+        if institute is None:
+            return
+        state["institute"] = institute
+        await sync_institute_link(
             conn, institute_link, institute, config.pdf_cache_dir,
             lambda chat_id, text: _notify(bot, chat_id, text),
             catalog_rescan_state=rescan_state,
@@ -107,6 +115,15 @@ async def link_daily_send_job(
     except Exception as error:
         logger.warning("scheduler: link_daily_send_job sync failed for link id=%s: %s", institute_link_id, error)
 
+    institute = state.get("institute")
+    if institute is None:
+        # _do_sync raised before setting state["institute"] (e.g. the sync
+        # itself failed) — re-fetch so the send loop below still runs with
+        # whatever institute.timezone is current now.
+        refreshed_link = storage.get_institute_link(conn, institute_link_id)
+        institute = storage.get_institute(conn, refreshed_link.institute_id) if refreshed_link else None
+    if institute is None:
+        return
     today = today_in_configured_timezone(institute.timezone)
     day_name = DAY_ORDER[today.weekday()] if today.weekday() < len(DAY_ORDER) else None
     if day_name is None:
