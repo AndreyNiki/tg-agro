@@ -454,3 +454,28 @@ async def test_two_concurrent_catalog_scans_of_same_institute_serialize():
 
     await asyncio.gather(scan("A"), scan("B"))
     assert events in (["A:start", "A:end", "B:start", "B:end"], ["B:start", "B:end", "A:start", "A:end"])
+
+
+def test_second_pdf_with_same_group_names_does_not_steal_the_first_links_row(conn, monkeypatch):
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    monkeypatch.setattr(
+        group_links_module, "fetch_source_page_html",
+        _two_level_fetch('<a href="/a.pdf">Б-А-301</a>'),
+    )
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+
+    links_after_scan_1 = storage.list_institute_links(conn, institute_id)
+    assert {l.pdf_url for l in links_after_scan_1} == {"https://example.com/a.pdf"}
+
+    monkeypatch.setattr(
+        group_links_module, "fetch_source_page_html",
+        _two_level_fetch('<a href="/a.pdf">Б-А-301</a><a href="/a_s_12_10_2026.pdf">Б-А-301</a>'),
+    )
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+
+    links_after_scan_2 = storage.list_institute_links(conn, institute_id)
+    urls_after_scan_2 = {l.pdf_url for l in links_after_scan_2 if not l.is_stale}
+    assert "https://example.com/a.pdf" in urls_after_scan_2
+    assert "https://example.com/a_s_12_10_2026.pdf" in urls_after_scan_2

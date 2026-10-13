@@ -156,7 +156,7 @@ def looks_like_group_name(name: str) -> bool:
     return bool(_GROUP_NAME_RE.match(name.strip()))
 
 
-def _resolve_link_identity(snapshot_links, pdf_url: str, group_names: list[str]):
+def _resolve_link_identity(snapshot_links, pdf_url: str, group_names: list[str], already_matched_ids: set[int]):
     """Two-phase match per design spec section 1.2. `snapshot_links` is a
     frozen list of InstituteLinkRow taken BEFORE this scan's loop started
     — matching must never consider links created/updated earlier in the
@@ -164,7 +164,12 @@ def _resolve_link_identity(snapshot_links, pdf_url: str, group_names: list[str])
     group name in one scan would collapse into each other (see the
     "conflict" test: two different brand-new links both claiming
     "Б-А-301" in a single scan must stay two separate links, not get
-    merged via the name-set phase). Returns the matched InstituteLinkRow,
+    merged via the name-set phase). `already_matched_ids` holds the ids of
+    links already resolved earlier in THIS scan's loop — phase 2 must
+    never re-match one of them, or two distinct PDF urls appearing in the
+    same scan with an identical group-name set (e.g. a dated reupload of
+    the same file) would collapse into a single institute_links row,
+    silently losing the first one. Returns the matched InstituteLinkRow,
     or None if this is a brand-new link."""
     for link in snapshot_links:
         if link.pdf_url == pdf_url:
@@ -180,6 +185,8 @@ def _resolve_link_identity(snapshot_links, pdf_url: str, group_names: list[str])
         # re-identified by pdf_url (phase 1).
         return None
     for link in snapshot_links:
+        if link.id in already_matched_ids:
+            continue
         if set(json.loads(link.group_names_json)) == candidate_names:
             return link
     return None
@@ -266,6 +273,7 @@ def refresh_institute_catalog(conn, institute, *, notify_admin: Callable[[str], 
         labels_by_url.setdefault(pdf_url, []).append(raw_label)
 
     confirmed_link_ids: list[int] = []
+    already_matched_ids: set[int] = set()
     now = datetime.now(timezone.utc).isoformat()
     seen_group_ids_this_scan: set[int] = set()
     # Snapshot taken once, before any mutation this scan — see
@@ -279,7 +287,7 @@ def refresh_institute_catalog(conn, institute, *, notify_admin: Callable[[str], 
             name for raw_label in raw_labels for name in expand_group_names(raw_label) if looks_like_group_name(name)
         ]
 
-        matched = _resolve_link_identity(pre_scan_links, pdf_url, expanded)
+        matched = _resolve_link_identity(pre_scan_links, pdf_url, expanded, already_matched_ids)
         if matched is None:
             link_id = storage.create_institute_link(
                 conn, institute_id=institute.id, pdf_url=pdf_url,
@@ -291,11 +299,13 @@ def refresh_institute_catalog(conn, institute, *, notify_admin: Callable[[str], 
                 conn, matched.id, group_names=expanded, raw_label=combined_raw_label, last_seen_at=now
             )
             link_id = matched.id
+            already_matched_ids.add(matched.id)
         else:
             storage.update_institute_link_group_names(
                 conn, matched.id, group_names=expanded, raw_label=combined_raw_label, last_seen_at=now
             )
             link_id = matched.id
+            already_matched_ids.add(matched.id)
 
         confirmed_link_ids.append(link_id)
         _upsert_groups_for_link(conn, institute.id, link_id, expanded, seen_group_ids_this_scan)
