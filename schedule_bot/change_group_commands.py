@@ -273,6 +273,27 @@ def _build_requests_messages(conn, group) -> list[tuple[str, "InlineKeyboardMark
     return entries
 
 
+def _build_all_requests_messages(conn) -> list[tuple[str, "InlineKeyboardMarkup"]]:
+    entries = []
+    for request in storage.list_all_pending_requests(conn):
+        group = storage.get_group(conn, request.to_group_id)
+        if group is None:
+            continue
+        requester = storage.get_member(conn, request.chat_id)
+        label = elections.format_candidate_label(requester) if requester is not None else "Неизвестный"
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Одобрить", callback_data=f"chgreq:approve:{request.id}"),
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"chgreq:reject:{request.id}"),
+                ]
+            ]
+        )
+        verb = "вступление" if request.from_group_id is None else "переход"
+        entries.append((f"Заявка от {label} на {verb} в группу «{group.name}».", keyboard))
+    return entries
+
+
 async def requests_command(update, context) -> None:
     conn = context.bot_data["conn"]
     if is_admin(update, context):

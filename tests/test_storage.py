@@ -449,6 +449,17 @@ def test_list_pending_requests_for_group_scoped_by_target(conn):
     assert [r.chat_id for r in pending_for_b] == [111]
 
 
+def test_list_all_pending_requests_spans_groups_and_skips_decided(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.create_group_change_request(conn, 111, group_a, group_b, "t1")
+    storage.create_group_change_request(conn, 222, group_b, group_a, "t2")
+    decided_id = storage.create_group_change_request(conn, 333, group_a, group_b, "t3")
+    storage.decide_group_change_request(conn, decided_id, "approved", "t4")
+    all_pending = storage.list_all_pending_requests(conn)
+    assert [r.chat_id for r in all_pending] == [111, 222]
+
+
 def test_has_group_exclusion_false_when_none_recorded(conn):
     group_id = _make_group(conn)
     assert storage.has_group_exclusion(conn, group_id, 111) is False

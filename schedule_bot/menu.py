@@ -10,13 +10,20 @@ from schedule_bot.bot import (
     _apply_remove_starosta,
     _apply_set_starosta,
     _resolve_admin_group,
+    build_help_text,
+    format_refresh_result,
     schedule_command,
 )
-from schedule_bot.change_group_commands import _build_requests_messages, change_group_command
+from schedule_bot.change_group_commands import (
+    _build_all_requests_messages,
+    _build_requests_messages,
+    change_group_command,
+)
 from schedule_bot.classmates import classmates_command
 from schedule_bot.faq import faq_command
 from schedule_bot.group_links import refresh_institute_catalog
-from schedule_bot.group_commands import subscribe_command, unsubscribe_command
+from schedule_bot.group_commands import build_institute_picker_keyboard, subscribe_command, unsubscribe_command
+from schedule_bot.institute_commands import create_institute_and_scan, format_institute_links
 from schedule_bot.report import _apply_report
 from schedule_bot.starosta_commands import starosta_command, votes_command
 
@@ -30,10 +37,13 @@ def build_root_keyboard(conn, chat_id: int, admin_chat_id: int) -> InlineKeyboar
         rows.append([InlineKeyboardButton("📅 Расписание", callback_data="menu:schedule:root")])
         rows.append([InlineKeyboardButton("👥 Группа", callback_data="menu:group:root")])
         rows.append([InlineKeyboardButton("👑 Староста", callback_data="menu:starosta:root")])
+    else:
+        rows.append([InlineKeyboardButton("🎓 Выбрать институт и группу", callback_data="menu:start:pick")])
     if chat_id == admin_chat_id:
         rows.append([InlineKeyboardButton("⚙️ Админ", callback_data="menu:admin:root")])
     rows.append([InlineKeyboardButton("🆘 Сообщить о проблеме", callback_data="menu:report:start")])
     rows.append([InlineKeyboardButton("❓ FAQ", callback_data="menu:faq:show")])
+    rows.append([InlineKeyboardButton("📜 Список команд", callback_data="menu:help:show")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -196,6 +206,8 @@ def _build_admin_group_picker(conn, pick_action: str, page: int = 0) -> InlineKe
 def _group_settings_submenu(group_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("🔄 Обновить расписание", callback_data=f"menu:refreshgroup:{group_id}")],
+            [InlineKeyboardButton("📢 Оповестить группу", callback_data=f"menu:notifygroup:{group_id}")],
             [InlineKeyboardButton("◀️ Назад", callback_data="menu:admin:groupsettings")],
         ]
     )  # pdf/send-time/interval are institute-level now — see _institute_settings_submenu
@@ -203,6 +215,7 @@ def _group_settings_submenu(group_id: int) -> InlineKeyboardMarkup:
 
 def _institute_picker_keyboard(conn) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(i.name, callback_data=f"menu:pickinstitute:{i.id}")] for i in storage.list_institutes(conn)]
+    rows.append([InlineKeyboardButton("➕ Создать институт", callback_data="menu:admin:createinstitute")])
     rows.append([InlineKeyboardButton("◀️ Назад", callback_data="menu:admin:root")])
     return InlineKeyboardMarkup(rows)
 
@@ -215,7 +228,18 @@ def _institute_settings_submenu(institute_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("Интервал проверки", callback_data=f"menu:setinstitutecheckinterval:{institute_id}")],
             [InlineKeyboardButton("Интервал скана каталога", callback_data=f"menu:setinstitutecataloginterval:{institute_id}")],
             [InlineKeyboardButton("🔄 Пересканировать сейчас", callback_data=f"menu:refreshinstitutelinks:{institute_id}")],
+            [InlineKeyboardButton("📋 Ссылки каталога", callback_data=f"menu:institutelinks:{institute_id}")],
             [InlineKeyboardButton("◀️ Назад", callback_data="menu:admin:institutes")],
+        ]
+    )
+
+
+def _requests_submenu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📋 Все заявки", callback_data="menu:admin:allrequests")],
+            [InlineKeyboardButton("🔎 По группе", callback_data="menu:admin:requestsbygroup")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu:admin:root")],
         ]
     )
 
@@ -246,6 +270,10 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
     if action == "institutes":
         await query.edit_message_text("Выберите институт:", reply_markup=_institute_picker_keyboard(conn))
         return
+    if action == "createinstitute":
+        context.user_data["pending_menu_action"] = {"action": "create_institute_name"}
+        await query.message.reply_text("Отправьте название нового института:")
+        return
     if action == "groupsettings":
         await query.edit_message_text("Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickgroup"))
         return
@@ -260,9 +288,20 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
         )
         return
     if action == "requests":
+        await query.edit_message_text("Заявки:", reply_markup=_requests_submenu_keyboard())
+        return
+    if action == "requestsbygroup":
         await query.edit_message_text(
             "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickrequestsgroup")
         )
+        return
+    if action == "allrequests":
+        entries = _build_all_requests_messages(conn)
+        if not entries:
+            await query.message.reply_text("Нет заявок на рассмотрении.")
+            return
+        for text, keyboard in entries:
+            await query.message.reply_text(text, reply_markup=keyboard)
         return
 
 
@@ -311,6 +350,19 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
             reply_markup=_starosta_pick_submenu(group_id),
         )
         return
+    if action == "refreshgroup":
+        sync_institute_link_fn = context.bot_data["sync_institute_link_fn"]
+        try:
+            results = await sync_institute_link_fn(group.institute_link_id)
+        except Exception as error:
+            await query.message.reply_text(f"Синхронизация не удалась: {error}. Расписание могло устареть.")
+            return
+        await query.message.reply_text(format_refresh_result(results, group))
+        return
+    if action == "notifygroup":
+        context.user_data["pending_menu_action"] = {"action": "notify_admin", "group_id": group_id}
+        await query.message.reply_text("Отправьте текст оповещения:")
+        return
 
 
 async def _handle_institute_scoped_pick(
@@ -345,6 +397,9 @@ async def _handle_institute_scoped_pick(
     if action == "setinstitutecataloginterval":
         context.user_data["pending_menu_action"] = {"action": "set_institute_catalog_interval", "institute_id": institute_id}
         await query.message.reply_text("Отправьте новый интервал сканирования каталога в минутах:")
+        return
+    if action == "institutelinks":
+        await query.message.reply_text(format_institute_links(conn, institute_id))
         return
     if action == "refreshinstitutelinks":
         alerts = []
@@ -383,6 +438,22 @@ async def pending_action_followup(update, context) -> None:
         await update.message.reply_text(
             await _apply_report(conn, context.bot, context.bot_data["admin_chat_id"], update.effective_chat.id, value)
         )
+        return
+
+    if action == "create_institute_name":
+        context.user_data["pending_menu_action"] = {"action": "create_institute_url", "name": value}
+        await update.message.reply_text("Отправьте url каталога нового института:")
+        return
+
+    if action == "create_institute_url":
+        name = pending["name"]
+        config = context.bot_data["config"]
+        alerts: list[str] = []
+        institute_id, scan_status = await create_institute_and_scan(conn, config, name, value, alerts.append)
+        context.bot_data["reschedule_institute_jobs"](institute_id)
+        for text in alerts:
+            await update.message.reply_text(text)
+        await update.message.reply_text(f"Институт «{name}» создан (id={institute_id}), {scan_status}.")
         return
 
     if "institute_id" in pending:
@@ -435,6 +506,8 @@ async def pending_action_followup(update, context) -> None:
             await update.message.reply_text("Вы больше не староста этой группы.")
             return
         await update.message.reply_text(await _apply_notify(conn, context.bot, group, value))
+    elif action == "notify_admin":
+        await update.message.reply_text(await _apply_notify(conn, context.bot, group, value))
 
 
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -452,6 +525,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     group_scoped_actions = {
         "pickgroup", "pickstarostagroup", "toggleclosed", "pickrequestsgroup", "setstarosta", "removestarosta",
+        "refreshgroup", "notifygroup",
     }
     if section in group_scoped_actions:
         await _handle_group_scoped_pick(update, context, conn, chat_id, admin_chat_id, section, int(action))
@@ -460,6 +534,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     institute_scoped_actions = {
         "pickinstitute", "setinstitutecatalogurl", "setinstitutesendtime",
         "setinstitutecheckinterval", "setinstitutecataloginterval", "refreshinstitutelinks",
+        "institutelinks",
     }
     if section in institute_scoped_actions:
         await _handle_institute_scoped_pick(update, context, conn, chat_id, admin_chat_id, section, int(action))
@@ -503,4 +578,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if section == "faq":
         await faq_command(update, context)
+        return
+    if section == "start":
+        await query.message.reply_text("Выберите институт:", reply_markup=build_institute_picker_keyboard(conn))
+        return
+    if section == "help":
+        await query.message.reply_text(build_help_text(chat_id == admin_chat_id))
         return

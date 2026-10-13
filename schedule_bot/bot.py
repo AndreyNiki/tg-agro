@@ -189,12 +189,16 @@ def _format_command_list(commands: list[tuple[str, str]]) -> str:
     return "\n".join(f"/{name} — {description}" for name, description in commands)
 
 
+def build_help_text(is_admin_flag: bool) -> str:
+    lines = ["Доступные команды:", "", _format_command_list(USER_COMMANDS)]
+    if is_admin_flag:
+        lines += ["", "Команды администратора:", "", _format_command_list(ADMIN_COMMANDS)]
+    return "\n".join(lines)
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("bot: /help from chat_id=%s", update.effective_chat.id)
-    lines = ["Доступные команды:", "", _format_command_list(USER_COMMANDS)]
-    if is_admin(update, context):
-        lines += ["", "Команды администратора:", "", _format_command_list(ADMIN_COMMANDS)]
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text(build_help_text(is_admin(update, context)))
 
 
 _HH_MM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]?\d)$")
@@ -217,6 +221,19 @@ def _resolve_admin_group(conn, group_id_str: str):
     return storage.get_group(conn, int(group_id_str))
 
 
+def format_refresh_result(results, group) -> str:
+    own_result = next((r for r in results if r.group_id == group.id), None)
+    if own_result is None:
+        return "Группа не подписана ни на один чат — синхронизация не выполнялась."
+    if own_result.status == "no_changes":
+        return "Изменений нет."
+    if own_result.status == "initial":
+        return "Расписание загружено впервые."
+    if own_result.status == "error":
+        return "Синхронизация для этой группы не удалась — колонка не найдена или сеть недоступна."
+    return "Расписание обновлено и разослано подписчикам."
+
+
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("bot: /refresh from chat_id=%s args=%s", update.effective_chat.id, context.args)
     if not is_admin(update, context):
@@ -237,17 +254,7 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.warning("bot: /refresh sync failed: %s", error)
         await update.message.reply_text(f"Синхронизация не удалась: {error}. Расписание могло устареть.")
         return
-    own_result = next((r for r in results if r.group_id == group.id), None)
-    if own_result is None:
-        await update.message.reply_text("Группа не подписана ни на один чат — синхронизация не выполнялась.")
-    elif own_result.status == "no_changes":
-        await update.message.reply_text("Изменений нет.")
-    elif own_result.status == "initial":
-        await update.message.reply_text("Расписание загружено впервые.")
-    elif own_result.status == "error":
-        await update.message.reply_text("Синхронизация для этой группы не удалась — колонка не найдена или сеть недоступна.")
-    else:
-        await update.message.reply_text("Расписание обновлено и разослано подписчикам.")
+    await update.message.reply_text(format_refresh_result(results, group))
 
 
 async def _apply_alert(conn, bot_client, text: str) -> str:

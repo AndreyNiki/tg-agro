@@ -757,6 +757,13 @@ def list_pending_requests_for_group(conn: sqlite3.Connection, group_id: int) -> 
     return [GroupChangeRequestRow(*row) for row in rows]
 
 
+def list_all_pending_requests(conn: sqlite3.Connection) -> list[GroupChangeRequestRow]:
+    rows = conn.execute(
+        f"SELECT {_REQUEST_COLUMNS} FROM group_change_requests WHERE status = 'pending' ORDER BY requested_at"
+    ).fetchall()
+    return [GroupChangeRequestRow(*row) for row in rows]
+
+
 def create_group_exclusion(
     conn: sqlite3.Connection, group_id: int, chat_id: int, excluded_at: str, excluded_by_chat_id: int
 ) -> None:

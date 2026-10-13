@@ -18,31 +18,27 @@ def _resolve_admin_institute(conn, institute_id_str: str):
     return storage.get_institute(conn, int(institute_id_str))
 
 
-async def add_institute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("institute_commands: /add_institute from chat_id=%s args=%s", update.effective_chat.id, context.args)
-    if not is_admin(update, context):
-        await update.message.reply_text("Недостаточно прав.")
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Использование: /add_institute <название> <url_каталога>")
-        return
-    conn = context.bot_data["conn"]
-    config = context.bot_data["config"]
-    name = context.args[0]
-    catalog_url = context.args[1]
+async def create_institute_and_scan(conn, config, name: str, catalog_url: str, notify_admin) -> tuple[int, str]:
+    """Creates the institute row and runs its first catalog scan.
+
+    Shared by add_institute_command (command path) and menu.py's
+    create-institute dialog so the two entry points can never drift. The
+    blocking HTTP fetch inside refresh_institute_catalog is wrapped in
+    asyncio.to_thread by the caller's convention elsewhere, but is done here
+    directly since both callers need the same off-event-loop guarantee.
+    """
     institute_id = storage.create_institute(
         conn, name=name, catalog_url=catalog_url,
         check_interval_minutes=config.default_check_interval_minutes,
         send_time=config.default_daily_send_time, tz_name=config.default_timezone,
         catalog_refresh_interval_minutes=config.default_catalog_refresh_interval_minutes,
     )
-    alerts: list[str] = []
     try:
         # asyncio.to_thread: refresh_institute_catalog does a blocking HTTP
         # fetch (~15s timeout). With concurrent_updates(True) a direct call
         # would stall every other user's update for that whole time.
         await asyncio.to_thread(
-            refresh_institute_catalog, conn, storage.get_institute(conn, institute_id), notify_admin=alerts.append
+            refresh_institute_catalog, conn, storage.get_institute(conn, institute_id), notify_admin=notify_admin
         )
         link_count = len(storage.list_institute_links(conn, institute_id, include_stale=False))
         if link_count:
@@ -56,6 +52,23 @@ async def add_institute_command(update: Update, context: ContextTypes.DEFAULT_TY
         # a later /refresh_institute_links or the background catalog job can retry the scan.
         logger.warning("institute_commands: initial catalog scan failed for institute_id=%s: %s", institute_id, error)
         scan_status = f"сканирование каталога не удалось: {error}"
+    return institute_id, scan_status
+
+
+async def add_institute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("institute_commands: /add_institute from chat_id=%s args=%s", update.effective_chat.id, context.args)
+    if not is_admin(update, context):
+        await update.message.reply_text("Недостаточно прав.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /add_institute <название> <url_каталога>")
+        return
+    conn = context.bot_data["conn"]
+    config = context.bot_data["config"]
+    name = context.args[0]
+    catalog_url = context.args[1]
+    alerts: list[str] = []
+    institute_id, scan_status = await create_institute_and_scan(conn, config, name, catalog_url, alerts.append)
     context.bot_data["reschedule_institute_jobs"](institute_id)
     for text in alerts:
         await update.message.reply_text(text)
@@ -177,6 +190,18 @@ async def refresh_institute_links_command(update: Update, context: ContextTypes.
     await update.message.reply_text(f"Каталог института «{institute.name}» пересканирован.")
 
 
+def format_institute_links(conn, institute_id: int) -> str:
+    links = storage.list_institute_links(conn, institute_id)
+    if not links:
+        return "У этого института пока нет ссылок."
+    lines = []
+    for link in links:
+        group_count = len(json.loads(link.group_names_json))
+        stale_marker = " [stale]" if link.is_stale else ""
+        lines.append(f"{link.raw_label!r} -> {group_count} групп{stale_marker}")
+    return "\n".join(lines)
+
+
 async def institute_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("institute_commands: /institute_links from chat_id=%s args=%s", update.effective_chat.id, context.args)
     if not is_admin(update, context):
@@ -190,13 +215,4 @@ async def institute_links_command(update: Update, context: ContextTypes.DEFAULT_
     if institute is None:
         await update.message.reply_text("Институт с таким id не найден.")
         return
-    links = storage.list_institute_links(conn, institute.id)
-    if not links:
-        await update.message.reply_text("У этого института пока нет ссылок.")
-        return
-    lines = []
-    for link in links:
-        group_count = len(json.loads(link.group_names_json))
-        stale_marker = " [stale]" if link.is_stale else ""
-        lines.append(f"{link.raw_label!r} -> {group_count} групп{stale_marker}")
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text(format_institute_links(conn, institute.id))

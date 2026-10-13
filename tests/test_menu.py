@@ -364,6 +364,51 @@ async def test_menu_callback_admin_groupsettings_shows_group_picker(conn):
 
 
 @pytest.mark.asyncio
+async def test_menu_callback_admin_requests_shows_submenu(conn):
+    update = make_callback_update(ADMIN_CHAT_ID, "menu:admin:requests")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert "📋 Все заявки" in texts
+    assert "🔎 По группе" in texts
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_requestsbygroup_shows_group_picker(conn):
+    _make_group(conn, "A")
+    update = make_callback_update(ADMIN_CHAT_ID, "menu:admin:requestsbygroup")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert "A" in texts
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_allrequests_lists_pending_across_groups(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.create_group_change_request(conn, 111, None, group_a, "t1")
+    storage.create_group_change_request(conn, 222, None, group_b, "t2")
+    update = make_callback_update(ADMIN_CHAT_ID, "menu:admin:allrequests")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    assert update.callback_query.message.reply_text.await_count == 2
+    texts = [call.args[0] for call in update.callback_query.message.reply_text.await_args_list]
+    assert any("«A»" in t for t in texts)
+    assert any("«B»" in t for t in texts)
+
+
+@pytest.mark.asyncio
 async def test_menu_callback_admin_pickgroup_shows_group_settings_submenu(conn):
     group_id = _make_group(conn, "A")
     update = make_callback_update(ADMIN_CHAT_ID, f"menu:pickgroup:{group_id}")
@@ -801,3 +846,266 @@ def test_group_settings_submenu_back_button_returns_to_groupsettings_not_root():
     back_buttons = [b for row in keyboard.inline_keyboard for b in row if "Назад" in b.text]
     assert len(back_buttons) == 1
     assert back_buttons[0].callback_data == "menu:admin:groupsettings"
+
+
+# --- New: every command reachable from the inline menu ---
+
+
+def test_root_keyboard_non_member_shows_pick_institute_button(conn):
+    keyboard = build_root_keyboard(conn, 111, ADMIN_CHAT_ID)
+    texts = _button_texts(keyboard)
+    assert any("Выбрать институт" in t for t in texts)
+
+
+def test_root_keyboard_member_does_not_show_pick_institute_button(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    keyboard = build_root_keyboard(conn, 111, ADMIN_CHAT_ID)
+    texts = _button_texts(keyboard)
+    assert not any("Выбрать институт" in t for t in texts)
+
+
+def test_root_keyboard_always_shows_help_button(conn):
+    keyboard = build_root_keyboard(conn, 111, ADMIN_CHAT_ID)
+    texts = _button_texts(keyboard)
+    assert any("Список команд" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_start_pick_shows_institute_picker(conn):
+    _make_institute(conn, "ИТ")
+    update = make_callback_update(111, "menu:start:pick")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once()
+    _, kwargs = update.callback_query.message.reply_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert "ИТ" in texts
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_help_show_replies_with_help_text(conn):
+    update = make_callback_update(111, "menu:help:show")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    text = update.callback_query.message.reply_text.call_args.args[0]
+    assert text.startswith("Доступные команды:")
+    assert "/menu" in text
+    assert "Команды администратора" not in text
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_help_show_includes_admin_commands_for_admin(conn):
+    update = make_callback_update(ADMIN_CHAT_ID, "menu:help:show")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    text = update.callback_query.message.reply_text.call_args.args[0]
+    assert "Команды администратора" in text
+
+
+def test_institute_picker_keyboard_has_create_institute_button(conn):
+    from schedule_bot.menu import _institute_picker_keyboard
+
+    keyboard = _institute_picker_keyboard(conn)
+    texts = _button_texts(keyboard)
+    assert any("Создать институт" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_createinstitute_stashes_pending_name(conn):
+    update = make_callback_update(ADMIN_CHAT_ID, "menu:admin:createinstitute")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    assert context.user_data["pending_menu_action"] == {"action": "create_institute_name"}
+    update.callback_query.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_admin_createinstitute_rejects_non_admin(conn):
+    update = make_callback_update(111, "menu:admin:createinstitute")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    assert "pending_menu_action" not in context.user_data
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_create_institute_name_prompts_for_url(conn):
+    update = MagicMock()
+    update.effective_chat.id = ADMIN_CHAT_ID
+    update.message.text = "Новый ИТ"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "create_institute_name"}}
+
+    await pending_action_followup(update, context)
+
+    assert context.user_data["pending_menu_action"] == {"action": "create_institute_url", "name": "Новый ИТ"}
+    update.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_create_institute_url_creates_and_reschedules(conn):
+    update = MagicMock()
+    update.effective_chat.id = ADMIN_CHAT_ID
+    update.message.text = "https://example.com/catalog"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "create_institute_url", "name": "Новый ИТ"}}
+    context.bot_data["config"] = MagicMock(
+        default_daily_send_time="09:00", default_check_interval_minutes=60,
+        default_timezone="Europe/Moscow", default_catalog_refresh_interval_minutes=10080,
+    )
+    context.bot_data["reschedule_institute_jobs"] = MagicMock()
+
+    await pending_action_followup(update, context)
+
+    institutes = storage.list_institutes(conn)
+    assert any(i.name == "Новый ИТ" for i in institutes)
+    context.bot_data["reschedule_institute_jobs"].assert_called_once()
+    assert "pending_menu_action" not in context.user_data
+
+
+def test_institute_settings_submenu_has_institute_links_button():
+    from schedule_bot.menu import _institute_settings_submenu
+
+    keyboard = _institute_settings_submenu(1)
+    texts = _button_texts(keyboard)
+    assert any("Ссылки каталога" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_institutelinks_lists_raw_labels_and_group_counts(conn):
+    institute_id = _make_institute(conn)
+    storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url="https://example.com/1.pdf",
+        group_names=["A", "B"], raw_label="A,B", last_seen_at="t",
+    )
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:institutelinks:{institute_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once_with("'A,B' -> 2 групп")
+
+
+def test_group_settings_submenu_has_refresh_and_notify_buttons():
+    from schedule_bot.menu import _group_settings_submenu
+
+    keyboard = _group_settings_submenu(42)
+    texts = _button_texts(keyboard)
+    assert any("Обновить расписание" in t for t in texts)
+    assert any("Оповестить группу" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_refreshgroup_calls_sync_and_reports_result(conn):
+    group_id = _make_group(conn, "A")
+    group = storage.get_group(conn, group_id)
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:refreshgroup:{group_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    class Result:
+        def __init__(self, group_id, status):
+            self.group_id = group_id
+            self.status = status
+
+    sync_fn = AsyncMock(return_value=[Result(group_id, "no_changes")])
+    context.bot_data["sync_institute_link_fn"] = sync_fn
+
+    await menu_callback(update, context)
+
+    sync_fn.assert_awaited_once_with(group.institute_link_id)
+    update.callback_query.message.reply_text.assert_awaited_once_with("Изменений нет.")
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_refreshgroup_reports_sync_failure_without_raising(conn):
+    group_id = _make_group(conn, "A")
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:refreshgroup:{group_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    async def boom(_link_id):
+        raise RuntimeError("fetch failed")
+
+    context.bot_data["sync_institute_link_fn"] = boom
+
+    await menu_callback(update, context)
+
+    text = update.callback_query.message.reply_text.call_args.args[0]
+    assert "не удалась" in text
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_refreshgroup_rejects_non_admin(conn):
+    group_id = _make_group(conn, "A")
+    update = make_callback_update(111, f"menu:refreshgroup:{group_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited_once_with("Недостаточно прав.")
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_notifygroup_stashes_pending_notify_admin(conn):
+    group_id = _make_group(conn, "A")
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:notifygroup:{group_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    assert context.user_data["pending_menu_action"] == {"action": "notify_admin", "group_id": group_id}
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_notify_admin_sends_to_group_members(conn):
+    group_id = _make_group(conn, "A")
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    update = MagicMock()
+    update.effective_chat.id = ADMIN_CHAT_ID
+    update.message.text = "Внимание всем"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "notify_admin", "group_id": group_id}}
+    context.bot.send_message = AsyncMock()
+
+    await pending_action_followup(update, context)
+
+    context.bot.send_message.assert_awaited()
+    assert "pending_menu_action" not in context.user_data
