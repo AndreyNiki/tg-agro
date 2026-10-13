@@ -133,44 +133,49 @@ async def link_daily_send_job(
     render_error_notified = False
 
     for group in storage.list_groups_for_link(conn, institute_link_id):
-        active = storage.get_active_version(conn, group.id)
-        if active is None:
-            continue
-        schedule = schedule_from_dict(json.loads(active.payload_json))
-
-        text = format_day_schedule(day_name, today, week_type, schedule)
-        group = storage.get_group(conn, group.id)  # re-fetch: sync may have just set last_sync_failed_at
-        if group is None:
-            continue
-        if group.last_sync_failed_at:
-            text = STALE_SCHEDULE_WARNING + text
-
-        image_bytes = None
         try:
-            image_bytes = await asyncio.to_thread(render_day_image, active.pdf_cache_path, schedule, day_name)
-        except Exception as error:
-            logger.warning("scheduler: failed to render day image for %r: %s", active.pdf_cache_path, error)
-            if not render_error_notified:
-                render_error_notified = True
-                try:
-                    await send_with_retry(
-                        lambda: bot.send_message(
-                            chat_id=config.admin_chat_id,
-                            text=f"Сборка изображения для группы «{group.name}» ({day_name}) не удалась: {error}",
-                        )
-                    )
-                except Exception as notify_error:
-                    logger.warning("scheduler: failed to notify admin about render failure: %s", notify_error)
+            active = storage.get_active_version(conn, group.id)
+            if active is None:
+                continue
+            schedule = schedule_from_dict(json.loads(active.payload_json))
 
-        members = storage.list_group_members(conn, group.id)
-        for chat_id in members:
+            text = format_day_schedule(day_name, today, week_type, schedule)
+            group = storage.get_group(conn, group.id)  # re-fetch: sync may have just set last_sync_failed_at
+            if group is None:
+                continue
+            if group.last_sync_failed_at:
+                text = STALE_SCHEDULE_WARNING + text
+
+            image_bytes = None
             try:
-                await send_with_retry(lambda chat_id=chat_id: bot.send_message(chat_id=chat_id, text=text))
-                if image_bytes is not None:
-                    await send_with_retry(lambda chat_id=chat_id: bot.send_photo(chat_id=chat_id, photo=image_bytes))
+                image_bytes = await asyncio.to_thread(render_day_image, active.pdf_cache_path, schedule, day_name)
             except Exception as error:
-                logger.warning("scheduler: failed to send daily schedule to chat_id=%s: %s", chat_id, error)
-            await asyncio.sleep(SEND_PACING_SECONDS)
+                logger.warning("scheduler: failed to render day image for %r: %s", active.pdf_cache_path, error)
+                if not render_error_notified:
+                    render_error_notified = True
+                    try:
+                        await send_with_retry(
+                            lambda: bot.send_message(
+                                chat_id=config.admin_chat_id,
+                                text=f"Сборка изображения для группы «{group.name}» ({day_name}) не удалась: {error}",
+                            )
+                        )
+                    except Exception as notify_error:
+                        logger.warning("scheduler: failed to notify admin about render failure: %s", notify_error)
+
+            members = storage.list_group_members(conn, group.id)
+            for chat_id in members:
+                try:
+                    await send_with_retry(lambda chat_id=chat_id: bot.send_message(chat_id=chat_id, text=text))
+                    if image_bytes is not None:
+                        await send_with_retry(lambda chat_id=chat_id: bot.send_photo(chat_id=chat_id, photo=image_bytes))
+                except Exception as error:
+                    logger.warning("scheduler: failed to send daily schedule to chat_id=%s: %s", chat_id, error)
+                await asyncio.sleep(SEND_PACING_SECONDS)
+        except Exception as error:
+            logger.exception(
+                "scheduler: failed to process group id=%s for link id=%s: %s", group.id, institute_link_id, error
+            )
 
 
 async def institute_catalog_refresh_job(

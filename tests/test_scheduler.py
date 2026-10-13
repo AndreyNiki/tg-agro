@@ -508,3 +508,39 @@ async def test_link_check_job_sees_pdf_url_change_that_happened_while_waiting_fo
     await task
 
     assert seen_urls == ["/new.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_link_daily_send_job_sends_to_second_group_even_if_first_groups_payload_is_corrupt(conn, monkeypatch):
+    import schedule_bot.scheduler as scheduler_module
+
+    institute_id = _make_institute(conn)
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url="/does-not-matter.pdf",
+        group_names=["Группа-1", "Группа-2"], raw_label="x", last_seen_at="t",
+    )
+    group1 = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="Группа-1")
+    group2 = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="Группа-2")
+    storage.insert_new_version(conn, group1, "not valid json {{{", "/tmp/x1.pdf", "t")
+    _seed_active_version(conn, group2)
+    storage.upsert_member(conn, 1111, group1, joined_at="t")
+    storage.upsert_member(conn, 2222, group2, joined_at="t")
+
+    async def noop_sync(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(scheduler_module, "sync_institute_link", noop_sync)
+    monkeypatch.setattr(scheduler_module, "today_in_configured_timezone", lambda tz: FixedMonday.today())
+    monkeypatch.setattr(scheduler_module, "render_day_image", lambda *a, **k: None)
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    bot.send_photo = AsyncMock()
+
+    await link_daily_send_job(
+        conn, _config(), bot, link_id,
+        WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True)),
+    )
+
+    sent_chat_ids = {call.kwargs["chat_id"] for call in bot.send_message.await_args_list}
+    assert 2222 in sent_chat_ids
