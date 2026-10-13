@@ -315,6 +315,13 @@ def get_institute(conn: sqlite3.Connection, institute_id: int) -> InstituteRow |
     return InstituteRow(*row) if row else None
 
 
+def get_institute_by_catalog_url(conn: sqlite3.Connection, catalog_url: str) -> InstituteRow | None:
+    row = conn.execute(
+        f"SELECT {_INSTITUTE_COLUMNS} FROM institutes WHERE catalog_url = ?", (catalog_url,)
+    ).fetchone()
+    return InstituteRow(*row) if row else None
+
+
 def list_institutes(conn: sqlite3.Connection) -> list[InstituteRow]:
     rows = conn.execute(f"SELECT {_INSTITUTE_COLUMNS} FROM institutes ORDER BY name").fetchall()
     return [InstituteRow(*row) for row in rows]
@@ -583,6 +590,11 @@ def update_member_profile(
         "UPDATE members SET telegram_username = ?, display_name = ? WHERE chat_id = ?",
         (telegram_username, display_name, chat_id),
     )
+    conn.commit()
+
+
+def reassign_member_group(conn: sqlite3.Connection, chat_id: int, group_id: int) -> None:
+    conn.execute("UPDATE members SET group_id = ? WHERE chat_id = ?", (group_id, chat_id))
     conn.commit()
 
 

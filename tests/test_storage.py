@@ -629,3 +629,42 @@ def test_mark_stale_links_not_in_preserves_confirmed_ones(conn):
     storage.mark_stale_links_not_in(conn, institute_id, confirmed_link_ids=[kept])
     assert storage.get_institute_link(conn, kept).is_stale is False
     assert storage.get_institute_link(conn, dropped).is_stale is True
+
+
+def test_get_institute_by_catalog_url_finds_existing(conn):
+    institute_id = storage.create_institute(
+        conn, name="Инст", catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
+    )
+    found = storage.get_institute_by_catalog_url(conn, "https://example.com/catalog")
+    assert found is not None
+    assert found.id == institute_id
+
+
+def test_get_institute_by_catalog_url_returns_none_when_absent(conn):
+    assert storage.get_institute_by_catalog_url(conn, "https://example.com/nope") is None
+
+
+def test_reassign_member_group_updates_group_id_only(conn):
+    institute_id = storage.create_institute(
+        conn, name="Инст", catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
+    )
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url="https://example.com/a.pdf",
+        group_names=["А", "Б"], raw_label="А,Б", last_seen_at="t",
+    )
+    old_group_id = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="А")
+    new_group_id = storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name="Б")
+    storage.upsert_member(conn, 555, old_group_id, joined_at="2026-01-01T00:00:00+00:00", subscribed=False)
+    storage.update_member_profile(conn, 555, telegram_username="bob", display_name="Bob")
+
+    storage.reassign_member_group(conn, 555, new_group_id)
+
+    member = storage.get_member(conn, 555)
+    assert member.group_id == new_group_id
+    assert member.subscribed is False  # untouched
+    assert member.joined_at == "2026-01-01T00:00:00+00:00"  # untouched
+    assert member.telegram_username == "bob"  # untouched
