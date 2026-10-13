@@ -379,3 +379,50 @@ def test_sync_allows_catalog_rescan_again_after_check_interval_elapsed(conn, tmp
     ))
 
     assert refresh_calls == [institute_id, institute_id]
+
+
+def test_sync_institute_link_treats_unparsable_pdf_like_a_fetch_failure(conn, tmp_path, monkeypatch):
+    import schedule_bot.sync as sync_module
+
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(conn, institute_id, "/not-a-real.pdf", ["Б-Мв-101"])
+    storage.upsert_member(conn, 111, group_ids[0], joined_at="t")
+
+    monkeypatch.setattr(sync_module, "_load_pdf_bytes", lambda source: b"not a pdf at all")
+
+    results = asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
+    ))
+
+    assert [r.status for r in results] == ["error"]
+    group = storage.get_group(conn, group_ids[0])
+    assert group.last_sync_failed_at  # must be set, same contract as a fetch failure
+
+
+def test_sync_institute_link_continues_to_next_group_after_one_groups_insert_fails(conn, tmp_path, monkeypatch):
+    institute_id = _make_institute(conn)
+    link_id, group_ids = _make_link_and_groups(
+        conn, institute_id, FIXTURE_PATH, ["Б-Мв-101", "Б-Эв-101"]
+    )
+    for gid in group_ids:
+        storage.upsert_member(conn, 1000 + gid, gid, joined_at="t")
+
+    real_insert = storage.insert_new_version
+    call_count = {"n": 0}
+
+    def flaky_insert(conn_, group_id, *args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_insert(conn_, group_id, *args, **kwargs)
+
+    monkeypatch.setattr(storage, "insert_new_version", flaky_insert)
+
+    results = asyncio.run(sync_institute_link(
+        conn, storage.get_institute_link(conn, link_id), storage.get_institute(conn, institute_id),
+        str(tmp_path), RecordingNotifier(), catalog_rescan_state={},
+    ))
+
+    assert len(results) == 2
+    assert {r.group_id for r in results} == set(group_ids)

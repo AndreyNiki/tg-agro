@@ -84,7 +84,11 @@ def _fetch_and_parse_blocking(
     try:
         tmp_file.write(pdf_bytes)
         tmp_file.close()
-        schedules = parse_schedules_for_groups(tmp_file.name, group_names)
+        try:
+            schedules = parse_schedules_for_groups(tmp_file.name, group_names)
+        except Exception as parse_error:
+            logger.warning("sync: failed to parse PDF from %r: %s", pdf_source, parse_error)
+            return None, {}, parse_error
         return pdf_bytes, schedules, None
     finally:
         try:
@@ -216,54 +220,64 @@ async def sync_institute_link(
 
     results: list[SyncResult] = []
     for group in active_groups:
-        new_schedule = schedules.get(group.name)
-        if new_schedule is None:
-            storage.set_group_last_sync_failed_at(conn, group.id, datetime.now(timezone.utc).isoformat())
-            results.append(SyncResult(group_id=group.id, status="error"))
-            continue
+        try:
+            new_schedule = schedules.get(group.name)
+            if new_schedule is None:
+                storage.set_group_last_sync_failed_at(conn, group.id, datetime.now(timezone.utc).isoformat())
+                results.append(SyncResult(group_id=group.id, status="error"))
+                continue
 
-        storage.set_group_last_sync_failed_at(conn, group.id, "")
-        active = storage.get_active_version(conn, group.id)
-        old_schedule = schedule_from_dict(json.loads(active.payload_json)) if active else None
-        changes = compute_diff(old_schedule, new_schedule)
+            storage.set_group_last_sync_failed_at(conn, group.id, "")
+            active = storage.get_active_version(conn, group.id)
+            old_schedule = schedule_from_dict(json.loads(active.payload_json)) if active else None
+            changes = compute_diff(old_schedule, new_schedule)
 
-        if active is not None and not changes:
-            results.append(SyncResult(group_id=group.id, status="no_changes"))
-            continue
+            if active is not None and not changes:
+                results.append(SyncResult(group_id=group.id, status="no_changes"))
+                continue
 
-        cache_path = _write_cache(pdf_bytes, pdf_cache_dir, institute_link.id, group.name)
-        parsed_at = datetime.now(timezone.utc).isoformat()
-        storage.insert_new_version(conn, group.id, json.dumps(schedule_to_dict(new_schedule)), cache_path, parsed_at)
-
-        # The previous active version has just been superseded; its cached
-        # PDF file is no longer referenced by any row — this is the only
-        # cleanup mechanism for pdf_cache_dir.
-        if active is not None and active.pdf_cache_path:
+            cache_path = _write_cache(pdf_bytes, pdf_cache_dir, institute_link.id, group.name)
+            parsed_at = datetime.now(timezone.utc).isoformat()
             try:
-                Path(active.pdf_cache_path).unlink(missing_ok=True)
-            except OSError as exc:
-                logger.warning(
-                    "sync: failed to delete superseded cache file %r: %s", active.pdf_cache_path, exc
+                storage.insert_new_version(
+                    conn, group.id, json.dumps(schedule_to_dict(new_schedule)), cache_path, parsed_at
                 )
+            except Exception:
+                Path(cache_path).unlink(missing_ok=True)
+                raise
 
-        if active is None:
-            results.append(SyncResult(group_id=group.id, status="initial"))
-            continue
+            # The previous active version has just been superseded; its cached
+            # PDF file is no longer referenced by any row — this is the only
+            # cleanup mechanism for pdf_cache_dir.
+            if active is not None and active.pdf_cache_path:
+                try:
+                    Path(active.pdf_cache_path).unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning(
+                        "sync: failed to delete superseded cache file %r: %s", active.pdf_cache_path, exc
+                    )
 
-        message = "Расписание изменилось. Актуальную версию смотрите на сайте"
-        weektype_url = storage.get_setting(conn, "weektype_url")
-        if weektype_url:
-            message += ":\n" + weektype_url
-        # Notification is about delivery, scoped by `subscribed` — unlike
-        # the active_groups gate above (subscribed_only=False), which
-        # exists so a pinned-but-unsubscribed member still gets /schedule.
-        for chat_id in storage.list_group_members(conn, group.id, subscribed_only=True):
-            try:
-                await notify(chat_id, message)
-            except Exception as exc:
-                logger.warning("sync: failed to notify chat_id=%s for group %r: %s", chat_id, group.name, exc)
-            await asyncio.sleep(SEND_PACING_SECONDS)
+            if active is None:
+                results.append(SyncResult(group_id=group.id, status="initial"))
+                continue
 
-        results.append(SyncResult(group_id=group.id, status="applied", changes=changes))
+            message = "Расписание изменилось. Актуальную версию смотрите на сайте"
+            weektype_url = storage.get_setting(conn, "weektype_url")
+            if weektype_url:
+                message += ":\n" + weektype_url
+            # Notification is about delivery, scoped by `subscribed` — unlike
+            # the active_groups gate above (subscribed_only=False), which
+            # exists so a pinned-but-unsubscribed member still gets /schedule.
+            for chat_id in storage.list_group_members(conn, group.id, subscribed_only=True):
+                try:
+                    await notify(chat_id, message)
+                except Exception as exc:
+                    logger.warning("sync: failed to notify chat_id=%s for group %r: %s", chat_id, group.name, exc)
+                await asyncio.sleep(SEND_PACING_SECONDS)
+
+            results.append(SyncResult(group_id=group.id, status="applied", changes=changes))
+        except Exception as error:
+            logger.exception("sync: failed to apply sync result for group %r (id=%s): %s", group.name, group.id, error)
+            results.append(SyncResult(group_id=group.id, status="error"))
 
     return results
