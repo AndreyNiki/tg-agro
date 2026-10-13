@@ -88,3 +88,7 @@ def test_format_starosta_welcome_mentions_starosta_only_commands():
     text = format_starosta_welcome("Б-Мв-101", "admin")
     for command in ("/close_group", "/open_group", "/notify", "/requests"):
         assert command in text
+
+
+def test_format_candidate_label_handles_none():
+    assert format_candidate_label(None) == "Неизвестный"

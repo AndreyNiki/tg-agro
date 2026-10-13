@@ -20,6 +20,8 @@ def cooldown_remaining(last_change_at: str | None, now: datetime) -> timedelta |
 
 
 def format_candidate_label(member) -> str:
+    if member is None:
+        return "Неизвестный"
     if member.display_name and member.telegram_username:
         return f"{member.display_name} (@{member.telegram_username})"
     if member.display_name:

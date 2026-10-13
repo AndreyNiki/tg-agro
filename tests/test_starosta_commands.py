@@ -306,3 +306,18 @@ async def test_two_simultaneous_approvals_only_apply_the_election_result_once(co
     assert group.starosta_chat_id == 111
     welcome_sends = [c for c in context.bot.send_message.await_args_list if c.kwargs.get("chat_id") == 111]
     assert len(welcome_sends) == 1
+
+
+@pytest.mark.asyncio
+async def test_votes_command_tolerates_excluded_candidate(conn):
+    group_id = _make_group(conn)
+    _add_members(conn, group_id, [111, 222, 333])
+    election_id = storage.create_election(conn, group_id, "initial", 222, 444, "t")
+    # 444 (the candidate) has no members row — excluded between nomination and this call.
+
+    update = make_message_update(111)
+    context = make_context(conn)
+
+    await votes_command(update, context)  # must not raise
+
+    update.message.reply_text.assert_awaited()

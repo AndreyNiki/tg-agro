@@ -7,6 +7,7 @@ from schedule_bot import storage
 from schedule_bot.change_group_commands import (
     change_group_command,
     change_group_confirm_callback,
+    change_group_page_callback,
     change_group_select_callback,
     change_request_approve_callback,
     change_request_reject_callback,
@@ -540,3 +541,13 @@ def test_build_all_requests_messages_includes_info_kind_with_request_text(conn):
     assert "Институт X; URL: —" in text
     buttons = [b for row in keyboard.inline_keyboard for b in row]
     assert any(b.callback_data == "chgreq:approve:1" for b in buttons)
+
+
+@pytest.mark.asyncio
+async def test_change_group_page_callback_tolerates_excluded_chat(conn):
+    context = make_context(conn)
+    update = make_callback_update(99999, "chggrp:page:1")  # 99999 has no member row
+
+    await change_group_page_callback(update, context)
+
+    update.callback_query.message.reply_text.assert_awaited()

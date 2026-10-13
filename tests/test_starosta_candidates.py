@@ -203,3 +203,13 @@ async def test_confirm_callback_refuses_when_candidate_left_the_group(conn):
 
     assert storage.get_open_election(conn, group_id) is None
     assert context.bot.send_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_page_callback_tolerates_excluded_chat(conn):
+    context = make_context(conn)
+    update = make_callback_update(99999, "starcand:page:1")
+
+    await page_callback(update, context)  # must not raise
+
+    update.callback_query.message.reply_text.assert_awaited()

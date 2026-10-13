@@ -82,6 +82,9 @@ async def change_group_page_callback(update: Update, context: ContextTypes.DEFAU
     page = int(query.data.removeprefix(_PAGE_PREFIX))
     conn = context.bot_data["conn"]
     member = storage.get_member(conn, update.effective_chat.id)
+    if member is None:
+        await query.message.reply_text("Вы больше не в какой-либо группе — используйте /start.")
+        return
     await safe_edit_reply_markup(query, reply_markup=build_change_group_keyboard(conn, member.group_id, page))
 
 
