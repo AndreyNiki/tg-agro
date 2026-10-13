@@ -317,6 +317,52 @@ def test_refresh_institute_catalog_aggregates_links_across_multiple_form_pages(c
     assert len(storage.list_institute_links(conn, institute_id)) == 2
 
 
+def test_refresh_institute_catalog_does_not_mark_stale_when_a_form_page_is_unreachable(conn, monkeypatch):
+    """Regression test for review finding: a transient fetch failure of
+    ONE form-of-study page must not be treated as "that form's links are
+    gone from the catalog" — it must not mark any pre-existing link
+    stale, since that stops its sync entirely until the next (weekly)
+    successful full scan."""
+    import schedule_bot.group_links as group_links_module
+
+    institute_id = _make_institute(conn)
+    catalog_html = (
+        '<a href="/ochnaya">Очная форма обучения</a>'
+        '<a href="/zaochnaya">Заочная форма обучения</a>'
+    )
+
+    def fetch_both_ok(url):
+        if url == "https://example.com/catalog":
+            return catalog_html
+        if url == "https://example.com/ochnaya":
+            return '<a href="/a.pdf">Б-А-301</a>'
+        if url == "https://example.com/zaochnaya":
+            return '<a href="/b.pdf">Б-Зв-201</a>'
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", fetch_both_ok)
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=lambda text: None)
+    link_a = storage.get_institute_link_by_pdf_url(conn, institute_id, "https://example.com/a.pdf")
+    group_a = storage.list_groups_for_link(conn, link_a.id)[0]
+    storage.upsert_member(conn, 333, group_a.id, joined_at="t")
+
+    def fetch_ochnaya_down(url):
+        if url == "https://example.com/catalog":
+            return catalog_html
+        if url == "https://example.com/ochnaya":
+            raise group_links_module.SourcePageUnreachableError("boom")
+        if url == "https://example.com/zaochnaya":
+            return '<a href="/b.pdf">Б-Зв-201</a>'
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(group_links_module, "fetch_source_page_html", fetch_ochnaya_down)
+    alerts = []
+    refresh_institute_catalog(conn, storage.get_institute(conn, institute_id), notify_admin=alerts.append)
+
+    assert storage.get_institute_link(conn, link_a.id).is_stale is False
+    assert alerts == []
+
+
 def test_refresh_institute_catalog_skips_unreachable_form_page_but_keeps_others(conn, monkeypatch):
     import schedule_bot.group_links as group_links_module
 

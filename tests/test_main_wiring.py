@@ -634,3 +634,28 @@ async def test_post_init_skips_legacy_migration_when_not_configured(conn, config
     migration_mock.assert_awaited_once()  # still called — it's the function's own job to no-op
 
     application.bot_data["_scheduler"].shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_post_init_survives_legacy_migration_exception(conn, config, monkeypatch):
+    """An admin-notify failure (blocked bot, bad ADMIN_CHAT_ID) or any
+    other exception inside the migration must not prevent the rest of
+    post_init (and thus bot startup) from completing — every other
+    admin-notify loop in this codebase isolates failures the same way
+    (see CLAUDE.md's "every per-subscriber send loop" rule)."""
+    import main as main_module
+
+    config.legacy_migration_catalog_url = "https://example.com/institut"
+    config.legacy_migration_institute_name = "Институт агробизнеса"
+    config.legacy_migration_group_name = "Б-Мв-101"
+
+    _patch_week_formula(monkeypatch)
+    monkeypatch.setattr(main_module, "run_legacy_migration_if_configured", AsyncMock(side_effect=RuntimeError("boom")))
+
+    application = main_module.build_application(config, conn)
+    monkeypatch.setattr(type(application.bot), "get_chat", AsyncMock(return_value=MagicMock(username=None, full_name=None)))
+    monkeypatch.setattr(type(application.bot), "set_my_commands", AsyncMock(return_value=True))
+
+    await application.post_init(application)  # must not raise
+
+    application.bot_data["_scheduler"].shutdown(wait=False)

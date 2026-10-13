@@ -78,6 +78,13 @@ async def run_legacy_migration_if_configured(
     for chat_id in chat_ids:
         storage.reassign_member_group(conn, chat_id, group.id)
 
+    # validate_and_sync_group_on_first_subscribe's own immediate sync ran
+    # BEFORE any member was reassigned onto this group, so it was a
+    # guaranteed no-op (sync_institute_link skips links with no members —
+    # see CLAUDE.md's documented members-before-sync ordering). Now that
+    # members exist, trigger the real first sync.
+    await sync_institute_link_fn(group.institute_link_id)
+
     storage.set_setting(conn, _DONE_SETTING_KEY, datetime.now(timezone.utc).isoformat())
     await notify_admin(
         f"Миграция легаси-пользователей выполнена: {len(chat_ids)} участников переключено в группу "

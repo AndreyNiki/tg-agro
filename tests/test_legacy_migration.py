@@ -223,6 +223,14 @@ async def test_successful_migration_reassigns_all_members_and_sets_flag_once(con
     assert storage.get_setting(conn, "legacy_migration_done_at") is not None
     notify_admin.assert_awaited_once()
 
+    # The immediate sync must run AFTER members are reassigned — at the
+    # moment validate_and_sync_group_on_first_subscribe (mocked above) is
+    # called, the target group has no members row yet, so
+    # sync_institute_link_fn only does useful work once called again
+    # here, post-reassignment (see group_commands.py's documented
+    # members-before-sync ordering, reused here for the same reason).
+    sync_fn.assert_awaited_once_with(target_group.institute_link_id)
+
     # Second call must be a pure no-op now that the flag is set.
     notify_admin.reset_mock()
     monkeypatch.setattr(mod, "refresh_institute_catalog", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run again")))

@@ -142,9 +142,12 @@ def build_application(config: Config, conn) -> Application:
         async def _notify_admin(text: str) -> None:
             await send_with_retry(lambda: app.bot.send_message(chat_id=config.admin_chat_id, text=text))
 
-        await run_legacy_migration_if_configured(
-            conn, config, _notify_admin, sync_institute_link_fn, reschedule_institute_jobs_cb,
-        )
+        try:
+            await run_legacy_migration_if_configured(
+                conn, config, _notify_admin, sync_institute_link_fn, reschedule_institute_jobs_cb,
+            )
+        except Exception:
+            logger.exception("main: legacy user migration failed — bot startup continues regardless")
 
     application = (
         Application.builder()

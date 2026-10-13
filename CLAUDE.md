@@ -110,18 +110,30 @@ module). The unit of sync work is an `institute_link`, NOT a group:
    sources while different links of one institute stay independent.
 
 **Catalog scanning and validate-on-subscribe.**
-`group_links.refresh_institute_catalog` fetches the catalog page (blocking
-— every caller must wrap it in `asyncio.to_thread`), lists `<a
-href="*.pdf">` entries, expands group names from each label
-("Б-А-301,302,303" -> three names), filters obvious noise with
-`looks_like_group_name`, and upserts links two-phase: by `(institute_id,
-pdf_url)` first, then by an exact expanded-name-set match against links
-not yet confirmed in this scan (that's a file that changed address).
-Links not confirmed get `is_stale = 1` (never deleted) with one admin
-alert if they had subscribers. A scan returning 0 links must not touch
-the DB at all — only log + alert. The scan NEVER downloads a PDF, so a
-group it created is `is_verified = 0` ("unproven"). The first user who
-picks that group triggers `group_commands.validate_and_sync_group_on_first_subscribe`,
+`group_links.refresh_institute_catalog` scans `institute.catalog_url` TWO
+LEVELS deep (blocking throughout — every caller must wrap it in
+`asyncio.to_thread`): it first fetches the catalog page and calls
+`list_form_of_study_links` to find its up-to-three "форма обучения"
+(Очная/Очно-заочная/Заочная) subpage links — not every institute has all
+three — then fetches each reachable one and lists its `<a href="*.pdf">`
+entries via `list_pdf_links`, combining all of them into one flat list
+exactly as if they'd come from a single page. From there it expands group
+names from each label ("Б-А-301,302,303" -> three names), filters
+obvious noise with `looks_like_group_name`, and upserts links two-phase:
+by `(institute_id, pdf_url)` first, then by an exact expanded-name-set
+match against links not yet confirmed in this scan (that's a file that
+changed address). Links not confirmed get `is_stale = 1` (never deleted)
+with one admin alert if they had subscribers — but ONLY on a scan where
+every form-of-study page was reachable; if one or more form pages 404'd
+or timed out this cycle, stale-marking is skipped entirely for the whole
+scan, because a transient fetch failure of one form must never be read
+as "that form's links vanished from the catalog" (that would silently
+stop their sync for up to a week, the default catalog-rescan interval).
+A scan with 0 form-of-study links, or 0 PDF links across every reachable
+form, must not touch the DB at all — only log + alert. The scan NEVER
+downloads a PDF, so a group it created is `is_verified = 0` ("unproven").
+The first user who picks that group triggers
+`group_commands.validate_and_sync_group_on_first_subscribe`,
 which refuses stale links without any network call, otherwise downloads
 the PDF once and validates every sibling group of the link
 (`is_verified = 1` / `-1`, `-1` = hidden from every picker + admin
@@ -132,6 +144,12 @@ and then fail every later sync forever. The `members` row is written
 BEFORE that validation/sync call (and rolled back on failure), because
 `sync_institute_link` skips links without members: the other order made
 the first subscriber's immediate sync a guaranteed no-op.
+`schedule_bot/legacy_migration.py`'s `run_legacy_migration_if_configured`
+(wired from `main.py`'s `_post_init`, gated by three required
+`LEGACY_MIGRATION_*` env vars + a one-time `settings` flag) reuses this
+exact same ordering requirement — the members-reassignment loop runs
+BEFORE its own call to `sync_institute_link_fn`, for the identical
+reason.
 
 **`pdf_parser.py` is deliberately split into two layers** — this split is
 the reason the trickiest part of the system (interpreting a hand-typeset,

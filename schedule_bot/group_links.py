@@ -192,17 +192,26 @@ def _upsert_groups_for_link(
 
 
 def refresh_institute_catalog(conn, institute, *, notify_admin: Callable[[str], None]) -> None:
-    """Scan `institute.catalog_url`, matching discovered PDF links against
-    existing `institute_links` rows (two-phase identity: pdf_url, then the
-    expanded group-name set), creating/updating `institute_links` and
-    `groups` rows accordingly, and marking any previously-live link that
-    wasn't seen in this scan as stale. Never downloads/parses the PDFs
-    themselves (that's the sync pipeline's job, Task 12) and never sets
-    `groups.is_verified` (that's Task 13's job, at subscribe time).
+    """Scan `institute.catalog_url` two levels deep: first find the
+    "форма обучения" (form of study) subpage links on it via
+    `list_form_of_study_links` (up to three — Очная/Очно-заочная/Заочная,
+    not every institute has all three), then fetch each reachable one and
+    collect its PDF links via `list_pdf_links`. The combined PDF links
+    are matched against existing `institute_links` rows (two-phase
+    identity: pdf_url, then the expanded group-name set), creating/
+    updating `institute_links` and `groups` rows accordingly, and marking
+    any previously-live link that wasn't seen in this scan as stale.
+    Never downloads/parses the PDFs themselves (that's the sync
+    pipeline's job) and never sets `groups.is_verified` (that's done at
+    subscribe time).
 
-    If the catalog page returns 0 PDF links (broken page / site redesign),
-    this must NOT touch the DB at all — just log and send exactly one
-    admin alert, then return.
+    If the catalog page has 0 form-of-study links, or every reachable
+    form-of-study page together has 0 PDF links, this must NOT touch the
+    DB at all — just log and send exactly one admin alert, then return.
+    If only SOME form-of-study pages are unreachable this cycle (the
+    others succeed), stale-marking is skipped entirely for this scan —
+    a transient fetch failure of one form's page must never be read as
+    "that form's links are gone from the catalog".
     """
     html = fetch_source_page_html(institute.catalog_url)
     form_links = list_form_of_study_links(html, institute.catalog_url)
@@ -213,11 +222,13 @@ def refresh_institute_catalog(conn, institute, *, notify_admin: Callable[[str], 
         return
 
     raw_entries: list[tuple[str, str]] = []
+    scan_is_partial = False
     for form_url, form_label in form_links:
         try:
             form_html = fetch_source_page_html(form_url)
         except SourcePageUnreachableError as error:
             logger.warning("group_links: form-of-study page %r (%s) unreachable: %s", form_label, form_url, error)
+            scan_is_partial = True
             continue
         raw_entries.extend(list_pdf_links(form_html, form_url))
 
@@ -266,13 +277,28 @@ def refresh_institute_catalog(conn, institute, *, notify_admin: Callable[[str], 
         confirmed_link_ids.append(link_id)
         _upsert_groups_for_link(conn, institute.id, link_id, expanded, seen_group_ids_this_scan)
 
+    storage.set_institute_last_catalog_sync_at(conn, institute.id, now)
+
+    if scan_is_partial:
+        # One or more form-of-study pages were unreachable this cycle, so
+        # confirmed_link_ids is NOT a complete picture of every link that
+        # is still live in the catalog — treating it as one would mark
+        # links on the unreachable form(s) stale (and stop their sync)
+        # over a transient site hiccup, not an actual catalog change.
+        # Skip stale-marking entirely; it resumes on a scan where every
+        # form-of-study page was reachable.
+        logger.warning(
+            "group_links: catalog scan for institute %r was partial (some form-of-study pages unreachable) — skipping stale-marking",
+            institute.name,
+        )
+        return
+
     previously_live_link_ids = {
         link.id for link in storage.list_institute_links(conn, institute.id, include_stale=False)
     }
     newly_stale_ids = previously_live_link_ids - set(confirmed_link_ids)
 
     storage.mark_stale_links_not_in(conn, institute.id, confirmed_link_ids)
-    storage.set_institute_last_catalog_sync_at(conn, institute.id, now)
 
     for link_id in newly_stale_ids:
         affected_subscriber_count = sum(
