@@ -38,13 +38,17 @@ from schedule_bot.change_group_commands import (
 )
 from schedule_bot.config import Config, load_config
 from schedule_bot.group_commands import (
+    GROUP_MISSING_CALLBACK_PATTERN,
+    INSTITUTE_MISSING_CALLBACK_DATA,
     INSTITUTE_PAGE_CALLBACK_PATTERN,
     INSTITUTE_SELECT_CALLBACK_PATTERN,
     PAGE_CALLBACK_PATTERN,
     SELECT_CALLBACK_PATTERN,
     group_page_callback,
+    group_request_start_callback,
     group_select_callback,
     institute_page_callback,
+    institute_request_start_callback,
     institute_select_callback,
     start_command,
     subscribe_command,
@@ -239,6 +243,10 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CallbackQueryHandler(institute_page_callback, pattern=INSTITUTE_PAGE_CALLBACK_PATTERN))
     application.add_handler(CallbackQueryHandler(group_select_callback, pattern=SELECT_CALLBACK_PATTERN))
     application.add_handler(CallbackQueryHandler(group_page_callback, pattern=PAGE_CALLBACK_PATTERN))
+    application.add_handler(
+        CallbackQueryHandler(institute_request_start_callback, pattern=f"^{INSTITUTE_MISSING_CALLBACK_DATA}$")
+    )
+    application.add_handler(CallbackQueryHandler(group_request_start_callback, pattern=GROUP_MISSING_CALLBACK_PATTERN))
     application.add_handler(CommandHandler("add_institute", add_institute_command))
     application.add_handler(CommandHandler("set_institute_catalog_url", set_institute_catalog_url_command))
     application.add_handler(CommandHandler("set_institute_check_interval", set_institute_check_interval_command))

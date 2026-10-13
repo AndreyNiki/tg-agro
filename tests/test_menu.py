@@ -990,6 +990,85 @@ async def test_pending_action_followup_create_institute_url_creates_and_reschedu
     assert "pending_menu_action" not in context.user_data
 
 
+@pytest.mark.asyncio
+async def test_pending_action_followup_new_institute_name_prompts_for_url(conn):
+    update = MagicMock()
+    update.effective_chat.id = 111
+    update.message.text = "Институт X"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "new_institute_name"}}
+
+    await pending_action_followup(update, context)
+
+    assert context.user_data["pending_menu_action"] == {"action": "new_institute_url", "name": "Институт X"}
+    update.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_new_institute_url_creates_request_and_notifies_admin(conn):
+    update = MagicMock()
+    update.effective_chat.id = 111
+    update.message.text = "https://example.com/catalog"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "new_institute_url", "name": "Институт X"}}
+    context.bot.send_message = AsyncMock()
+
+    await pending_action_followup(update, context)
+
+    request = storage.list_all_pending_requests(conn)[0]
+    assert request.kind == "new_institute"
+    assert request.chat_id == 111
+    assert "Институт X" in request.request_text
+    assert "https://example.com/catalog" in request.request_text
+    assert context.bot.send_message.await_args.kwargs["chat_id"] == ADMIN_CHAT_ID
+    update.message.reply_text.assert_awaited_once()
+    assert "pending_menu_action" not in context.user_data
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_new_institute_url_accepts_dash_as_skip(conn):
+    update = MagicMock()
+    update.effective_chat.id = 111
+    update.message.text = "-"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "new_institute_url", "name": "Институт X"}}
+    context.bot.send_message = AsyncMock()
+
+    await pending_action_followup(update, context)
+
+    request = storage.list_all_pending_requests(conn)[0]
+    assert "—" in request.request_text
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_new_group_text_creates_request_and_notifies_admin(conn):
+    institute_id = storage.create_institute(
+        conn, name="ИТ", catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
+    )
+    update = MagicMock()
+    update.effective_chat.id = 222
+    update.message.text = "Группа Б-Мв-999, заочная форма"
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "new_group_text", "institute_id": institute_id}}
+    context.bot.send_message = AsyncMock()
+
+    await pending_action_followup(update, context)
+
+    request = storage.list_all_pending_requests(conn)[0]
+    assert request.kind == "new_group"
+    assert request.chat_id == 222
+    assert "ИТ" in request.request_text
+    assert "Б-Мв-999" in request.request_text
+    assert context.bot.send_message.await_args.kwargs["chat_id"] == ADMIN_CHAT_ID
+    update.message.reply_text.assert_awaited_once()
+
+
 def test_institute_settings_submenu_has_institute_links_button():
     from schedule_bot.menu import _institute_settings_submenu
 

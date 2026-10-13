@@ -150,6 +150,38 @@ def _can_decide(caller_chat_id: int, target_group, admin_chat_id: int) -> bool:
     return is_admin_caller or is_target_starosta
 
 
+_INFO_REQUEST_NOTIFICATION_TEXT = {
+    ("new_institute", "approved"): "Ваша заявка на добавление института рассмотрена.",
+    ("new_institute", "rejected"): "Ваша заявка на добавление института отклонена.",
+    ("new_group", "approved"): "Ваша заявка на добавление группы рассмотрена.",
+    ("new_group", "rejected"): "Ваша заявка на добавление группы отклонена.",
+    ("report", "approved"): "Ваша жалоба рассмотрена, спасибо за обращение.",
+    ("report", "rejected"): "Ваша жалоба отклонена.",
+}
+
+
+async def _decide_info_request(update, context, request, status: str) -> None:
+    """kind != 'group_change' requests (new_institute/new_group/report) carry
+    no group to join — deciding one is just a status change plus a
+    notification to whoever filed it. Creating the actual institute/group
+    stays a manual admin action via the existing commands/menu."""
+    query = update.callback_query
+    if not is_admin(update, context):
+        await query.message.reply_text("Недостаточно прав для решения по этой заявке.")
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    storage.decide_group_change_request(context.bot_data["conn"], request.id, status, now)
+    try:
+        await send_with_retry(
+            lambda: context.bot.send_message(
+                chat_id=request.chat_id, text=_INFO_REQUEST_NOTIFICATION_TEXT[(request.kind, status)]
+            )
+        )
+    except Exception as error:
+        logger.warning("change_group_commands: failed to notify requester chat_id=%s: %s", request.chat_id, error)
+    await query.message.reply_text("Заявка отмечена как решённая." if status == "approved" else "Заявка отклонена.")
+
+
 async def change_request_approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -159,6 +191,9 @@ async def change_request_approve_callback(update: Update, context: ContextTypes.
     request = storage.get_group_change_request(conn, request_id)
     if request is None or request.status != "pending":
         await query.message.reply_text("Эта заявка уже обработана.")
+        return
+    if request.kind != "group_change":
+        await _decide_info_request(update, context, request, "approved")
         return
     target_group = storage.get_group(conn, request.to_group_id)
     if not _can_decide(caller_chat_id, target_group, context.bot_data["admin_chat_id"]):
@@ -236,6 +271,9 @@ async def change_request_reject_callback(update: Update, context: ContextTypes.D
     if request is None or request.status != "pending":
         await query.message.reply_text("Эта заявка уже обработана.")
         return
+    if request.kind != "group_change":
+        await _decide_info_request(update, context, request, "rejected")
+        return
     target_group = storage.get_group(conn, request.to_group_id)
     if not _can_decide(caller_chat_id, target_group, context.bot_data["admin_chat_id"]):
         await query.message.reply_text("Недостаточно прав для решения по этой заявке.")
@@ -273,9 +311,31 @@ def _build_requests_messages(conn, group) -> list[tuple[str, "InlineKeyboardMark
     return entries
 
 
+_INFO_REQUEST_KIND_LABEL = {
+    "new_institute": "добавление института",
+    "new_group": "добавление группы",
+    "report": "жалоба",
+}
+
+
 def _build_all_requests_messages(conn) -> list[tuple[str, "InlineKeyboardMarkup"]]:
     entries = []
     for request in storage.list_all_pending_requests(conn):
+        if request.kind != "group_change":
+            requester = storage.get_member(conn, request.chat_id)
+            label = elections.format_candidate_label(requester) if requester is not None else "Неизвестный"
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("✅ Решено", callback_data=f"chgreq:approve:{request.id}"),
+                        InlineKeyboardButton("❌ Отклонить", callback_data=f"chgreq:reject:{request.id}"),
+                    ]
+                ]
+            )
+            kind_label = _INFO_REQUEST_KIND_LABEL[request.kind]
+            entries.append((f"Заявка ({kind_label}) от {label}:\n{request.request_text}", keyboard))
+            continue
+
         group = storage.get_group(conn, request.to_group_id)
         if group is None:
             continue

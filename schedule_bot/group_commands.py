@@ -22,11 +22,14 @@ INSTITUTE_SELECT_PREFIX = "inst:select:"
 INSTITUTE_PAGE_PREFIX = "inst:page:"
 SELECT_PREFIX = "grp:select:"
 PAGE_PREFIX = "grp:page:"
+INSTITUTE_REQUEST_PREFIX = "grpreq:new:"
 
 INSTITUTE_SELECT_CALLBACK_PATTERN = r"^inst:select:\d+$"
 INSTITUTE_PAGE_CALLBACK_PATTERN = r"^inst:page:\d+$"
 SELECT_CALLBACK_PATTERN = r"^grp:select:\d+:\d+$"
 PAGE_CALLBACK_PATTERN = r"^grp:page:\d+:\d+$"
+INSTITUTE_MISSING_CALLBACK_DATA = "instreq:new"
+GROUP_MISSING_CALLBACK_PATTERN = r"^grpreq:new:\d+$"
 
 
 def _format_telegram_user_label(user) -> str:
@@ -59,6 +62,7 @@ def build_institute_picker_keyboard(conn, page: int = 0) -> InlineKeyboardMarkup
         nav_row.append(InlineKeyboardButton("Вперёд »", callback_data=f"{INSTITUTE_PAGE_PREFIX}{page + 1}"))
     if nav_row:
         rows.append(nav_row)
+    rows.append([InlineKeyboardButton("➕ Моего института нет", callback_data=INSTITUTE_MISSING_CALLBACK_DATA)])
     return InlineKeyboardMarkup(rows)
 
 
@@ -78,6 +82,7 @@ def build_group_picker_keyboard(conn, institute_id: int, page: int = 0) -> Inlin
         nav_row.append(InlineKeyboardButton("Вперёд »", callback_data=f"{PAGE_PREFIX}{institute_id}:{page + 1}"))
     if nav_row:
         rows.append(nav_row)
+    rows.append([InlineKeyboardButton("➕ Моей группы нет", callback_data=f"{INSTITUTE_REQUEST_PREFIX}{institute_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -112,6 +117,21 @@ async def group_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.message.edit_reply_markup(
         reply_markup=build_group_picker_keyboard(conn, int(institute_id_str), int(page_str))
     )
+
+
+async def institute_request_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    context.user_data["pending_menu_action"] = {"action": "new_institute_name"}
+    await query.message.reply_text("Отправьте название института, который нужно добавить:")
+
+
+async def group_request_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    institute_id = int(query.data.removeprefix(INSTITUTE_REQUEST_PREFIX))
+    context.user_data["pending_menu_action"] = {"action": "new_group_text", "institute_id": institute_id}
+    await query.message.reply_text("Опишите вашу группу (точное название, форма обучения и т.п.):")
 
 
 def _blocking_validate_group_names(pdf_url: str, group_names: list[str]) -> dict[str, bool]:

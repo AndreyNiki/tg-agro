@@ -9,6 +9,8 @@ from schedule_bot import storage
 from schedule_bot.group_commands import (
     build_group_picker_keyboard,
     build_institute_picker_keyboard,
+    group_request_start_callback,
+    institute_request_start_callback,
     validate_and_sync_group_on_first_subscribe,
 )
 
@@ -55,6 +57,19 @@ def test_build_group_picker_keyboard_hides_unverified_minus_one_groups(conn):
     texts = [b.text for row in keyboard.inline_keyboard for b in row]
     assert "Good" in texts
     assert "Bad" not in texts
+
+
+def test_build_institute_picker_keyboard_always_has_missing_institute_button(conn):
+    keyboard = build_institute_picker_keyboard(conn)
+    buttons = [b for row in keyboard.inline_keyboard for b in row]
+    assert any(b.callback_data == "instreq:new" for b in buttons)
+
+
+def test_build_group_picker_keyboard_always_has_missing_group_button(conn):
+    institute_id = _make_institute(conn)
+    keyboard = build_group_picker_keyboard(conn, institute_id)
+    buttons = [b for row in keyboard.inline_keyboard for b in row]
+    assert any(b.callback_data == f"grpreq:new:{institute_id}" for b in buttons)
 
 
 @pytest.mark.asyncio
@@ -327,3 +342,32 @@ async def test_validate_failure_excludes_group_from_picker_and_does_not_create_m
     # 4. no membership row was created for the subscribing chat_id.
     assert storage.get_member(conn, chat_id) is None
     context.bot_data["sync_institute_link_fn"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_institute_request_start_callback_stashes_pending_action():
+    update = MagicMock()
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.user_data = {}
+
+    await institute_request_start_callback(update, context)
+
+    assert context.user_data["pending_menu_action"] == {"action": "new_institute_name"}
+    update.callback_query.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_group_request_start_callback_stashes_pending_action_with_institute_id():
+    update = MagicMock()
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    update.callback_query.data = "grpreq:new:42"
+    context = MagicMock()
+    context.user_data = {}
+
+    await group_request_start_callback(update, context)
+
+    assert context.user_data["pending_menu_action"] == {"action": "new_group_text", "institute_id": 42}
+    update.callback_query.message.reply_text.assert_awaited_once()

@@ -446,4 +446,62 @@ async def test_approve_into_stale_link_group_makes_no_network_call(conn, monkeyp
 
     assert storage.get_member(conn, 111).group_id == group_a
     assert storage.get_group_change_request(conn, request_id).status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_change_request_approve_info_kind_resolves_and_notifies_requester(conn):
+    request_id = storage.create_group_change_request(
+        conn, 111, None, None, "t", kind="new_institute", request_text="Институт X; URL: —"
+    )
+    update = make_callback_update(ADMIN_CHAT_ID, f"chgreq:approve:{request_id}")
+    context = make_context(conn)
+
+    await change_request_approve_callback(update, context)
+
+    assert storage.get_group_change_request(conn, request_id).status == "approved"
+    assert context.bot.send_message.await_args.kwargs["chat_id"] == 111
+
+
+@pytest.mark.asyncio
+async def test_change_request_approve_info_kind_rejects_non_admin_caller(conn):
+    request_id = storage.create_group_change_request(
+        conn, 111, None, None, "t", kind="new_group", request_text="Б-Мв-999"
+    )
+    update = make_callback_update(777, f"chgreq:approve:{request_id}")
+    context = make_context(conn)
+
+    await change_request_approve_callback(update, context)
+
+    assert storage.get_group_change_request(conn, request_id).status == "pending"
     context.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_change_request_reject_info_kind_notifies_requester(conn):
+    request_id = storage.create_group_change_request(
+        conn, 111, None, None, "t", kind="report", request_text="что-то не так"
+    )
+    update = make_callback_update(ADMIN_CHAT_ID, f"chgreq:reject:{request_id}")
+    context = make_context(conn)
+
+    await change_request_reject_callback(update, context)
+
+    assert storage.get_group_change_request(conn, request_id).status == "rejected"
+    assert context.bot.send_message.await_args.kwargs["chat_id"] == 111
+
+
+from schedule_bot.change_group_commands import _build_all_requests_messages
+
+
+def test_build_all_requests_messages_includes_info_kind_with_request_text(conn):
+    storage.create_group_change_request(
+        conn, 111, None, None, "t", kind="new_institute", request_text="Институт X; URL: —"
+    )
+
+    entries = _build_all_requests_messages(conn)
+
+    assert len(entries) == 1
+    text, keyboard = entries[0]
+    assert "Институт X; URL: —" in text
+    buttons = [b for row in keyboard.inline_keyboard for b in row]
+    assert any(b.callback_data == "chgreq:approve:1" for b in buttons)

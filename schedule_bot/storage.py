@@ -113,10 +113,12 @@ def init_db(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER NOT NULL,
             from_group_id INTEGER REFERENCES groups(id),
-            to_group_id INTEGER NOT NULL REFERENCES groups(id),
+            to_group_id INTEGER REFERENCES groups(id),
             requested_at TEXT NOT NULL,
             status TEXT NOT NULL,
-            decided_at TEXT
+            decided_at TEXT,
+            kind TEXT NOT NULL DEFAULT 'group_change',
+            request_text TEXT
         );
 
         CREATE TABLE IF NOT EXISTS group_exclusions (
@@ -129,6 +131,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     _migrate_group_change_requests_nullable_from_group(conn)
+    _migrate_group_change_requests_add_kind_and_text(conn)
 
 
 def _migrate_group_change_requests_nullable_from_group(conn: sqlite3.Connection) -> None:
@@ -143,10 +146,43 @@ def _migrate_group_change_requests_nullable_from_group(conn: sqlite3.Connection)
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER NOT NULL,
             from_group_id INTEGER REFERENCES groups(id),
-            to_group_id INTEGER NOT NULL REFERENCES groups(id),
+            to_group_id INTEGER REFERENCES groups(id),
             requested_at TEXT NOT NULL,
             status TEXT NOT NULL,
-            decided_at TEXT
+            decided_at TEXT,
+            kind TEXT NOT NULL DEFAULT 'group_change',
+            request_text TEXT
+        );
+        INSERT INTO group_change_requests
+            (id, chat_id, from_group_id, to_group_id, requested_at, status, decided_at)
+            SELECT id, chat_id, from_group_id, to_group_id, requested_at, status, decided_at
+            FROM group_change_requests_old;
+        DROP TABLE group_change_requests_old;
+        """
+    )
+    conn.commit()
+
+
+def _migrate_group_change_requests_add_kind_and_text(conn: sqlite3.Connection) -> None:
+    info = conn.execute("PRAGMA table_info(group_change_requests)").fetchall()
+    columns = {row[1] for row in info}
+    if "kind" in columns and "request_text" in columns:
+        to_group_column = next(row for row in info if row[1] == "to_group_id")
+        if to_group_column[3] == 0:
+            return  # already migrated: nullable to_group_id + both new columns present
+    conn.executescript(
+        """
+        ALTER TABLE group_change_requests RENAME TO group_change_requests_old;
+        CREATE TABLE group_change_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            from_group_id INTEGER REFERENCES groups(id),
+            to_group_id INTEGER REFERENCES groups(id),
+            requested_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            decided_at TEXT,
+            kind TEXT NOT NULL DEFAULT 'group_change',
+            request_text TEXT
         );
         INSERT INTO group_change_requests
             (id, chat_id, from_group_id, to_group_id, requested_at, status, decided_at)
@@ -703,23 +739,26 @@ def count_election_approvals(conn: sqlite3.Connection, election_id: int) -> int:
 class GroupChangeRequestRow:
     id: int
     chat_id: int
-    from_group_id: int
-    to_group_id: int
+    from_group_id: int | None
+    to_group_id: int | None
     requested_at: str
     status: str
     decided_at: str | None
+    kind: str
+    request_text: str | None
 
 
-_REQUEST_COLUMNS = "id, chat_id, from_group_id, to_group_id, requested_at, status, decided_at"
+_REQUEST_COLUMNS = "id, chat_id, from_group_id, to_group_id, requested_at, status, decided_at, kind, request_text"
 
 
 def create_group_change_request(
-    conn: sqlite3.Connection, chat_id: int, from_group_id: int | None, to_group_id: int, requested_at: str
+    conn: sqlite3.Connection, chat_id: int, from_group_id: int | None, to_group_id: int | None, requested_at: str,
+    *, kind: str = "group_change", request_text: str | None = None,
 ) -> int:
     cursor = conn.execute(
-        "INSERT INTO group_change_requests (chat_id, from_group_id, to_group_id, requested_at, status) "
-        "VALUES (?, ?, ?, ?, 'pending')",
-        (chat_id, from_group_id, to_group_id, requested_at),
+        "INSERT INTO group_change_requests (chat_id, from_group_id, to_group_id, requested_at, status, kind, request_text) "
+        "VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+        (chat_id, from_group_id, to_group_id, requested_at, kind, request_text),
     )
     conn.commit()
     return cursor.lastrowid
@@ -727,7 +766,8 @@ def create_group_change_request(
 
 def get_pending_request_for_chat(conn: sqlite3.Connection, chat_id: int) -> GroupChangeRequestRow | None:
     row = conn.execute(
-        f"SELECT {_REQUEST_COLUMNS} FROM group_change_requests WHERE chat_id = ? AND status = 'pending'",
+        f"SELECT {_REQUEST_COLUMNS} FROM group_change_requests "
+        "WHERE chat_id = ? AND status = 'pending' AND kind = 'group_change'",
         (chat_id,),
     ).fetchone()
     return GroupChangeRequestRow(*row) if row else None

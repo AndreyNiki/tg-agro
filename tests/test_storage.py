@@ -460,6 +460,64 @@ def test_list_all_pending_requests_spans_groups_and_skips_decided(conn):
     assert [r.chat_id for r in all_pending] == [111, 222]
 
 
+def test_create_group_change_request_defaults_kind_to_group_change(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    request_id = storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+    request = storage.get_group_change_request(conn, request_id)
+    assert request.kind == "group_change"
+    assert request.request_text is None
+
+
+def test_create_group_change_request_accepts_kind_and_text_with_null_groups(conn):
+    request_id = storage.create_group_change_request(
+        conn, 111, None, None, "t", kind="new_institute", request_text="Институт X; URL: —"
+    )
+    request = storage.get_group_change_request(conn, request_id)
+    assert request.kind == "new_institute"
+    assert request.from_group_id is None
+    assert request.to_group_id is None
+    assert request.request_text == "Институт X; URL: —"
+
+
+def test_get_pending_request_for_chat_ignores_non_group_change_kinds(conn):
+    storage.create_group_change_request(conn, 111, None, None, "t", kind="new_institute", request_text="x")
+    assert storage.get_pending_request_for_chat(conn, 111) is None
+
+
+def test_migrate_group_change_requests_add_kind_and_text_preserves_existing_rows(conn):
+    """Simulates an upgrade from a schema without kind/request_text and
+    with to_group_id NOT NULL: an existing row must survive the rebuild
+    unchanged, defaulting kind to 'group_change' and request_text to None,
+    and the column must become usable with NULL groups afterwards."""
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    conn.execute("DROP TABLE group_change_requests")
+    conn.execute(
+        "CREATE TABLE group_change_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, "
+        "from_group_id INTEGER REFERENCES groups(id), to_group_id INTEGER NOT NULL REFERENCES groups(id), "
+        "requested_at TEXT NOT NULL, status TEXT NOT NULL, decided_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO group_change_requests (chat_id, from_group_id, to_group_id, requested_at, status, decided_at) "
+        "VALUES (111, ?, ?, 't', 'approved', 't2')",
+        (group_a, group_b),
+    )
+    conn.commit()
+
+    storage._migrate_group_change_requests_add_kind_and_text(conn)
+
+    rows = conn.execute(
+        "SELECT chat_id, from_group_id, to_group_id, status, decided_at, kind, request_text "
+        "FROM group_change_requests"
+    ).fetchall()
+    assert rows == [(111, group_a, group_b, "approved", "t2", "group_change", None)]
+    new_request_id = storage.create_group_change_request(
+        conn, 222, None, None, "t3", kind="new_group", request_text="desc"
+    )
+    assert storage.get_group_change_request(conn, new_request_id).to_group_id is None
+
+
 def test_has_group_exclusion_false_when_none_recorded(conn):
     group_id = _make_group(conn)
     assert storage.has_group_exclusion(conn, group_id, 111) is False

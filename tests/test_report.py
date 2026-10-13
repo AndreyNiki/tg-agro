@@ -61,10 +61,27 @@ async def test_apply_report_forwards_to_admin(conn):
 
     result = await _apply_report(conn, bot_client, ADMIN_CHAT_ID, 111, "Проблема с расписанием")
 
-    assert "отправлено" in result
+    assert "отправлена" in result
     bot_client.send_message.assert_awaited_once()
     assert bot_client.send_message.await_args.kwargs["chat_id"] == ADMIN_CHAT_ID
     assert "Проблема с расписанием" in bot_client.send_message.await_args.kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_apply_report_creates_pending_report_request_with_decision_buttons(conn):
+    bot_client = MagicMock()
+    bot_client.send_message = AsyncMock()
+
+    await _apply_report(conn, bot_client, ADMIN_CHAT_ID, 111, "Проблема с расписанием")
+
+    request = storage.list_all_pending_requests(conn)[0]
+    assert request.kind == "report"
+    assert request.chat_id == 111
+    assert request.request_text == "Проблема с расписанием"
+    keyboard = bot_client.send_message.await_args.kwargs["reply_markup"]
+    buttons = [b for row in keyboard.inline_keyboard for b in row]
+    assert any(b.callback_data == f"chgreq:approve:{request.id}" for b in buttons)
+    assert any(b.callback_data == f"chgreq:reject:{request.id}" for b in buttons)
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,7 @@
 import logging
+from datetime import datetime, timezone
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from schedule_bot import storage
 from schedule_bot.elections import format_candidate_label
@@ -17,11 +20,24 @@ async def _apply_report(conn, bot_client, admin_chat_id: int, chat_id: int, text
     reporter = storage.get_member(conn, chat_id)
     group = storage.get_group(conn, reporter.group_id) if reporter is not None else None
     message = format_report_message(reporter, group, chat_id, text)
+    request_id = storage.create_group_change_request(
+        conn, chat_id, None, None, datetime.now(timezone.utc).isoformat(), kind="report", request_text=text
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Решено", callback_data=f"chgreq:approve:{request_id}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"chgreq:reject:{request_id}"),
+            ]
+        ]
+    )
     try:
-        await send_with_retry(lambda: bot_client.send_message(chat_id=admin_chat_id, text=message))
+        await send_with_retry(
+            lambda: bot_client.send_message(chat_id=admin_chat_id, text=message, reply_markup=keyboard)
+        )
     except Exception as error:
         logger.warning("report: failed to forward to admin: %s", error)
-    return "Сообщение отправлено администратору."
+    return "Жалоба отправлена администратору."
 
 
 async def report_command(update, context) -> None:

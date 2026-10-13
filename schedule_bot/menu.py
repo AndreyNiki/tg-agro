@@ -1,4 +1,6 @@
 import asyncio
+import logging
+from datetime import datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -26,8 +28,32 @@ from schedule_bot.group_commands import build_institute_picker_keyboard, subscri
 from schedule_bot.institute_commands import create_institute_and_scan, format_institute_links
 from schedule_bot.report import _apply_report
 from schedule_bot.starosta_commands import starosta_command, votes_command
+from schedule_bot.telegram_utils import send_with_retry
+
+logger = logging.getLogger(__name__)
 
 ROOT_CALLBACK_DATA = "menu:root:_"
+
+
+async def _notify_admin_of_info_request(context, request_id: int, kind_label: str, request_text: str) -> None:
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Решено", callback_data=f"chgreq:approve:{request_id}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"chgreq:reject:{request_id}"),
+            ]
+        ]
+    )
+    try:
+        await send_with_retry(
+            lambda: context.bot.send_message(
+                chat_id=context.bot_data["admin_chat_id"],
+                text=f"Заявка ({kind_label}):\n{request_text}",
+                reply_markup=keyboard,
+            )
+        )
+    except Exception as error:
+        logger.warning("menu: failed to notify admin of request_id=%s: %s", request_id, error)
 
 
 def build_root_keyboard(conn, chat_id: int, admin_chat_id: int) -> InlineKeyboardMarkup:
@@ -454,6 +480,37 @@ async def pending_action_followup(update, context) -> None:
         for text in alerts:
             await update.message.reply_text(text)
         await update.message.reply_text(f"Институт «{name}» создан (id={institute_id}), {scan_status}.")
+        return
+
+    if action == "new_institute_name":
+        context.user_data["pending_menu_action"] = {"action": "new_institute_url", "name": value}
+        await update.message.reply_text(
+            "Отправьте URL каталога института (на этой странице должны быть ссылки на страницы форм "
+            "обучения — Очная/Очно-заочная/Заочная). Если не знаете — отправьте «-»."
+        )
+        return
+
+    if action == "new_institute_url":
+        name = pending["name"]
+        url = "—" if value.strip() == "-" else value
+        request_id = storage.create_group_change_request(
+            conn, update.effective_chat.id, None, None, datetime.now(timezone.utc).isoformat(),
+            kind="new_institute", request_text=f"Институт: {name}\nURL каталога: {url}",
+        )
+        await _notify_admin_of_info_request(context, request_id, "добавление института", f"Институт: {name}\nURL каталога: {url}")
+        await update.message.reply_text("Заявка отправлена, администратор её рассмотрит.")
+        return
+
+    if action == "new_group_text":
+        institute = storage.get_institute(conn, pending["institute_id"])
+        institute_name = institute.name if institute is not None else "?"
+        request_text = f"Институт: {institute_name}\nОписание: {value}"
+        request_id = storage.create_group_change_request(
+            conn, update.effective_chat.id, None, None, datetime.now(timezone.utc).isoformat(),
+            kind="new_group", request_text=request_text,
+        )
+        await _notify_admin_of_info_request(context, request_id, "добавление группы", request_text)
+        await update.message.reply_text("Заявка отправлена, администратор её рассмотрит.")
         return
 
     if "institute_id" in pending:
