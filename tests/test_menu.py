@@ -279,8 +279,9 @@ async def test_menu_callback_starosta_exclude_shows_classmates_with_buttons(conn
 
     await menu_callback(update, context)
 
-    update.callback_query.message.reply_text.assert_awaited_once()
-    _, kwargs = update.callback_query.message.reply_text.call_args
+    # One message with the member list, one with the exclude keyboard.
+    assert update.callback_query.message.reply_text.await_count == 2
+    _, kwargs = update.callback_query.message.reply_text.await_args_list[-1]
     assert "reply_markup" in kwargs
 
 

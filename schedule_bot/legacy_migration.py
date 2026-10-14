@@ -131,7 +131,12 @@ async def run_legacy_migration_if_configured(
         storage.upsert_member(
             conn, chat_id, group.id, joined_at=backup_row.joined_at or now, subscribed=backup_row.subscribed,
         )
-    storage.prune_legacy_members_backup(conn, list(chat_ids))
+    # Prune every backed-up chat_id, not just the ones just migrated:
+    # one already re-subscribed via /start (excluded from chat_ids above)
+    # is just as resolved — it already has a real `members` row — and
+    # leaving it in the backup would make a later
+    # warn_if_legacy_backup_unconfigured alert about it forever.
+    storage.prune_legacy_members_backup(conn, list(backed_up))
 
     # validate_and_sync_group_on_first_subscribe's own immediate sync ran
     # BEFORE any member was reassigned onto this group, so it was a

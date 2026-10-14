@@ -375,6 +375,11 @@ async def test_legacy_migration_only_migrates_backed_up_chat_ids_not_already_res
     assert storage.get_member(conn, 333).group_id == target_group.id
     assert storage.get_member(conn, 222).group_id == other_group_id  # untouched
 
+    # 222 was skipped (already resubscribed elsewhere), but it's just as
+    # resolved as 111/333 — all three must be pruned from the backup, or
+    # a later warn_if_legacy_backup_unconfigured would report it forever.
+    assert storage.list_legacy_member_chat_ids_backup(conn) == []
+
 
 @pytest.mark.asyncio
 async def test_migration_preserves_original_subscribed_and_joined_at_and_prunes_backup(conn, monkeypatch):

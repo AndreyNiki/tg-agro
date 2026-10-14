@@ -37,6 +37,10 @@ def test_chunk_text_by_lines_keeps_an_overlong_single_line_whole():
     assert long_line in chunks
 
 
+def test_chunk_text_by_lines_returns_no_chunks_for_empty_text():
+    assert chunk_text_by_lines("") == []
+
+
 @pytest.mark.asyncio
 async def test_send_with_retry_returns_result_on_first_success():
     send = AsyncMock(return_value="ok")

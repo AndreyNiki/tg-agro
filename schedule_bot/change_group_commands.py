@@ -25,8 +25,8 @@ _ABORT_CALLBACK_DATA = "chgabort"
 # "show more" button, so a pile-up of requests can't flood a chat with
 # dozens of messages (and their keyboards) in one go.
 REQUESTS_PAGE_SIZE = 10
-_REQUESTS_GROUP_PAGE_PREFIX = "reqpage:group:"
-_REQUESTS_ALL_PAGE_PREFIX = "reqpage:all:"
+REQUESTS_GROUP_PAGE_PREFIX = "reqpage:group:"
+REQUESTS_ALL_PAGE_PREFIX = "reqpage:all:"
 REQUESTS_GROUP_PAGE_CALLBACK_PATTERN = r"^reqpage:group:\d+:\d+$"
 REQUESTS_ALL_PAGE_CALLBACK_PATTERN = r"^reqpage:all:\d+$"
 
@@ -354,7 +354,11 @@ async def change_request_reject_callback(update: Update, context: ContextTypes.D
     await query.message.reply_text("Заявка отклонена.")
 
 
-def _build_requests_messages(conn, group) -> list[tuple[str, "InlineKeyboardMarkup"]]:
+def _build_requests_messages(conn, group) -> list[tuple[int, str, "InlineKeyboardMarkup"]]:
+    """Returns (request_id, text, keyboard) triples — the id is the
+    keyset-pagination cursor send_requests_batch uses, since a plain
+    numeric offset would silently skip entries once something earlier
+    in the list gets approved/rejected between page loads."""
     entries = []
     for request in storage.list_pending_requests_for_group(conn, group.id):
         requester = storage.get_member(conn, request.chat_id)
@@ -368,7 +372,7 @@ def _build_requests_messages(conn, group) -> list[tuple[str, "InlineKeyboardMark
             ]
         )
         verb = "вступление" if request.from_group_id is None else "переход"
-        entries.append((f"Заявка от {label} на {verb} в группу «{group.name}».", keyboard))
+        entries.append((request.id, f"Заявка от {label} на {verb} в группу «{group.name}».", keyboard))
     return entries
 
 
@@ -378,8 +382,25 @@ _INFO_REQUEST_KIND_LABEL = {
     "report": "жалоба",
 }
 
+# request_text is raw, Telegram-message-sized user input (/report, "моего
+# института/группы нет"); a message near Telegram's own 4096-char cap
+# plus this prefix would exceed it and raise BadRequest, breaking the
+# whole batch send for every request after it (the exact failure #1 in
+# the backlog is about). Truncating comfortably below the real limit
+# leaves slack for the prefix/label.
+_REQUEST_TEXT_DISPLAY_LIMIT = 3500
 
-def _build_all_requests_messages(conn) -> list[tuple[str, "InlineKeyboardMarkup"]]:
+
+def _truncate_request_text(text: str) -> str:
+    if len(text) <= _REQUEST_TEXT_DISPLAY_LIMIT:
+        return text
+    return text[:_REQUEST_TEXT_DISPLAY_LIMIT] + "…\n\n(сообщение обрезано, слишком длинное)"
+
+
+def _build_all_requests_messages(conn) -> list[tuple[int, str, "InlineKeyboardMarkup"]]:
+    """Returns (request_id, text, keyboard) triples — see
+    _build_requests_messages for why the id (not a numeric position) is
+    the pagination cursor."""
     entries = []
     for request in storage.list_all_pending_requests(conn):
         if request.kind != "group_change":
@@ -387,7 +408,13 @@ def _build_all_requests_messages(conn) -> list[tuple[str, "InlineKeyboardMarkup"
             label = elections.format_candidate_label(requester) if requester is not None else "Неизвестный"
             keyboard = build_info_decision_keyboard(request.id)
             kind_label = _INFO_REQUEST_KIND_LABEL[request.kind]
-            entries.append((f"Заявка ({kind_label}) от {label}:\n{request.request_text}", keyboard))
+            entries.append(
+                (
+                    request.id,
+                    f"Заявка ({kind_label}) от {label}:\n{_truncate_request_text(request.request_text)}",
+                    keyboard,
+                )
+            )
             continue
 
         group = storage.get_group(conn, request.to_group_id)
@@ -404,29 +431,35 @@ def _build_all_requests_messages(conn) -> list[tuple[str, "InlineKeyboardMarkup"
             ]
         )
         verb = "вступление" if request.from_group_id is None else "переход"
-        entries.append((f"Заявка от {label} на {verb} в группу «{group.name}».", keyboard))
+        entries.append((request.id, f"Заявка от {label} на {verb} в группу «{group.name}».", keyboard))
     return entries
 
 
-async def _send_requests_batch(reply_target, entries, offset: int, more_callback_data: str) -> None:
-    """Sends entries[offset:offset + REQUESTS_PAGE_SIZE] as individual
-    messages (each with its own approve/reject keyboard), then — if more
-    remain — one extra message with a "show more" button, so a pile-up
-    of pending requests can't flood the chat with everything at once."""
+async def send_requests_batch(reply_target, entries, after_id: int, more_callback_data_prefix: str) -> None:
+    """Sends the entries whose id comes after `after_id` (a keyset
+    cursor, not a numeric offset — entries is rebuilt fresh from the DB
+    on every page, and an offset would silently skip requests once an
+    earlier one in the list gets approved/rejected between page loads),
+    up to REQUESTS_PAGE_SIZE of them, each as its own message with its
+    own approve/reject keyboard. If more remain, one extra message with
+    a "show more" button carries the new cursor forward."""
     if not entries:
         await reply_target("Нет заявок на рассмотрении.")
         return
-    page = entries[offset : offset + REQUESTS_PAGE_SIZE]
-    for text, keyboard in page:
+    remaining = [entry for entry in entries if entry[0] > after_id]
+    if not remaining:
+        await reply_target("Нет новых заявок на рассмотрении.")
+        return
+    page = remaining[:REQUESTS_PAGE_SIZE]
+    for _, text, keyboard in page:
         await reply_target(text, reply_markup=keyboard)
-    next_offset = offset + REQUESTS_PAGE_SIZE
-    if next_offset < len(entries):
-        shown_to = min(next_offset, len(entries))
+    last_id = page[-1][0]
+    if len(remaining) > REQUESTS_PAGE_SIZE:
         more_keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("➡️ Показать ещё", callback_data=more_callback_data)]]
+            [[InlineKeyboardButton("➡️ Показать ещё", callback_data=f"{more_callback_data_prefix}{last_id}")]]
         )
         await reply_target(
-            f"Показаны заявки {offset + 1}-{shown_to} из {len(entries)}.", reply_markup=more_keyboard
+            f"Показано {len(page)} из {len(remaining)} оставшихся заявок.", reply_markup=more_keyboard
         )
 
 
@@ -447,16 +480,14 @@ async def requests_command(update, context) -> None:
             return
 
     entries = _build_requests_messages(conn, group)
-    await _send_requests_batch(
-        update.message.reply_text, entries, 0, f"{_REQUESTS_GROUP_PAGE_PREFIX}{group.id}:{REQUESTS_PAGE_SIZE}"
-    )
+    await send_requests_batch(update.message.reply_text, entries, 0, f"{REQUESTS_GROUP_PAGE_PREFIX}{group.id}:")
 
 
 async def requests_group_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    _, _, group_id_str, offset_str = query.data.split(":")
-    group_id, offset = int(group_id_str), int(offset_str)
+    _, _, group_id_str, after_id_str = query.data.split(":")
+    group_id, after_id = int(group_id_str), int(after_id_str)
     conn = context.bot_data["conn"]
     group = storage.get_group(conn, group_id)
     if group is None:
@@ -466,20 +497,16 @@ async def requests_group_page_callback(update: Update, context: ContextTypes.DEF
         await query.message.reply_text("Недостаточно прав.")
         return
     entries = _build_requests_messages(conn, group)
-    await _send_requests_batch(
-        query.message.reply_text, entries, offset, f"{_REQUESTS_GROUP_PAGE_PREFIX}{group.id}:{offset + REQUESTS_PAGE_SIZE}"
-    )
+    await send_requests_batch(query.message.reply_text, entries, after_id, f"{REQUESTS_GROUP_PAGE_PREFIX}{group.id}:")
 
 
 async def requests_all_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    offset = int(query.data.removeprefix(_REQUESTS_ALL_PAGE_PREFIX))
+    after_id = int(query.data.removeprefix(REQUESTS_ALL_PAGE_PREFIX))
     if update.effective_chat.id != context.bot_data.get("admin_chat_id"):
         await query.message.reply_text("Недостаточно прав.")
         return
     conn = context.bot_data["conn"]
     entries = _build_all_requests_messages(conn)
-    await _send_requests_batch(
-        query.message.reply_text, entries, offset, f"{_REQUESTS_ALL_PAGE_PREFIX}{offset + REQUESTS_PAGE_SIZE}"
-    )
+    await send_requests_batch(query.message.reply_text, entries, after_id, REQUESTS_ALL_PAGE_PREFIX)

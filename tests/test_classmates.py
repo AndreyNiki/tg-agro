@@ -377,3 +377,93 @@ async def test_exclude_confirm_callback_clears_starosta_vacancy_when_excluding_s
 
     assert storage.get_member(conn, 222) is None
     assert storage.get_group(conn, group_id).starosta_chat_id is None
+
+
+from schedule_bot.classmates import EXCLUDE_PAGE_SIZE, exclude_page_callback
+
+
+@pytest.mark.asyncio
+async def test_classmates_command_splits_long_member_list_into_several_messages():
+    conn = sqlite3.connect(":memory:")
+    storage.init_db(conn)
+    group_id = _make_group(conn)
+    for i in range(400):
+        storage.upsert_member(conn, 1000 + i, group_id, joined_at="t")
+        storage.update_member_profile(conn, 1000 + i, telegram_username=f"user{i}" * 5, display_name=None)
+
+    update = make_update(1000)
+    context = make_context(conn)
+
+    await classmates_command(update, context)
+
+    from schedule_bot.telegram_utils import TELEGRAM_MESSAGE_LIMIT
+
+    assert update.message.reply_text.await_count > 1
+    for call in update.message.reply_text.await_args_list:
+        assert len(call.args[0]) <= TELEGRAM_MESSAGE_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_classmates_command_paginates_exclude_buttons_when_group_is_large():
+    conn = sqlite3.connect(":memory:")
+    storage.init_db(conn)
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    member_count = EXCLUDE_PAGE_SIZE + 5
+    for i in range(member_count):
+        storage.upsert_member(conn, 1000 + i, group_id, joined_at="t")
+
+    update = make_update(111)
+    context = make_context_with_admin(conn)
+
+    await classmates_command(update, context)
+
+    # Last message is the first page of the exclude keyboard.
+    _, kwargs = update.message.reply_text.call_args
+    buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    select_buttons = [b for b in buttons if b.callback_data.startswith("exclude:select:")]
+    more_buttons = [b for b in buttons if b.callback_data.startswith("exclude:page:")]
+    assert len(select_buttons) == EXCLUDE_PAGE_SIZE
+    assert len(more_buttons) == 1
+
+
+@pytest.mark.asyncio
+async def test_exclude_page_callback_returns_next_page():
+    conn = sqlite3.connect(":memory:")
+    storage.init_db(conn)
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    member_count = EXCLUDE_PAGE_SIZE + 5
+    for i in range(member_count):
+        storage.upsert_member(conn, 1000 + i, group_id, joined_at="t")
+
+    last_chat_id = 1000 + EXCLUDE_PAGE_SIZE - 1
+    update = make_callback_update(111, f"exclude:page:{group_id}:{last_chat_id}")
+    context = make_context_with_admin(conn)
+
+    await exclude_page_callback(update, context)
+
+    update.callback_query.answer.assert_awaited_once()
+    _, kwargs = update.callback_query.message.reply_text.call_args
+    buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    select_buttons = [b for b in buttons if b.callback_data.startswith("exclude:select:")]
+    assert len(select_buttons) == 5  # the 5 remaining excludable members (member_count - EXCLUDE_PAGE_SIZE)
+
+
+@pytest.mark.asyncio
+async def test_exclude_page_callback_rejects_unauthorized_caller():
+    conn = sqlite3.connect(":memory:")
+    storage.init_db(conn)
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+
+    update = make_callback_update(333, f"exclude:page:{group_id}:0")
+    context = make_context_with_admin(conn)
+
+    await exclude_page_callback(update, context)
+
+    assert "Недостаточно прав" in update.callback_query.message.reply_text.call_args[0][0]

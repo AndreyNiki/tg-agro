@@ -79,14 +79,6 @@ def _rebuild_groups_members_schedule_versions(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def list_legacy_member_chat_ids_backup(conn: sqlite3.Connection) -> list[int]:
-    info = conn.execute("PRAGMA table_info(legacy_members_backup)").fetchall()
-    if not info:
-        return []
-    rows = conn.execute("SELECT chat_id FROM legacy_members_backup").fetchall()
-    return [row[0] for row in rows]
-
-
 @dataclass
 class LegacyMemberBackupRow:
     chat_id: int
@@ -106,6 +98,10 @@ def list_legacy_members_backup(conn: sqlite3.Connection) -> list[LegacyMemberBac
     # upsert_member used before this row's subscribed/joined_at existed.
     rows = conn.execute("SELECT chat_id FROM legacy_members_backup").fetchall()
     return [LegacyMemberBackupRow(chat_id, True, "") for (chat_id,) in rows]
+
+
+def list_legacy_member_chat_ids_backup(conn: sqlite3.Connection) -> list[int]:
+    return [row.chat_id for row in list_legacy_members_backup(conn)]
 
 
 def prune_legacy_members_backup(conn: sqlite3.Connection, chat_ids: list[int]) -> None:

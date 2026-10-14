@@ -24,7 +24,14 @@ from schedule_bot.bot import (
     set_starosta_command,
     sync_visible_commands,
 )
-from schedule_bot.classmates import classmates_command, exclude_abort_callback, exclude_confirm_callback, exclude_select_callback
+from schedule_bot.classmates import (
+    EXCLUDE_PAGE_CALLBACK_PATTERN,
+    classmates_command,
+    exclude_abort_callback,
+    exclude_confirm_callback,
+    exclude_page_callback,
+    exclude_select_callback,
+)
 from schedule_bot.faq import faq_command
 from schedule_bot.report import report_command
 from schedule_bot.change_group_commands import (
@@ -109,6 +116,16 @@ class _LiveWeekFormula:
 ADMIN_ALERT_COOLDOWN_SECONDS = 30
 
 
+def _pluralize_russian(count: int, one: str, few: str, many: str) -> str:
+    """Russian plural rule: 1 (but not 11) -> one, 2-4 (but not 12-14) ->
+    few, everything else -> many."""
+    if count % 10 == 1 and count % 100 != 11:
+        return one
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return few
+    return many
+
+
 async def _global_error_handler(update, context) -> None:
     logger.exception("main: unhandled exception while processing update %r", update, exc_info=context.error)
     config = context.application.bot_data.get("config")
@@ -125,21 +142,28 @@ async def _global_error_handler(update, context) -> None:
     # count), with no `await` between the check and the state update so
     # two concurrent error handlers can't both decide to send.
     throttle = context.application.bot_data.setdefault(
-        "_admin_alert_throttle", {"last_sent_at": 0.0, "suppressed": 0}
+        "_admin_alert_throttle", {"last_sent_at": 0.0, "suppressed": 0, "first_suppressed_at": None}
     )
     now = time.monotonic()
     if now - throttle["last_sent_at"] < ADMIN_ALERT_COOLDOWN_SECONDS:
+        if throttle["suppressed"] == 0:
+            throttle["first_suppressed_at"] = now
         throttle["suppressed"] += 1
     else:
         suppressed = throttle["suppressed"]
+        first_suppressed_at = throttle["first_suppressed_at"]
         throttle["last_sent_at"] = now
         throttle["suppressed"] = 0
-        suffix = (
-            f"\n\n(и ещё {suppressed} ошиб{'ка' if suppressed == 1 else 'ок'} подавлено за последние "
-            f"{ADMIN_ALERT_COOLDOWN_SECONDS}с)"
-            if suppressed
-            else ""
-        )
+        throttle["first_suppressed_at"] = None
+        if suppressed:
+            # The actual elapsed window, not the fixed cooldown length —
+            # a storm that ran for minutes before this message finally
+            # got through must not be reported as "за последние 30с".
+            window_seconds = round(now - first_suppressed_at)
+            noun = _pluralize_russian(suppressed, "ошибка", "ошибки", "ошибок")
+            suffix = f"\n\n(и ещё {suppressed} {noun} подавлено за последние {window_seconds}с)"
+        else:
+            suffix = ""
         try:
             await send_with_retry(
                 lambda: context.application.bot.send_message(
@@ -370,6 +394,7 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CallbackQueryHandler(exclude_select_callback, pattern=r"^exclude:select:\d+$"))
     application.add_handler(CallbackQueryHandler(exclude_confirm_callback, pattern=r"^exclude:confirm:\d+$"))
     application.add_handler(CallbackQueryHandler(exclude_abort_callback, pattern=r"^exclude:abort$"))
+    application.add_handler(CallbackQueryHandler(exclude_page_callback, pattern=EXCLUDE_PAGE_CALLBACK_PATTERN))
 
     application.add_handler(CommandHandler("menu", menu_command, filters=filters.UpdateType.MESSAGE))
     application.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
@@ -386,6 +411,11 @@ def build_application(config: Config, conn) -> Application:
     scheduler_holder["scheduler"] = build_scheduler(
         conn, config, application.bot, week_formula_holder, locks=link_locks,
         catalog_rescan_state=catalog_rescan_state, catalog_locks=catalog_locks,
+        # Gates the recurring heartbeat write on polling actually being
+        # alive, not just the event loop/scheduler — Updater.running
+        # goes False the moment polling dies even while everything else
+        # keeps ticking.
+        is_alive=lambda: application.updater is not None and application.updater.running,
     )
     # Exposed so tests (and any future consumer) can assert the scheduled
     # jobs and the manual /refresh path really share ONE rate-limit dict.

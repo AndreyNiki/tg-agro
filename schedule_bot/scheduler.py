@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -39,12 +40,18 @@ HEARTBEAT_INTERVAL_SECONDS = 60
 POLL_JITTER_SECONDS = 60
 
 
-def heartbeat_job(heartbeat_path: str) -> None:
+def heartbeat_job(heartbeat_path: str, is_alive: Callable[[], bool] | None = None) -> None:
     """Touches a timestamp file so Dockerfile's HEALTHCHECK can tell a
     live event loop + running scheduler apart from a merely-present
     schedule.db — the previous healthcheck only checked the latter, so a
     deadlocked loop or a silently-stopped AsyncIOScheduler still reported
-    "healthy" forever."""
+    "healthy" forever. `is_alive`, when given, additionally gates the
+    write on e.g. `application.updater.running`: the event loop and
+    scheduler can both stay healthy while polling itself has died, which
+    a loop/scheduler-only heartbeat would never catch — skipping the
+    write lets that go stale and the container report unhealthy too."""
+    if is_alive is not None and not is_alive():
+        return
     Path(heartbeat_path).write_text(datetime.now(timezone.utc).isoformat())
 
 
@@ -397,6 +404,7 @@ def reschedule_institute_jobs(
 def build_scheduler(
     conn, config, bot, week_formula_holder: WeekFormulaHolder, locks: dict | None = None,
     catalog_rescan_state: dict | None = None, catalog_locks: dict | None = None,
+    is_alive: Callable[[], bool] | None = None,
 ) -> AsyncIOScheduler:
     if locks is None:
         locks = {}
@@ -431,11 +439,16 @@ def build_scheduler(
     )
 
     heartbeat_path = str(Path(config.db_path).parent / "heartbeat")
-    heartbeat_job(heartbeat_path)  # written immediately so it exists before the first interval fires
+    # Written unconditionally (ignoring is_alive) so the file exists
+    # before the first interval fires — at this point in startup nothing
+    # (polling included) is running yet, so gating this first write on
+    # is_alive would mean no heartbeat file at all until
+    # HEARTBEAT_INTERVAL_SECONDS later.
+    heartbeat_job(heartbeat_path)
     scheduler.add_job(
         heartbeat_job,
         IntervalTrigger(seconds=HEARTBEAT_INTERVAL_SECONDS),
-        args=[heartbeat_path],
+        args=[heartbeat_path, is_alive],
         id="heartbeat",
         replace_existing=True,
     )

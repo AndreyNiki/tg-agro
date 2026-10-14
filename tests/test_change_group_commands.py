@@ -359,8 +359,10 @@ async def test_requests_command_paginates_when_more_than_page_size(conn):
     storage.upsert_member(conn, 555, group_b, joined_at="t")
     storage.update_group_starosta(conn, group_b, 555)
     request_count = REQUESTS_PAGE_SIZE + 3
-    for chat_id in range(1000, 1000 + request_count):
+    request_ids = [
         storage.create_group_change_request(conn, chat_id, group_a, group_b, "t")
+        for chat_id in range(1000, 1000 + request_count)
+    ]
 
     update = make_message_update(555)
     context = make_context(conn)
@@ -371,10 +373,11 @@ async def test_requests_command_paginates_when_more_than_page_size(conn):
     # REQUESTS_PAGE_SIZE request messages + one "show more" message.
     assert update.message.reply_text.await_count == REQUESTS_PAGE_SIZE + 1
     last_call = update.message.reply_text.await_args_list[-1]
-    assert "Показаны заявки" in last_call.args[0]
+    assert "Показано" in last_call.args[0]
     more_keyboard = last_call.kwargs["reply_markup"]
     more_callback_data = more_keyboard.inline_keyboard[0][0].callback_data
-    assert more_callback_data == f"reqpage:group:{group_b}:{REQUESTS_PAGE_SIZE}"
+    last_shown_id = request_ids[REQUESTS_PAGE_SIZE - 1]
+    assert more_callback_data == f"reqpage:group:{group_b}:{last_shown_id}"
 
 
 @pytest.mark.asyncio
@@ -384,16 +387,52 @@ async def test_requests_group_page_callback_sends_next_page(conn):
     storage.upsert_member(conn, 555, group_b, joined_at="t")
     storage.update_group_starosta(conn, group_b, 555)
     request_count = REQUESTS_PAGE_SIZE + 3
-    for chat_id in range(1000, 1000 + request_count):
+    request_ids = [
         storage.create_group_change_request(conn, chat_id, group_a, group_b, "t")
+        for chat_id in range(1000, 1000 + request_count)
+    ]
+    cursor = request_ids[REQUESTS_PAGE_SIZE - 1]
 
-    update = make_callback_update(555, f"reqpage:group:{group_b}:{REQUESTS_PAGE_SIZE}")
+    update = make_callback_update(555, f"reqpage:group:{group_b}:{cursor}")
     context = make_context(conn)
 
     await requests_group_page_callback(update, context)
 
     update.callback_query.answer.assert_awaited_once()
     # 3 remaining requests, no further "show more" needed.
+    assert update.callback_query.message.reply_text.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_requests_group_page_callback_does_not_skip_requests_approved_between_pages(conn):
+    """Regression test: with a numeric offset (the old implementation),
+    approving some of the first page's requests before clicking "show
+    more" would shift the remaining list and make the stale offset skip
+    unshown requests. The keyset cursor (last shown request id) must
+    keep working correctly even though the underlying list shrank."""
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 555, group_b, joined_at="t")
+    storage.update_group_starosta(conn, group_b, 555)
+    request_count = REQUESTS_PAGE_SIZE + 3
+    request_ids = [
+        storage.create_group_change_request(conn, chat_id, group_a, group_b, "t")
+        for chat_id in range(1000, 1000 + request_count)
+    ]
+    cursor = request_ids[REQUESTS_PAGE_SIZE - 1]
+
+    # Resolve the first 3 requests of the already-shown first page —
+    # mirrors a starosta approving/rejecting requests before paging on.
+    for request_id in request_ids[:3]:
+        storage.decide_group_change_request(conn, request_id, "approved", "t2")
+
+    update = make_callback_update(555, f"reqpage:group:{group_b}:{cursor}")
+    context = make_context(conn)
+
+    await requests_group_page_callback(update, context)
+
+    # The 3 trailing, still-pending requests must all be shown — none
+    # silently skipped because the list got shorter in between.
     assert update.callback_query.message.reply_text.await_count == 3
 
 
@@ -418,10 +457,13 @@ async def test_requests_all_page_callback_sends_next_page_for_admin(conn):
     group_a = _make_group(conn, "A")
     group_b = _make_group(conn, "B")
     request_count = REQUESTS_PAGE_SIZE + 2
-    for chat_id in range(1000, 1000 + request_count):
+    request_ids = [
         storage.create_group_change_request(conn, chat_id, group_a, group_b, "t")
+        for chat_id in range(1000, 1000 + request_count)
+    ]
+    cursor = request_ids[REQUESTS_PAGE_SIZE - 1]
 
-    update = make_callback_update(ADMIN_CHAT_ID, f"reqpage:all:{REQUESTS_PAGE_SIZE}")
+    update = make_callback_update(ADMIN_CHAT_ID, f"reqpage:all:{cursor}")
     context = make_context(conn)
 
     await requests_all_page_callback(update, context)
@@ -482,7 +524,8 @@ def test_build_requests_messages_returns_one_entry_per_pending_request(conn):
     entries = _build_requests_messages(conn, group_b_row)
 
     assert len(entries) == 1
-    text, keyboard = entries[0]
+    request_id, text, keyboard = entries[0]
+    assert isinstance(request_id, int)
     assert "A" not in text  # requester label is shown, not the source group name
     buttons = [b for row in keyboard.inline_keyboard for b in row]
     assert any(b.callback_data.startswith("chgreq:approve:") for b in buttons)
@@ -624,6 +667,7 @@ async def test_change_request_reject_info_kind_notifies_requester(conn):
 
 
 from schedule_bot.change_group_commands import _build_all_requests_messages
+from schedule_bot.telegram_utils import TELEGRAM_MESSAGE_LIMIT
 
 
 def test_build_all_requests_messages_includes_info_kind_with_request_text(conn):
@@ -634,10 +678,22 @@ def test_build_all_requests_messages_includes_info_kind_with_request_text(conn):
     entries = _build_all_requests_messages(conn)
 
     assert len(entries) == 1
-    text, keyboard = entries[0]
+    _, text, keyboard = entries[0]
     assert "Институт X; URL: —" in text
     buttons = [b for row in keyboard.inline_keyboard for b in row]
     assert any(b.callback_data == "chgreq:approve:1" for b in buttons)
+
+
+def test_build_all_requests_messages_truncates_an_overlong_request_text(conn):
+    overlong_text = "x" * 4000
+    storage.create_group_change_request(conn, 111, None, None, "t", kind="report", request_text=overlong_text)
+
+    entries = _build_all_requests_messages(conn)
+
+    assert len(entries) == 1
+    _, text, _ = entries[0]
+    assert len(text) <= TELEGRAM_MESSAGE_LIMIT
+    assert "обрезано" in text
 
 
 @pytest.mark.asyncio

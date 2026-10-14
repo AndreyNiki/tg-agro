@@ -129,6 +129,24 @@ def test_build_application_installs_a_process_wide_rate_limiter(conn, config, mo
         application.bot_data["_scheduler"].shutdown(wait=False)
 
 
+def test_build_application_wires_heartbeat_is_alive_to_updater_running(conn, config, monkeypatch):
+    """The heartbeat job must reflect whether polling (not just the event
+    loop/scheduler) is actually alive — see scheduler.heartbeat_job's
+    is_alive parameter."""
+    _patch_week_formula(monkeypatch)
+
+    application = build_application(config, conn)
+    try:
+        job = application.bot_data["_scheduler"].get_job("heartbeat")
+        is_alive = job.args[1]
+
+        assert is_alive() is False  # run_polling() was never called in this test
+        application.updater._running = True
+        assert is_alive() is True
+    finally:
+        application.bot_data["_scheduler"].shutdown(wait=False)
+
+
 def test_build_application_registers_missing_institute_and_group_callbacks(conn, config, monkeypatch):
     from schedule_bot.group_commands import group_request_start_callback, institute_request_start_callback
 
@@ -764,7 +782,52 @@ async def test_global_error_handler_throttles_admin_alerts_under_a_failure_storm
 
         app.bot.send_message.assert_awaited_once()
         _, kwargs = app.bot.send_message.call_args
-        assert "4" in kwargs["text"]  # the 4 suppressed in between get reported
+        assert "4 ошибки" in kwargs["text"]  # the 4 suppressed in between get reported, correctly declined
+    finally:
+        app.bot_data["_scheduler"].shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_global_error_handler_reports_the_real_elapsed_suppression_window(conn, config, monkeypatch):
+    """The reported window must reflect how long the storm actually ran,
+    not the fixed cooldown length — a burst that took much longer than
+    ADMIN_ALERT_COOLDOWN_SECONDS to flush must not be reported as having
+    lasted only that long."""
+    from telegram.ext import ContextTypes
+
+    _patch_week_formula(monkeypatch)
+    app = build_application(config, conn)
+    try:
+        monkeypatch.setattr(type(app.bot), "send_message", AsyncMock())
+        context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+        context.bot = app.bot
+        context.application = app
+        context.error = ValueError("boom")
+        update = MagicMock()
+        update.effective_chat.id = 555
+        update.effective_message = None
+
+        handlers = list(app.error_handlers)
+        handler = handlers[0]
+
+        fake_now = [1000.0]
+        monkeypatch.setattr("main.time.monotonic", lambda: fake_now[0])
+
+        await handler(update, context)  # sent immediately, starts the cooldown at t=1000
+        app.bot.send_message.reset_mock()
+
+        fake_now[0] = 1005.0
+        await handler(update, context)  # suppressed; first_suppressed_at = 1005
+        fake_now[0] = 1029.0  # still within the cooldown measured from last_sent_at=1000
+        await handler(update, context)  # still suppressed
+
+        fake_now[0] = 1200.0  # cooldown long since elapsed; this one flushes
+        await handler(update, context)
+
+        app.bot.send_message.assert_awaited_once()
+        _, kwargs = app.bot.send_message.call_args
+        # Elapsed window is 1200 - 1005 = 195s, not the fixed 30s cooldown.
+        assert "195с" in kwargs["text"]
     finally:
         app.bot_data["_scheduler"].shutdown(wait=False)
 

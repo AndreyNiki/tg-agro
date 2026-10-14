@@ -86,7 +86,11 @@ def chunk_text_by_lines(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[
     line boundaries so a line is never cut in the middle. A single line
     longer than `limit` becomes its own (over-length) chunk rather than
     being split mid-word, since that case does not occur with this
-    codebase's current callers."""
+    codebase's current callers. An empty `text` returns no chunks at
+    all, rather than one chunk holding an empty string that Telegram
+    would reject with "message text is empty"."""
+    if not text:
+        return []
     lines = text.split("\n")
     chunks: list[str] = []
     current: list[str] = []

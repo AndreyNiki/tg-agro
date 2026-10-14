@@ -303,6 +303,33 @@ def test_heartbeat_job_writes_a_timestamp(tmp_path):
     datetime.fromisoformat(content)  # must not raise
 
 
+def test_heartbeat_job_skips_write_when_is_alive_returns_false(tmp_path):
+    heartbeat_path = tmp_path / "heartbeat"
+
+    heartbeat_job(str(heartbeat_path), is_alive=lambda: False)
+
+    assert not heartbeat_path.exists()
+
+
+def test_heartbeat_job_writes_when_is_alive_returns_true(tmp_path):
+    heartbeat_path = tmp_path / "heartbeat"
+
+    heartbeat_job(str(heartbeat_path), is_alive=lambda: True)
+
+    assert heartbeat_path.exists()
+
+
+def test_build_scheduler_passes_is_alive_through_to_the_recurring_heartbeat_job(conn, shutdown_scheduler, tmp_path):
+    bot = MagicMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+    is_alive = MagicMock(return_value=True)
+
+    scheduler = shutdown_scheduler(build_scheduler(conn, _config(tmp_path), bot, holder, is_alive=is_alive))
+
+    job = scheduler.get_job("heartbeat")
+    assert job.args[1] is is_alive
+
+
 def test_build_scheduler_sets_generous_misfire_grace_time(conn, shutdown_scheduler):
     bot = MagicMock()
     holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
