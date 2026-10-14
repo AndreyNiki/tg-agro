@@ -6,8 +6,17 @@
 > `docs/superpowers/plans/2026-10-13-pre-production-hardening-plan.md`.
 > Everything below was explicitly marked **out of scope** for that plan —
 > lower severity than its 18 tasks, or large enough to warrant its own
-> brainstorm/plan rather than folding into a hardening pass. Nothing here
-> is fixed yet.
+> brainstorm/plan rather than folding into a hardening pass.
+>
+> **Status (2026-10-14): all resolved.** #1-9, #11, #12 were fixed across
+> five commits (mechanical cleanup; #1 message/keyboard-limit guards;
+> #8 legacy-backup subscribed/joined_at + pruning + unconfigured-backup
+> alert; #3 Docker heartbeat healthcheck; #4/#5/#6 AIORateLimiter +
+> scheduler jitter + admin-alert cooldown). #10 needed no code change
+> (no current path produces a negative chat_id). #13 is informational
+> only — tell the admin before the next deploy, or clear
+> `schedule_versions`, to avoid the one-time false "Расписание
+> изменилось" broadcast.
 
 ## 1. Message-length / keyboard-size limits for large groups
 
