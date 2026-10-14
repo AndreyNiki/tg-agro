@@ -374,3 +374,94 @@ async def test_legacy_migration_only_migrates_backed_up_chat_ids_not_already_res
     assert storage.get_member(conn, 111).group_id == target_group.id
     assert storage.get_member(conn, 333).group_id == target_group.id
     assert storage.get_member(conn, 222).group_id == other_group_id  # untouched
+
+
+@pytest.mark.asyncio
+async def test_migration_preserves_original_subscribed_and_joined_at_and_prunes_backup(conn, monkeypatch):
+    import schedule_bot.legacy_migration as mod
+
+    def fake_refresh(conn_, institute, *, notify_admin):
+        link_id = storage.create_institute_link(
+            conn_, institute_id=institute.id, pdf_url="https://example.com/a.pdf",
+            group_names=["Б-Мв-101"], raw_label="Б-Мв-101", last_seen_at="t",
+        )
+        storage.create_group(conn_, institute_id=institute.id, institute_link_id=link_id, name="Б-Мв-101")
+
+    monkeypatch.setattr(mod, "refresh_institute_catalog", fake_refresh)
+    monkeypatch.setattr(mod, "validate_and_sync_group_on_first_subscribe", AsyncMock(return_value=True))
+    config = _config()
+
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS legacy_members_backup "
+        "(chat_id INTEGER PRIMARY KEY, subscribed INTEGER NOT NULL DEFAULT 1, joined_at TEXT NOT NULL DEFAULT '');"
+        "INSERT INTO legacy_members_backup (chat_id, subscribed, joined_at) "
+        "VALUES (111, 0, '2025-01-01T00:00:00+00:00'), (222, 1, '2025-02-02T00:00:00+00:00');"
+    )
+    conn.commit()
+
+    await run_legacy_migration_if_configured(
+        conn, config, AsyncMock(), AsyncMock(), MagicMock(),
+    )
+
+    member_1 = storage.get_member(conn, 111)
+    member_2 = storage.get_member(conn, 222)
+    assert member_1.subscribed is False
+    assert member_1.joined_at == "2025-01-01T00:00:00+00:00"
+    assert member_2.subscribed is True
+    assert member_2.joined_at == "2025-02-02T00:00:00+00:00"
+
+    # Migrated chat_ids must be pruned from the backup table.
+    assert storage.list_legacy_member_chat_ids_backup(conn) == []
+
+
+@pytest.mark.asyncio
+async def test_warn_if_legacy_backup_unconfigured_alerts_when_backup_nonempty():
+    import sqlite3
+
+    from schedule_bot.legacy_migration import warn_if_legacy_backup_unconfigured
+
+    connection = sqlite3.connect(":memory:")
+    storage.init_db(connection)
+    connection.executescript(
+        "CREATE TABLE IF NOT EXISTS legacy_members_backup "
+        "(chat_id INTEGER PRIMARY KEY, subscribed INTEGER NOT NULL DEFAULT 1, joined_at TEXT NOT NULL DEFAULT '');"
+        "INSERT INTO legacy_members_backup (chat_id) VALUES (111);"
+    )
+    connection.commit()
+    config = _config(legacy_migration_group_name=None)  # not configured
+    notify_admin = AsyncMock()
+
+    await warn_if_legacy_backup_unconfigured(connection, config, notify_admin)
+
+    notify_admin.assert_awaited_once()
+    assert "1" in notify_admin.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_warn_if_legacy_backup_unconfigured_is_silent_when_backup_empty(conn):
+    from schedule_bot.legacy_migration import warn_if_legacy_backup_unconfigured
+
+    config = _config(legacy_migration_group_name=None)  # not configured
+    notify_admin = AsyncMock()
+
+    await warn_if_legacy_backup_unconfigured(conn, config, notify_admin)
+
+    notify_admin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_warn_if_legacy_backup_unconfigured_is_silent_when_configured(conn):
+    from schedule_bot.legacy_migration import warn_if_legacy_backup_unconfigured
+
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS legacy_members_backup "
+        "(chat_id INTEGER PRIMARY KEY, subscribed INTEGER NOT NULL DEFAULT 1, joined_at TEXT NOT NULL DEFAULT '');"
+        "INSERT INTO legacy_members_backup (chat_id) VALUES (111);"
+    )
+    conn.commit()
+    config = _config()  # fully configured
+    notify_admin = AsyncMock()
+
+    await warn_if_legacy_backup_unconfigured(conn, config, notify_admin)
+
+    notify_admin.assert_not_awaited()

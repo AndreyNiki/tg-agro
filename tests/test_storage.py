@@ -761,6 +761,66 @@ def test_init_db_backs_up_member_chat_ids_before_dropping_legacy_schema(tmp_path
     assert storage.list_all_member_chat_ids(new_conn) == []
 
 
+def test_init_db_preserves_subscribed_and_joined_at_in_legacy_backup(tmp_path):
+    db_path = tmp_path / "legacy.db"
+    old_conn = sqlite3.connect(str(db_path))
+    old_conn.executescript(
+        """
+        CREATE TABLE groups (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+        CREATE TABLE members (
+            chat_id INTEGER PRIMARY KEY,
+            group_id INTEGER NOT NULL REFERENCES groups(id),
+            telegram_username TEXT,
+            display_name TEXT,
+            subscribed INTEGER NOT NULL DEFAULT 1,
+            joined_at TEXT NOT NULL
+        );
+        INSERT INTO groups (id, name) VALUES (1, 'ОлдГруппа');
+        INSERT INTO members (chat_id, group_id, subscribed, joined_at)
+            VALUES (111, 1, 0, '2025-01-01T00:00:00+00:00'), (222, 1, 1, '2025-02-02T00:00:00+00:00');
+        """
+    )
+    old_conn.commit()
+    old_conn.close()
+
+    new_conn = sqlite3.connect(str(db_path))
+    storage.init_db(new_conn)
+
+    backed_up = {row.chat_id: row for row in storage.list_legacy_members_backup(new_conn)}
+    assert backed_up[111].subscribed is False
+    assert backed_up[111].joined_at == "2025-01-01T00:00:00+00:00"
+    assert backed_up[222].subscribed is True
+    assert backed_up[222].joined_at == "2025-02-02T00:00:00+00:00"
+
+
+def test_init_db_migrates_old_shape_legacy_backup_table_in_place(conn):
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS legacy_members_backup (chat_id INTEGER PRIMARY KEY);"
+        "INSERT INTO legacy_members_backup (chat_id) VALUES (555);"
+    )
+    conn.commit()
+
+    storage.init_db(conn)
+
+    rows = storage.list_legacy_members_backup(conn)
+    assert len(rows) == 1
+    assert rows[0].chat_id == 555
+    assert rows[0].subscribed is True  # default preserved for a pre-migration row
+
+
+def test_prune_legacy_members_backup_removes_given_chat_ids(conn):
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS legacy_members_backup (chat_id INTEGER PRIMARY KEY, subscribed INTEGER NOT NULL DEFAULT 1, joined_at TEXT NOT NULL DEFAULT '');"
+        "INSERT INTO legacy_members_backup (chat_id) VALUES (111), (222), (333);"
+    )
+    conn.commit()
+
+    storage.prune_legacy_members_backup(conn, [111, 333])
+
+    remaining = sorted(row.chat_id for row in storage.list_legacy_members_backup(conn))
+    assert remaining == [222]
+
+
 def test_close_election_if_open_only_succeeds_once(conn):
     institute_id = storage.create_institute(
         conn, name="X", catalog_url="y", check_interval_minutes=60, send_time="09:00",

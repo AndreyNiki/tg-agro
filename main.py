@@ -87,7 +87,7 @@ from schedule_bot.starosta_commands import (
     starosta_command,
     votes_command,
 )
-from schedule_bot.legacy_migration import run_legacy_migration_if_configured
+from schedule_bot.legacy_migration import run_legacy_migration_if_configured, warn_if_legacy_backup_unconfigured
 from schedule_bot.sync import sync_institute_link
 from schedule_bot.telegram_utils import send_with_retry
 from schedule_bot.weektype import WeekFormula, fetch_week_formula, load_week_formula, save_week_formula
@@ -181,6 +181,11 @@ def build_application(config: Config, conn) -> Application:
             )
         except Exception:
             logger.exception("main: legacy user migration failed — bot startup continues regardless")
+
+        try:
+            await warn_if_legacy_backup_unconfigured(conn, config, _notify_admin)
+        except Exception:
+            logger.exception("main: legacy backup startup warning failed — bot startup continues regardless")
 
     application = (
         Application.builder()

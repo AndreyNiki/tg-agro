@@ -16,10 +16,45 @@ def _backup_legacy_member_chat_ids(conn: sqlite3.Connection) -> None:
     info = conn.execute("PRAGMA table_info(members)").fetchall()
     if not info:
         return  # no members table existed yet in the old schema — nothing to back up
+    old_columns = {row[1] for row in info}
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS legacy_members_backup (
+            chat_id INTEGER PRIMARY KEY,
+            subscribed INTEGER NOT NULL DEFAULT 1,
+            joined_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    _migrate_legacy_members_backup_add_subscribed_and_joined_at(conn)
+    if "subscribed" in old_columns and "joined_at" in old_columns:
+        conn.execute(
+            "INSERT OR IGNORE INTO legacy_members_backup (chat_id, subscribed, joined_at) "
+            "SELECT chat_id, subscribed, joined_at FROM members"
+        )
+    else:
+        # Pre-subscribed/joined_at legacy schema (older than commit
+        # 3eab0b5): nothing to preserve beyond chat_id, so these fall
+        # back to the same defaults upsert_member already uses.
+        conn.execute("INSERT OR IGNORE INTO legacy_members_backup (chat_id) SELECT chat_id FROM members")
+    conn.commit()
+
+
+def _migrate_legacy_members_backup_add_subscribed_and_joined_at(conn: sqlite3.Connection) -> None:
+    info = conn.execute("PRAGMA table_info(legacy_members_backup)").fetchall()
+    columns = {row[1] for row in info}
+    if not info or {"subscribed", "joined_at"} <= columns:
+        return  # table doesn't exist yet, or is already on the current shape
     conn.executescript(
         """
-        CREATE TABLE IF NOT EXISTS legacy_members_backup (chat_id INTEGER PRIMARY KEY);
-        INSERT OR IGNORE INTO legacy_members_backup (chat_id) SELECT chat_id FROM members;
+        ALTER TABLE legacy_members_backup RENAME TO legacy_members_backup_old;
+        CREATE TABLE legacy_members_backup (
+            chat_id INTEGER PRIMARY KEY,
+            subscribed INTEGER NOT NULL DEFAULT 1,
+            joined_at TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO legacy_members_backup (chat_id) SELECT chat_id FROM legacy_members_backup_old;
+        DROP TABLE legacy_members_backup_old;
         """
     )
     conn.commit()
@@ -50,6 +85,37 @@ def list_legacy_member_chat_ids_backup(conn: sqlite3.Connection) -> list[int]:
         return []
     rows = conn.execute("SELECT chat_id FROM legacy_members_backup").fetchall()
     return [row[0] for row in rows]
+
+
+@dataclass
+class LegacyMemberBackupRow:
+    chat_id: int
+    subscribed: bool
+    joined_at: str
+
+
+def list_legacy_members_backup(conn: sqlite3.Connection) -> list[LegacyMemberBackupRow]:
+    info = conn.execute("PRAGMA table_info(legacy_members_backup)").fetchall()
+    if not info:
+        return []
+    columns = {row[1] for row in info}
+    if {"subscribed", "joined_at"} <= columns:
+        rows = conn.execute("SELECT chat_id, subscribed, joined_at FROM legacy_members_backup").fetchall()
+        return [LegacyMemberBackupRow(chat_id, bool(subscribed), joined_at) for chat_id, subscribed, joined_at in rows]
+    # Pre-migration shape (chat_id only) — defaults match what
+    # upsert_member used before this row's subscribed/joined_at existed.
+    rows = conn.execute("SELECT chat_id FROM legacy_members_backup").fetchall()
+    return [LegacyMemberBackupRow(chat_id, True, "") for (chat_id,) in rows]
+
+
+def prune_legacy_members_backup(conn: sqlite3.Connection, chat_ids: list[int]) -> None:
+    """Deletes the given chat_ids from legacy_members_backup once they've
+    been migrated onto a real `members` row, so a completed migration
+    doesn't leave the backup table growing forever."""
+    if not chat_ids:
+        return
+    conn.executemany("DELETE FROM legacy_members_backup WHERE chat_id = ?", [(chat_id,) for chat_id in chat_ids])
+    conn.commit()
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -160,6 +226,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
     _migrate_group_change_requests_nullable_from_group(conn)
     _migrate_group_change_requests_add_kind_and_text(conn)
+    _migrate_legacy_members_backup_add_subscribed_and_joined_at(conn)
 
 
 def _migrate_group_change_requests_nullable_from_group(conn: sqlite3.Connection) -> None:

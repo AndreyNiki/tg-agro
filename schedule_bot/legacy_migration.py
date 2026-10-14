@@ -12,6 +12,23 @@ logger = logging.getLogger(__name__)
 _DONE_SETTING_KEY = "legacy_migration_done_at"
 
 
+async def warn_if_legacy_backup_unconfigured(conn, config, notify_admin) -> None:
+    """If LEGACY_MIGRATION_* was never configured, legacy_members_backup
+    just sits there invisibly — this surfaces it as a startup reminder
+    instead of silently never telling the admin those pre-upgrade
+    subscribers are still unmigrated."""
+    if config.legacy_migration is not None:
+        return
+    chat_ids = storage.list_legacy_member_chat_ids_backup(conn)
+    if not chat_ids:
+        return
+    await notify_admin(
+        f"В базе осталось {len(chat_ids)} несмигрированных легаси-пользователей "
+        "(из версии бота до появления институтов), а переменные LEGACY_MIGRATION_* не настроены. "
+        "Настройте их для миграции, либо это ожидаемо и можно игнорировать."
+    )
+
+
 async def run_legacy_migration_if_configured(
     conn, config, notify_admin, sync_institute_link_fn, reschedule_institute_jobs,
     *, catalog_locks: dict | None = None,
@@ -105,12 +122,16 @@ async def run_legacy_migration_if_configured(
     # deliberate choice. `upsert_member` (not `reassign_member_group`) is
     # required because these chat_ids have no `members` row at all —
     # reassign_member_group's UPDATE would silently affect zero rows.
-    backed_up_chat_ids = set(storage.list_legacy_member_chat_ids_backup(conn))
+    backed_up = {row.chat_id: row for row in storage.list_legacy_members_backup(conn)}
     already_subscribed_chat_ids = set(storage.list_all_member_chat_ids(conn))
-    chat_ids = backed_up_chat_ids - already_subscribed_chat_ids
+    chat_ids = set(backed_up) - already_subscribed_chat_ids
     now = datetime.now(timezone.utc).isoformat()
     for chat_id in chat_ids:
-        storage.upsert_member(conn, chat_id, group.id, joined_at=now, subscribed=True)
+        backup_row = backed_up[chat_id]
+        storage.upsert_member(
+            conn, chat_id, group.id, joined_at=backup_row.joined_at or now, subscribed=backup_row.subscribed,
+        )
+    storage.prune_legacy_members_backup(conn, list(chat_ids))
 
     # validate_and_sync_group_on_first_subscribe's own immediate sync ran
     # BEFORE any member was reassigned onto this group, so it was a
