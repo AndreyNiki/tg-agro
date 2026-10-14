@@ -39,11 +39,11 @@ def _shutdown_schedulers_after_test(monkeypatch):
 
 
 @pytest.fixture
-def config():
+def config(tmp_path):
     return Config(
         telegram_token="test-token",
         admin_chat_id=999,
-        db_path=":memory:",
+        db_path=str(tmp_path / "schedule.db"),
         pdf_cache_dir="/tmp/cache",
         default_weektype_url="https://example.com/week",
         default_daily_send_time="09:00",

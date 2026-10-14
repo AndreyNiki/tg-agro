@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -28,6 +30,18 @@ class WeekFormulaHolder:
 
 async def _notify(bot, chat_id: int, text: str) -> None:
     await send_with_retry(lambda: bot.send_message(chat_id=chat_id, text=text))
+
+
+HEARTBEAT_INTERVAL_SECONDS = 60
+
+
+def heartbeat_job(heartbeat_path: str) -> None:
+    """Touches a timestamp file so Dockerfile's HEALTHCHECK can tell a
+    live event loop + running scheduler apart from a merely-present
+    schedule.db — the previous healthcheck only checked the latter, so a
+    deadlocked loop or a silently-stopped AsyncIOScheduler still reported
+    "healthy" forever."""
+    Path(heartbeat_path).write_text(datetime.now(timezone.utc).isoformat())
 
 
 async def link_check_job(
@@ -404,6 +418,16 @@ def build_scheduler(
         CronTrigger(day_of_week="mon", hour=6, minute=0, timezone=config.default_timezone),
         args=[conn, week_formula_holder],
         id="weekly_weektype_refresh",
+        replace_existing=True,
+    )
+
+    heartbeat_path = str(Path(config.db_path).parent / "heartbeat")
+    heartbeat_job(heartbeat_path)  # written immediately so it exists before the first interval fires
+    scheduler.add_job(
+        heartbeat_job,
+        IntervalTrigger(seconds=HEARTBEAT_INTERVAL_SECONDS),
+        args=[heartbeat_path],
+        id="heartbeat",
         replace_existing=True,
     )
 

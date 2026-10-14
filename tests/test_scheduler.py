@@ -12,6 +12,7 @@ from schedule_bot.pdf_parser import DaySchedule, Lesson, Schedule, schedule_to_d
 from schedule_bot.scheduler import (
     WeekFormulaHolder,
     build_scheduler,
+    heartbeat_job,
     link_check_job,
     link_daily_send_job,
     reschedule_institute_link_jobs,
@@ -65,11 +66,12 @@ class FixedMonday(date):
         return date(2026, 9, 14)
 
 
-def _config():
+def _config(tmp_path=None):
     return MagicMock(
         pdf_cache_dir="/tmp/cache", admin_chat_id=999,
         default_daily_send_time="09:00", default_check_interval_minutes=60, default_timezone="Europe/Moscow",
         default_catalog_refresh_interval_minutes=10080,
+        db_path=str((tmp_path or Path("/tmp")) / "schedule.db"),
     )
 
 
@@ -279,6 +281,25 @@ def test_build_scheduler_registers_link_and_catalog_jobs(conn, shutdown_schedule
     assert f"link_daily_send_{link_id}" in job_ids
     assert f"institute_catalog_refresh_{institute_id}" in job_ids
     assert "weekly_weektype_refresh" in job_ids
+    assert "heartbeat" in job_ids
+
+
+def test_build_scheduler_writes_heartbeat_file_immediately(conn, shutdown_scheduler, tmp_path):
+    bot = MagicMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+
+    shutdown_scheduler(build_scheduler(conn, _config(tmp_path), bot, holder))
+
+    assert (tmp_path / "heartbeat").exists()
+
+
+def test_heartbeat_job_writes_a_timestamp(tmp_path):
+    heartbeat_path = tmp_path / "heartbeat"
+
+    heartbeat_job(str(heartbeat_path))
+
+    content = heartbeat_path.read_text()
+    datetime.fromisoformat(content)  # must not raise
 
 
 def test_build_scheduler_sets_generous_misfire_grace_time(conn, shutdown_scheduler):
