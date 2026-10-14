@@ -54,6 +54,15 @@ def test_format_report_message_with_unknown_reporter_and_no_group():
     assert "Помогите" in text
 
 
+def test_format_report_message_truncates_an_overlong_report():
+    from schedule_bot.telegram_utils import TELEGRAM_MESSAGE_LIMIT
+
+    text = format_report_message(None, None, 222, "x" * 4000)
+
+    assert len(text) <= TELEGRAM_MESSAGE_LIMIT
+    assert "обрезано" in text
+
+
 @pytest.mark.asyncio
 async def test_apply_report_forwards_to_admin(conn):
     bot_client = MagicMock()

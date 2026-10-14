@@ -249,6 +249,9 @@ async def test_successful_migration_reassigns_all_members_and_sets_flag_once(con
 
     assert storage.get_setting(conn, "legacy_migration_done_at") is not None
     notify_admin.assert_awaited_once()
+    # 2 migrated chat_ids -> correct Russian plural ("участника", not
+    # "участников" or "участник").
+    assert "2 участника переключено" in notify_admin.await_args.args[0]
 
     # The immediate sync must run AFTER members are reassigned — at the
     # moment validate_and_sync_group_on_first_subscribe (mocked above) is

@@ -6,6 +6,7 @@ from schedule_bot import storage
 from schedule_bot.group_commands import validate_and_sync_group_on_first_subscribe
 from schedule_bot.group_links import refresh_institute_catalog
 from schedule_bot.sync import catalog_lock_for
+from schedule_bot.telegram_utils import pluralize_russian
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,8 @@ async def run_legacy_migration_if_configured(
     await sync_institute_link_fn(group.institute_link_id)
 
     storage.set_setting(conn, _DONE_SETTING_KEY, datetime.now(timezone.utc).isoformat())
+    noun = pluralize_russian(len(chat_ids), "участник", "участника", "участников")
     await notify_admin(
-        f"Миграция легаси-пользователей выполнена: {len(chat_ids)} участников переключено в группу "
+        f"Миграция легаси-пользователей выполнена: {len(chat_ids)} {noun} переключено в группу "
         f"«{group.name}» института «{institute.name}»."
     )

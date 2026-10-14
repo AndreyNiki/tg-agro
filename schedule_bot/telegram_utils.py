@@ -107,3 +107,13 @@ def chunk_text_by_lines(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[
     if current:
         chunks.append("\n".join(current))
     return chunks
+
+
+def pluralize_russian(count: int, one: str, few: str, many: str) -> str:
+    """Russian plural rule: 1 (but not 11) -> one, 2-4 (but not 12-14) ->
+    few, everything else -> many."""
+    if count % 10 == 1 and count % 100 != 11:
+        return one
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return few
+    return many

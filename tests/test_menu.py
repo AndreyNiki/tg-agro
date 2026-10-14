@@ -1082,6 +1082,38 @@ async def test_pending_action_followup_new_group_text_creates_request_and_notifi
     assert request.chat_id == 222
     assert "ИТ" in request.request_text
     assert "Б-Мв-999" in request.request_text
+
+
+@pytest.mark.asyncio
+async def test_pending_action_followup_truncates_an_overlong_notification_to_admin(conn):
+    """An overlong description must still truncate before being embedded
+    in the immediate admin-notification message — if it silently raised
+    BadRequest instead, the admin would never see this request at all
+    (not even a truncated one) until they went looking via /allrequests."""
+    from schedule_bot.telegram_utils import TELEGRAM_MESSAGE_LIMIT
+
+    institute_id = storage.create_institute(
+        conn, name="ИТ", catalog_url="https://example.com/catalog",
+        check_interval_minutes=60, send_time="09:00", tz_name="Europe/Moscow",
+        catalog_refresh_interval_minutes=10080,
+    )
+    update = MagicMock()
+    update.effective_chat.id = 222
+    update.message.text = "x" * 4000
+    update.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {"pending_menu_action": {"action": "new_group_text", "institute_id": institute_id}}
+    context.bot.send_message = AsyncMock()
+
+    await pending_action_followup(update, context)
+
+    context.bot.send_message.assert_awaited_once()
+    sent_text = context.bot.send_message.await_args.kwargs["text"]
+    assert len(sent_text) <= TELEGRAM_MESSAGE_LIMIT
+    assert "обрезано" in sent_text
+    # The full, untruncated text is still preserved in storage.
+    request = storage.list_all_pending_requests(conn)[0]
+    assert request.request_text.count("x") == 4000
     assert context.bot.send_message.await_args.kwargs["chat_id"] == ADMIN_CHAT_ID
     update.message.reply_text.assert_awaited_once()
 

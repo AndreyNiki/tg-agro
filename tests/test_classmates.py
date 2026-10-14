@@ -190,6 +190,28 @@ async def test_classmates_command_shows_exclude_buttons_for_starosta(conn):
 
 
 @pytest.mark.asyncio
+async def test_classmates_command_exclude_button_marks_the_starosta(conn):
+    """An admin excluding members must be able to tell from the keyboard
+    itself which member is the starosta, same as the text listing above
+    it already shows."""
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+    storage.update_member_profile(conn, 111, telegram_username="boris", display_name=None)
+
+    update = make_update(222)  # admin is a plain member here, excluding via admin rights
+    context = make_context_with_admin(conn, admin_chat_id=222)
+
+    await classmates_command(update, context)
+
+    _, kwargs = update.message.reply_text.call_args
+    buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    starosta_button = next(b for b in buttons if b.callback_data == "exclude:select:111")
+    assert "👑" in starosta_button.text
+
+
+@pytest.mark.asyncio
 async def test_classmates_command_no_exclude_buttons_for_plain_member(conn):
     group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
@@ -450,6 +472,40 @@ async def test_exclude_page_callback_returns_next_page():
     buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
     select_buttons = [b for b in buttons if b.callback_data.startswith("exclude:select:")]
     assert len(select_buttons) == 5  # the 5 remaining excludable members (member_count - EXCLUDE_PAGE_SIZE)
+
+
+@pytest.mark.asyncio
+async def test_exclude_page_callback_does_not_skip_members_excluded_between_pages():
+    """Regression test: the cursor is a fixed chat_id value, not a
+    numeric position, so excluding someone shown on an earlier page
+    must never shift what "after this cursor" means for a later page —
+    the same bug class the request-listing pagination was fixed for."""
+    conn = sqlite3.connect(":memory:")
+    storage.init_db(conn)
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 111)
+    member_count = EXCLUDE_PAGE_SIZE + 5
+    for i in range(member_count):
+        storage.upsert_member(conn, 1000 + i, group_id, joined_at="t")
+
+    last_chat_id = 1000 + EXCLUDE_PAGE_SIZE - 1
+
+    # Exclude 3 of the already-shown first-page members before paging on.
+    for chat_id in range(1000, 1003):
+        storage.remove_member(conn, chat_id)
+
+    update = make_callback_update(111, f"exclude:page:{group_id}:{last_chat_id}")
+    context = make_context_with_admin(conn)
+
+    await exclude_page_callback(update, context)
+
+    # The 5 trailing members (never touched) must all still be offered,
+    # none silently skipped because the group got smaller in between.
+    _, kwargs = update.callback_query.message.reply_text.call_args
+    buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    select_buttons = [b for b in buttons if b.callback_data.startswith("exclude:select:")]
+    assert len(select_buttons) == 5
 
 
 @pytest.mark.asyncio

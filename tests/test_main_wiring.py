@@ -132,7 +132,12 @@ def test_build_application_installs_a_process_wide_rate_limiter(conn, config, mo
 def test_build_application_wires_heartbeat_is_alive_to_updater_running(conn, config, monkeypatch):
     """The heartbeat job must reflect whether polling (not just the event
     loop/scheduler) is actually alive — see scheduler.heartbeat_job's
-    is_alive parameter."""
+    is_alive parameter. Before polling has ever been observed running
+    (the entire span of PTB's post_init, which can run long member-
+    backfill/legacy-migration work), is_alive must stay True so the
+    heartbeat doesn't go stale during ordinary startup — it should only
+    start reflecting Updater.running for real once polling has
+    actually started at least once."""
     _patch_week_formula(monkeypatch)
 
     application = build_application(config, conn)
@@ -140,9 +145,13 @@ def test_build_application_wires_heartbeat_is_alive_to_updater_running(conn, con
         job = application.bot_data["_scheduler"].get_job("heartbeat")
         is_alive = job.args[1]
 
-        assert is_alive() is False  # run_polling() was never called in this test
-        application.updater._running = True
-        assert is_alive() is True
+        assert is_alive() is True  # not gated yet: polling never observed running
+
+        monkeypatch.setattr(type(application.updater), "running", property(lambda self: True))
+        assert is_alive() is True  # polling now observed alive
+
+        monkeypatch.setattr(type(application.updater), "running", property(lambda self: False))
+        assert is_alive() is False  # polling died after having started — must go stale
     finally:
         application.bot_data["_scheduler"].shutdown(wait=False)
 
@@ -539,6 +548,7 @@ def test_build_application_registers_privilege_handlers(conn, config, monkeypatc
     assert r"^exclude:select:\d+$" in callback_patterns
     assert r"^exclude:confirm:\d+$" in callback_patterns
     assert r"^exclude:abort$" in callback_patterns
+    assert r"^exclude:page:\d+:\d+$" in callback_patterns
 
     application.bot_data["_scheduler"].shutdown(wait=False)
 

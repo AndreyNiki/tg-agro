@@ -373,7 +373,8 @@ async def test_requests_command_paginates_when_more_than_page_size(conn):
     # REQUESTS_PAGE_SIZE request messages + one "show more" message.
     assert update.message.reply_text.await_count == REQUESTS_PAGE_SIZE + 1
     last_call = update.message.reply_text.await_args_list[-1]
-    assert "Показано" in last_call.args[0]
+    # Absolute position against the full list, not the shrinking "remaining".
+    assert f"Показано {REQUESTS_PAGE_SIZE} из {request_count} заявок." == last_call.args[0]
     more_keyboard = last_call.kwargs["reply_markup"]
     more_callback_data = more_keyboard.inline_keyboard[0][0].callback_data
     last_shown_id = request_ids[REQUESTS_PAGE_SIZE - 1]
@@ -434,6 +435,40 @@ async def test_requests_group_page_callback_does_not_skip_requests_approved_betw
     # The 3 trailing, still-pending requests must all be shown — none
     # silently skipped because the list got shorter in between.
     assert update.callback_query.message.reply_text.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_requests_group_page_callback_reports_position_against_the_current_pending_list(conn):
+    """The "Показано X из Y" footer's position (X) must advance with
+    each page (10, then 15, ...) against the *current* pending count
+    (Y) — not get stuck repeating the per-page size (always "10 из ...")
+    while only the denominator shrinks, which is what made the old
+    wording look like no progress was being made at all."""
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 555, group_b, joined_at="t")
+    storage.update_group_starosta(conn, group_b, 555)
+    request_count = 2 * REQUESTS_PAGE_SIZE + 4
+    request_ids = [
+        storage.create_group_change_request(conn, chat_id, group_a, group_b, "t")
+        for chat_id in range(1000, 1000 + request_count)
+    ]
+    cursor = request_ids[REQUESTS_PAGE_SIZE - 1]
+
+    # Resolve 5 of the first page's requests before paging on.
+    for request_id in request_ids[:5]:
+        storage.decide_group_change_request(conn, request_id, "approved", "t2")
+
+    update = make_callback_update(555, f"reqpage:group:{group_b}:{cursor}")
+    context = make_context(conn)
+
+    await requests_group_page_callback(update, context)
+
+    last_call = update.callback_query.message.reply_text.await_args_list[-1]
+    # 19 still pending (24 - 5 resolved); of those, 15 have now been
+    # shown (the first page's unresolved 5 + this page's 10) — not "10
+    # из 14"/"10 из 19", which would look like zero progress.
+    assert "Показано 15 из 19 заявок." == last_call.args[0]
 
 
 @pytest.mark.asyncio
@@ -512,16 +547,16 @@ async def test_requests_command_admin_with_group_id_sees_requests(conn):
     update.message.reply_text.assert_awaited_once()
 
 
-from schedule_bot.change_group_commands import _build_requests_messages
+from schedule_bot.change_group_commands import build_requests_messages
 
 
-def test_build_requests_messages_returns_one_entry_per_pending_request(conn):
+def testbuild_requests_messages_returns_one_entry_per_pending_request(conn):
     group_a = _make_group(conn, "A")
     group_b = _make_group(conn, "B")
     storage.create_group_change_request(conn, 111, group_a, group_b, "t")
     group_b_row = storage.get_group(conn, group_b)
 
-    entries = _build_requests_messages(conn, group_b_row)
+    entries = build_requests_messages(conn, group_b_row)
 
     assert len(entries) == 1
     request_id, text, keyboard = entries[0]
@@ -531,9 +566,9 @@ def test_build_requests_messages_returns_one_entry_per_pending_request(conn):
     assert any(b.callback_data.startswith("chgreq:approve:") for b in buttons)
 
 
-def test_build_requests_messages_empty_for_group_without_pending(conn):
+def testbuild_requests_messages_empty_for_group_without_pending(conn):
     group_b = storage.get_group(conn, _make_group(conn, "B"))
-    assert _build_requests_messages(conn, group_b) == []
+    assert build_requests_messages(conn, group_b) == []
 
 
 @pytest.mark.asyncio
@@ -666,16 +701,16 @@ async def test_change_request_reject_info_kind_notifies_requester(conn):
     assert context.bot.send_message.await_args.kwargs["chat_id"] == 111
 
 
-from schedule_bot.change_group_commands import _build_all_requests_messages
+from schedule_bot.change_group_commands import build_all_requests_messages
 from schedule_bot.telegram_utils import TELEGRAM_MESSAGE_LIMIT
 
 
-def test_build_all_requests_messages_includes_info_kind_with_request_text(conn):
+def testbuild_all_requests_messages_includes_info_kind_with_request_text(conn):
     storage.create_group_change_request(
         conn, 111, None, None, "t", kind="new_institute", request_text="Институт X; URL: —"
     )
 
-    entries = _build_all_requests_messages(conn)
+    entries = build_all_requests_messages(conn)
 
     assert len(entries) == 1
     _, text, keyboard = entries[0]
@@ -684,11 +719,11 @@ def test_build_all_requests_messages_includes_info_kind_with_request_text(conn):
     assert any(b.callback_data == "chgreq:approve:1" for b in buttons)
 
 
-def test_build_all_requests_messages_truncates_an_overlong_request_text(conn):
+def testbuild_all_requests_messages_truncates_an_overlong_request_text(conn):
     overlong_text = "x" * 4000
     storage.create_group_change_request(conn, 111, None, None, "t", kind="report", request_text=overlong_text)
 
-    entries = _build_all_requests_messages(conn)
+    entries = build_all_requests_messages(conn)
 
     assert len(entries) == 1
     _, text, _ = entries[0]

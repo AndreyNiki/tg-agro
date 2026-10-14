@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timezone
 
 from schedule_bot import storage
-from schedule_bot.change_group_commands import build_info_decision_keyboard
+from schedule_bot.change_group_commands import build_info_decision_keyboard, truncate_request_text
 from schedule_bot.elections import format_candidate_label
 from schedule_bot.telegram_utils import send_with_retry
 
@@ -12,7 +12,12 @@ logger = logging.getLogger(__name__)
 def format_report_message(reporter, group, chat_id: int, text: str) -> str:
     label = format_candidate_label(reporter) if reporter is not None else "Неизвестный"
     group_name = group.name if group is not None else "—"
-    return f"🆘 Жалоба от {label} (chat_id={chat_id}, группа: {group_name}):\n\n{text}"
+    # Truncated for display only — the full `text` is still stored
+    # verbatim in request_text (see _apply_report) and shown via
+    # /allrequests's own truncation; an untruncated send here could
+    # exceed Telegram's message cap, get silently swallowed by the
+    # except below, and never reach the admin at all.
+    return f"🆘 Жалоба от {label} (chat_id={chat_id}, группа: {group_name}):\n\n{truncate_request_text(text)}"
 
 
 async def _apply_report(conn, bot_client, admin_chat_id: int, chat_id: int, text: str) -> str:

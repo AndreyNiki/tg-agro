@@ -19,11 +19,12 @@ from schedule_bot.bot import (
 from schedule_bot.change_group_commands import (
     REQUESTS_ALL_PAGE_PREFIX,
     REQUESTS_GROUP_PAGE_PREFIX,
-    _build_all_requests_messages,
-    _build_requests_messages,
+    build_all_requests_messages,
     build_info_decision_keyboard,
+    build_requests_messages,
     change_group_command,
     send_requests_batch,
+    truncate_request_text,
 )
 from schedule_bot.classmates import classmates_command
 from schedule_bot.faq import faq_command
@@ -52,7 +53,11 @@ async def _notify_admin_of_info_request(context, request_id: int, kind_label: st
         await send_with_retry(
             lambda: context.bot.send_message(
                 chat_id=context.bot_data["admin_chat_id"],
-                text=f"Заявка ({kind_label}):\n{request_text}",
+                # Truncated for display only — the full request_text is
+                # still stored verbatim; an untruncated send could exceed
+                # Telegram's message cap and get swallowed by the except
+                # below, silently never reaching the admin.
+                text=f"Заявка ({kind_label}):\n{truncate_request_text(request_text)}",
                 reply_markup=keyboard,
             )
         )
@@ -181,7 +186,7 @@ async def _handle_starosta_section(update, context, conn, chat_id: int, action: 
         await safe_edit_message_text(query, "Привилегии старосты:", reply_markup=_starosta_privileges_keyboard(group))
         return
     if action == "requests":
-        entries = _build_requests_messages(conn, group)
+        entries = build_requests_messages(conn, group)
         await send_requests_batch(query.message.reply_text, entries, 0, f"{REQUESTS_GROUP_PAGE_PREFIX}{group.id}:")
         return
     if action == "notify":
@@ -323,7 +328,7 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
         )
         return
     if action == "allrequests":
-        entries = _build_all_requests_messages(conn)
+        entries = build_all_requests_messages(conn)
         await send_requests_batch(query.message.reply_text, entries, 0, REQUESTS_ALL_PAGE_PREFIX)
         return
 
@@ -356,7 +361,7 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
         )
         return
     if action == "pickrequestsgroup":
-        entries = _build_requests_messages(conn, group)
+        entries = build_requests_messages(conn, group)
         await send_requests_batch(query.message.reply_text, entries, 0, f"{REQUESTS_GROUP_PAGE_PREFIX}{group.id}:")
         return
     if action == "setstarosta":

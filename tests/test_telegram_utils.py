@@ -6,11 +6,33 @@ from telegram.error import BadRequest, RetryAfter, TimedOut
 from schedule_bot.telegram_utils import (
     chunk_text_by_lines,
     parse_positive_int,
+    pluralize_russian,
     safe_edit_message_text,
     safe_edit_reply_markup,
     send_with_retry,
     reply,
 )
+
+
+@pytest.mark.parametrize(
+    "count, expected",
+    [
+        (1, "ошибка"),
+        (21, "ошибка"),
+        (11, "ошибок"),
+        (2, "ошибки"),
+        (3, "ошибки"),
+        (4, "ошибки"),
+        (22, "ошибки"),
+        (12, "ошибок"),
+        (13, "ошибок"),
+        (14, "ошибок"),
+        (5, "ошибок"),
+        (0, "ошибок"),
+    ],
+)
+def test_pluralize_russian_follows_the_full_declension_rule(count, expected):
+    assert pluralize_russian(count, "ошибка", "ошибки", "ошибок") == expected
 
 
 def test_chunk_text_by_lines_returns_single_chunk_when_under_limit():

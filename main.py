@@ -97,7 +97,7 @@ from schedule_bot.starosta_commands import (
 )
 from schedule_bot.legacy_migration import run_legacy_migration_if_configured, warn_if_legacy_backup_unconfigured
 from schedule_bot.sync import sync_institute_link
-from schedule_bot.telegram_utils import send_with_retry
+from schedule_bot.telegram_utils import pluralize_russian, send_with_retry
 from schedule_bot.weektype import WeekFormula, fetch_week_formula, load_week_formula, save_week_formula
 
 logger = logging.getLogger(__name__)
@@ -114,16 +114,6 @@ class _LiveWeekFormula:
 
 
 ADMIN_ALERT_COOLDOWN_SECONDS = 30
-
-
-def _pluralize_russian(count: int, one: str, few: str, many: str) -> str:
-    """Russian plural rule: 1 (but not 11) -> one, 2-4 (but not 12-14) ->
-    few, everything else -> many."""
-    if count % 10 == 1 and count % 100 != 11:
-        return one
-    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
-        return few
-    return many
 
 
 async def _global_error_handler(update, context) -> None:
@@ -160,7 +150,7 @@ async def _global_error_handler(update, context) -> None:
             # a storm that ran for minutes before this message finally
             # got through must not be reported as "за последние 30с".
             window_seconds = round(now - first_suppressed_at)
-            noun = _pluralize_russian(suppressed, "ошибка", "ошибки", "ошибок")
+            noun = pluralize_russian(suppressed, "ошибка", "ошибки", "ошибок")
             suffix = f"\n\n(и ещё {suppressed} {noun} подавлено за последние {window_seconds}с)"
         else:
             suffix = ""
@@ -403,6 +393,25 @@ def build_application(config: Config, conn) -> Application:
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.UpdateType.MESSAGE, pending_action_followup))
 
+    # Gates the recurring heartbeat write on polling actually being
+    # alive, not just the event loop/scheduler — Updater.running goes
+    # False the moment polling dies even while everything else keeps
+    # ticking. PTB runs post_init (which this build_scheduler call is
+    # part of) BEFORE updater.start_polling(), so polling_seen stays
+    # False — and is_alive therefore True — through the whole of
+    # startup (including the potentially slow member-profile backfill
+    # and legacy-migration catalog scan in _post_init above); only once
+    # polling has actually started at least once does is_alive start
+    # reflecting Updater.running for real, so the heartbeat still goes
+    # stale if polling dies later.
+    polling_seen = False
+
+    def _is_alive() -> bool:
+        nonlocal polling_seen
+        running = application.updater is not None and application.updater.running
+        polling_seen = polling_seen or running
+        return running or not polling_seen
+
     # Pass the SAME link_locks dict used by sync_institute_link_fn/
     # reschedule_institute_link_jobs_cb above, so every link that already
     # exists at startup gets its scheduled jobs wired to the identical
@@ -411,11 +420,7 @@ def build_application(config: Config, conn) -> Application:
     scheduler_holder["scheduler"] = build_scheduler(
         conn, config, application.bot, week_formula_holder, locks=link_locks,
         catalog_rescan_state=catalog_rescan_state, catalog_locks=catalog_locks,
-        # Gates the recurring heartbeat write on polling actually being
-        # alive, not just the event loop/scheduler — Updater.running
-        # goes False the moment polling dies even while everything else
-        # keeps ticking.
-        is_alive=lambda: application.updater is not None and application.updater.running,
+        is_alive=_is_alive,
     )
     # Exposed so tests (and any future consumer) can assert the scheduled
     # jobs and the manual /refresh path really share ONE rate-limit dict.

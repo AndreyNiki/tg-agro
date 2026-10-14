@@ -889,17 +889,24 @@ def decide_group_change_request(conn: sqlite3.Connection, request_id: int, statu
 
 
 def list_pending_requests_for_group(conn: sqlite3.Connection, group_id: int) -> list[GroupChangeRequestRow]:
+    # Ordered by id, not requested_at: change_group_commands.py's
+    # request-listing pagination cursors on id, and while id and
+    # requested_at happen to agree today (both monotone with insertion
+    # order), only id is actually guaranteed unique and monotone —
+    # requested_at is wall-clock-derived and could tie or step backward.
     rows = conn.execute(
         f"SELECT {_REQUEST_COLUMNS} FROM group_change_requests "
-        "WHERE to_group_id = ? AND status = 'pending' ORDER BY requested_at",
+        "WHERE to_group_id = ? AND status = 'pending' ORDER BY id",
         (group_id,),
     ).fetchall()
     return [GroupChangeRequestRow(*row) for row in rows]
 
 
 def list_all_pending_requests(conn: sqlite3.Connection) -> list[GroupChangeRequestRow]:
+    # See list_pending_requests_for_group: ordered by id for the same
+    # pagination-cursor reason.
     rows = conn.execute(
-        f"SELECT {_REQUEST_COLUMNS} FROM group_change_requests WHERE status = 'pending' ORDER BY requested_at"
+        f"SELECT {_REQUEST_COLUMNS} FROM group_change_requests WHERE status = 'pending' ORDER BY id"
     ).fetchall()
     return [GroupChangeRequestRow(*row) for row in rows]
 

@@ -354,7 +354,7 @@ async def change_request_reject_callback(update: Update, context: ContextTypes.D
     await query.message.reply_text("Заявка отклонена.")
 
 
-def _build_requests_messages(conn, group) -> list[tuple[int, str, "InlineKeyboardMarkup"]]:
+def build_requests_messages(conn, group) -> list[tuple[int, str, "InlineKeyboardMarkup"]]:
     """Returns (request_id, text, keyboard) triples — the id is the
     keyset-pagination cursor send_requests_batch uses, since a plain
     numeric offset would silently skip entries once something earlier
@@ -384,22 +384,30 @@ _INFO_REQUEST_KIND_LABEL = {
 
 # request_text is raw, Telegram-message-sized user input (/report, "моего
 # института/группы нет"); a message near Telegram's own 4096-char cap
-# plus this prefix would exceed it and raise BadRequest, breaking the
-# whole batch send for every request after it (the exact failure #1 in
-# the backlog is about). Truncating comfortably below the real limit
-# leaves slack for the prefix/label.
-_REQUEST_TEXT_DISPLAY_LIMIT = 3500
+# plus this prefix would exceed it and raise BadRequest. Truncating
+# comfortably below the real limit leaves slack for the prefix/label —
+# used both in the batch listings below AND wherever request_text gets
+# forwarded to the admin immediately (report.py, menu.py's
+# _notify_admin_of_info_request), so one oversized submission can't
+# silently fail to reach the admin at all, which a listing-only
+# truncation would still allow. Telegram's 4096 cap counts UTF-16 code
+# units, not Python characters — this stays far enough below it that
+# astral-plane characters (rare in practice here) wouldn't close the
+# gap either.
+REQUEST_TEXT_DISPLAY_LIMIT = 3500
 
 
-def _truncate_request_text(text: str) -> str:
-    if len(text) <= _REQUEST_TEXT_DISPLAY_LIMIT:
+def truncate_request_text(text: str | None) -> str:
+    if not text:
+        return ""
+    if len(text) <= REQUEST_TEXT_DISPLAY_LIMIT:
         return text
-    return text[:_REQUEST_TEXT_DISPLAY_LIMIT] + "…\n\n(сообщение обрезано, слишком длинное)"
+    return text[:REQUEST_TEXT_DISPLAY_LIMIT] + "…\n\n(сообщение обрезано, слишком длинное)"
 
 
-def _build_all_requests_messages(conn) -> list[tuple[int, str, "InlineKeyboardMarkup"]]:
+def build_all_requests_messages(conn) -> list[tuple[int, str, "InlineKeyboardMarkup"]]:
     """Returns (request_id, text, keyboard) triples — see
-    _build_requests_messages for why the id (not a numeric position) is
+    build_requests_messages for why the id (not a numeric position) is
     the pagination cursor."""
     entries = []
     for request in storage.list_all_pending_requests(conn):
@@ -411,7 +419,7 @@ def _build_all_requests_messages(conn) -> list[tuple[int, str, "InlineKeyboardMa
             entries.append(
                 (
                     request.id,
-                    f"Заявка ({kind_label}) от {label}:\n{_truncate_request_text(request.request_text)}",
+                    f"Заявка ({kind_label}) от {label}:\n{truncate_request_text(request.request_text)}",
                     keyboard,
                 )
             )
@@ -458,8 +466,13 @@ async def send_requests_batch(reply_target, entries, after_id: int, more_callbac
         more_keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("➡️ Показать ещё", callback_data=f"{more_callback_data_prefix}{last_id}")]]
         )
+        # Absolute position against the full list (not just `remaining`,
+        # which shrinks as earlier requests get resolved), so repeated
+        # "show more" taps still read as "10 of 40", "20 of 40", ...
+        # instead of a shrinking, position-less "10 of 30", "10 of 20".
+        shown_so_far = len(entries) - len(remaining) + len(page)
         await reply_target(
-            f"Показано {len(page)} из {len(remaining)} оставшихся заявок.", reply_markup=more_keyboard
+            f"Показано {shown_so_far} из {len(entries)} заявок.", reply_markup=more_keyboard
         )
 
 
@@ -479,7 +492,7 @@ async def requests_command(update, context) -> None:
             await update.message.reply_text("Вы не староста ни одной группы.")
             return
 
-    entries = _build_requests_messages(conn, group)
+    entries = build_requests_messages(conn, group)
     await send_requests_batch(update.message.reply_text, entries, 0, f"{REQUESTS_GROUP_PAGE_PREFIX}{group.id}:")
 
 
@@ -496,7 +509,7 @@ async def requests_group_page_callback(update: Update, context: ContextTypes.DEF
     if not _can_decide(update.effective_chat.id, group, context.bot_data.get("admin_chat_id")):
         await query.message.reply_text("Недостаточно прав.")
         return
-    entries = _build_requests_messages(conn, group)
+    entries = build_requests_messages(conn, group)
     await send_requests_batch(query.message.reply_text, entries, after_id, f"{REQUESTS_GROUP_PAGE_PREFIX}{group.id}:")
 
 
@@ -508,5 +521,5 @@ async def requests_all_page_callback(update: Update, context: ContextTypes.DEFAU
         await query.message.reply_text("Недостаточно прав.")
         return
     conn = context.bot_data["conn"]
-    entries = _build_all_requests_messages(conn)
+    entries = build_all_requests_messages(conn)
     await send_requests_batch(query.message.reply_text, entries, after_id, REQUESTS_ALL_PAGE_PREFIX)

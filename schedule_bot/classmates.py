@@ -22,7 +22,22 @@ def format_member_line(member, is_starosta: bool) -> str:
     return f"👑 {label}" if is_starosta else label
 
 
-def _build_exclude_keyboard(excludable_members: list, group_id: int, *, after_chat_id: int = 0) -> InlineKeyboardMarkup | None:
+def _load_excludable_members(conn, group, caller_chat_id: int, admin_chat_id: int | None) -> list:
+    """Every member of `group` eligible to appear on an "exclude" page —
+    everyone except the caller and the admin — sorted by chat_id (a
+    stable, callback_data-safe cursor). Shared by classmates_command and
+    exclude_page_callback so the two pages can never disagree about who
+    is excludable."""
+    chat_ids = storage.list_group_members(conn, group.id, subscribed_only=False)
+    members = [storage.get_member(conn, cid) for cid in chat_ids]
+    return sorted(
+        (m for m in members if m.chat_id != caller_chat_id and m.chat_id != admin_chat_id), key=lambda m: m.chat_id
+    )
+
+
+def _build_exclude_keyboard(
+    excludable_members: list, group, *, after_chat_id: int = 0
+) -> InlineKeyboardMarkup | None:
     """Paginates by chat_id (a stable, callback_data-safe cursor) rather
     than by numeric offset, so excluding someone on an earlier page can
     never shift a later page's window and silently skip a member — the
@@ -32,13 +47,18 @@ def _build_exclude_keyboard(excludable_members: list, group_id: int, *, after_ch
     if not page:
         return None
     rows = [
-        [InlineKeyboardButton(f"❌ Исключить {format_candidate_label(m)}", callback_data=f"exclude:select:{m.chat_id}")]
+        [
+            InlineKeyboardButton(
+                f"❌ Исключить {format_member_line(m, m.chat_id == group.starosta_chat_id)}",
+                callback_data=f"exclude:select:{m.chat_id}",
+            )
+        ]
         for m in page
     ]
     last_chat_id = page[-1].chat_id
     if any(m.chat_id > last_chat_id for m in excludable_members):
         rows.append(
-            [InlineKeyboardButton("➡️ Показать ещё", callback_data=f"{_EXCLUDE_PAGE_PREFIX}{group_id}:{last_chat_id}")]
+            [InlineKeyboardButton("➡️ Показать ещё", callback_data=f"{_EXCLUDE_PAGE_PREFIX}{group.id}:{last_chat_id}")]
         )
     return InlineKeyboardMarkup(rows)
 
@@ -66,10 +86,8 @@ async def classmates_command(update, context) -> None:
     admin_chat_id = context.bot_data.get("admin_chat_id")
     can_exclude = group.starosta_chat_id == chat_id or chat_id == admin_chat_id
     if can_exclude:
-        excludable = sorted(
-            (m for m in members if m.chat_id != chat_id and m.chat_id != admin_chat_id), key=lambda m: m.chat_id
-        )
-        keyboard = _build_exclude_keyboard(excludable, group.id)
+        excludable = _load_excludable_members(conn, group, chat_id, admin_chat_id)
+        keyboard = _build_exclude_keyboard(excludable, group)
         if keyboard is not None:
             await reply(update, "Исключить участника:", reply_markup=keyboard)
 
@@ -89,12 +107,8 @@ async def exclude_page_callback(update, context) -> None:
     if not (group.starosta_chat_id == caller_chat_id or caller_chat_id == admin_chat_id):
         await query.message.reply_text("Недостаточно прав.")
         return
-    chat_ids = storage.list_group_members(conn, group.id, subscribed_only=False)
-    members = [storage.get_member(conn, cid) for cid in chat_ids]
-    excludable = sorted(
-        (m for m in members if m.chat_id != caller_chat_id and m.chat_id != admin_chat_id), key=lambda m: m.chat_id
-    )
-    keyboard = _build_exclude_keyboard(excludable, group_id, after_chat_id=after_chat_id)
+    excludable = _load_excludable_members(conn, group, caller_chat_id, admin_chat_id)
+    keyboard = _build_exclude_keyboard(excludable, group, after_chat_id=after_chat_id)
     if keyboard is None:
         await query.message.reply_text("Больше участников нет.")
         return
