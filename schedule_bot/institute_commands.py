@@ -8,7 +8,7 @@ from telegram.ext import ContextTypes
 from schedule_bot import storage
 from schedule_bot.bot import _is_valid_hh_mm, is_admin
 from schedule_bot.group_links import refresh_institute_catalog
-from schedule_bot.telegram_utils import parse_positive_int
+from schedule_bot.telegram_utils import chunk_text_by_lines, parse_positive_int
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +222,14 @@ def format_institute_links(conn, institute_id: int) -> str:
     return "\n".join(lines)
 
 
+async def send_institute_links(reply_target, conn, institute_id: int) -> None:
+    """Sends format_institute_links's text as one or more messages, split
+    at line boundaries so a catalog with many links never hits Telegram's
+    4096-character message cap."""
+    for chunk in chunk_text_by_lines(format_institute_links(conn, institute_id)):
+        await reply_target(chunk)
+
+
 async def institute_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("institute_commands: /institute_links from chat_id=%s args=%s", update.effective_chat.id, context.args)
     if not is_admin(update, context):
@@ -235,4 +243,4 @@ async def institute_links_command(update: Update, context: ContextTypes.DEFAULT_
     if institute is None:
         await update.message.reply_text("Институт с таким id не найден.")
         return
-    await update.message.reply_text(format_institute_links(conn, institute.id))
+    await send_institute_links(update.message.reply_text, conn, institute.id)

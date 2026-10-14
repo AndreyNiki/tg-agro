@@ -27,6 +27,8 @@ from schedule_bot.classmates import classmates_command, exclude_abort_callback, 
 from schedule_bot.faq import faq_command
 from schedule_bot.report import report_command
 from schedule_bot.change_group_commands import (
+    REQUESTS_ALL_PAGE_CALLBACK_PATTERN,
+    REQUESTS_GROUP_PAGE_CALLBACK_PATTERN,
     change_group_abort_callback,
     change_group_command,
     change_group_confirm_callback,
@@ -34,7 +36,9 @@ from schedule_bot.change_group_commands import (
     change_group_select_callback,
     change_request_approve_callback,
     change_request_reject_callback,
+    requests_all_page_callback,
     requests_command,
+    requests_group_page_callback,
 )
 from schedule_bot.config import Config, load_config
 from schedule_bot.group_commands import (
@@ -315,6 +319,8 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CallbackQueryHandler(change_group_confirm_callback, pattern=r"^chgconfirm:\d+$"))
     application.add_handler(CallbackQueryHandler(change_request_approve_callback, pattern=r"^chgreq:approve:\d+$"))
     application.add_handler(CallbackQueryHandler(change_request_reject_callback, pattern=r"^chgreq:reject:\d+$"))
+    application.add_handler(CallbackQueryHandler(requests_group_page_callback, pattern=REQUESTS_GROUP_PAGE_CALLBACK_PATTERN))
+    application.add_handler(CallbackQueryHandler(requests_all_page_callback, pattern=REQUESTS_ALL_PAGE_CALLBACK_PATTERN))
 
     application.add_handler(CommandHandler("close_group", close_group_command, filters=filters.UpdateType.MESSAGE))
     application.add_handler(CommandHandler("open_group", open_group_command, filters=filters.UpdateType.MESSAGE))

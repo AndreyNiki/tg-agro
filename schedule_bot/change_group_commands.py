@@ -21,6 +21,15 @@ _PAGE_PREFIX = "chggrp:page:"
 _CONFIRM_PREFIX = "chgconfirm:"
 _ABORT_CALLBACK_DATA = "chgabort"
 
+# How many pending-request messages to send per batch before showing a
+# "show more" button, so a pile-up of requests can't flood a chat with
+# dozens of messages (and their keyboards) in one go.
+REQUESTS_PAGE_SIZE = 10
+_REQUESTS_GROUP_PAGE_PREFIX = "reqpage:group:"
+_REQUESTS_ALL_PAGE_PREFIX = "reqpage:all:"
+REQUESTS_GROUP_PAGE_CALLBACK_PATTERN = r"^reqpage:group:\d+:\d+$"
+REQUESTS_ALL_PAGE_CALLBACK_PATTERN = r"^reqpage:all:\d+$"
+
 
 def _group_button_label(conn, group, institute_names: dict) -> str:
     """This picker is deliberately flat/cross-institute (a user may move
@@ -399,6 +408,28 @@ def _build_all_requests_messages(conn) -> list[tuple[str, "InlineKeyboardMarkup"
     return entries
 
 
+async def _send_requests_batch(reply_target, entries, offset: int, more_callback_data: str) -> None:
+    """Sends entries[offset:offset + REQUESTS_PAGE_SIZE] as individual
+    messages (each with its own approve/reject keyboard), then — if more
+    remain — one extra message with a "show more" button, so a pile-up
+    of pending requests can't flood the chat with everything at once."""
+    if not entries:
+        await reply_target("Нет заявок на рассмотрении.")
+        return
+    page = entries[offset : offset + REQUESTS_PAGE_SIZE]
+    for text, keyboard in page:
+        await reply_target(text, reply_markup=keyboard)
+    next_offset = offset + REQUESTS_PAGE_SIZE
+    if next_offset < len(entries):
+        shown_to = min(next_offset, len(entries))
+        more_keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("➡️ Показать ещё", callback_data=more_callback_data)]]
+        )
+        await reply_target(
+            f"Показаны заявки {offset + 1}-{shown_to} из {len(entries)}.", reply_markup=more_keyboard
+        )
+
+
 async def requests_command(update, context) -> None:
     conn = context.bot_data["conn"]
     if is_admin(update, context):
@@ -416,8 +447,39 @@ async def requests_command(update, context) -> None:
             return
 
     entries = _build_requests_messages(conn, group)
-    if not entries:
-        await update.message.reply_text("Нет заявок на рассмотрении.")
+    await _send_requests_batch(
+        update.message.reply_text, entries, 0, f"{_REQUESTS_GROUP_PAGE_PREFIX}{group.id}:{REQUESTS_PAGE_SIZE}"
+    )
+
+
+async def requests_group_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    _, _, group_id_str, offset_str = query.data.split(":")
+    group_id, offset = int(group_id_str), int(offset_str)
+    conn = context.bot_data["conn"]
+    group = storage.get_group(conn, group_id)
+    if group is None:
+        await query.message.reply_text("Эта группа больше не существует.")
         return
-    for text, keyboard in entries:
-        await update.message.reply_text(text, reply_markup=keyboard)
+    if not _can_decide(update.effective_chat.id, group, context.bot_data.get("admin_chat_id")):
+        await query.message.reply_text("Недостаточно прав.")
+        return
+    entries = _build_requests_messages(conn, group)
+    await _send_requests_batch(
+        query.message.reply_text, entries, offset, f"{_REQUESTS_GROUP_PAGE_PREFIX}{group.id}:{offset + REQUESTS_PAGE_SIZE}"
+    )
+
+
+async def requests_all_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    offset = int(query.data.removeprefix(_REQUESTS_ALL_PAGE_PREFIX))
+    if update.effective_chat.id != context.bot_data.get("admin_chat_id"):
+        await query.message.reply_text("Недостаточно прав.")
+        return
+    conn = context.bot_data["conn"]
+    entries = _build_all_requests_messages(conn)
+    await _send_requests_batch(
+        query.message.reply_text, entries, offset, f"{_REQUESTS_ALL_PAGE_PREFIX}{offset + REQUESTS_PAGE_SIZE}"
+    )

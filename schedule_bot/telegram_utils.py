@@ -76,3 +76,30 @@ async def safe_edit_reply_markup(query, **kwargs) -> None:
     except BadRequest as error:
         if _NOT_MODIFIED_MARKER not in str(error).lower():
             raise
+
+
+TELEGRAM_MESSAGE_LIMIT = 4096
+
+
+def chunk_text_by_lines(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+    """Splits `text` into chunks no longer than `limit`, breaking only at
+    line boundaries so a line is never cut in the middle. A single line
+    longer than `limit` becomes its own (over-length) chunk rather than
+    being split mid-word, since that case does not occur with this
+    codebase's current callers."""
+    lines = text.split("\n")
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        added_len = len(line) + (1 if current else 0)
+        if current and current_len + added_len > limit:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = len(line)
+        else:
+            current.append(line)
+            current_len += added_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks

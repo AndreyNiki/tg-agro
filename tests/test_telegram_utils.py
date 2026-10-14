@@ -4,12 +4,37 @@ import pytest
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from schedule_bot.telegram_utils import (
+    chunk_text_by_lines,
     parse_positive_int,
     safe_edit_message_text,
     safe_edit_reply_markup,
     send_with_retry,
     reply,
 )
+
+
+def test_chunk_text_by_lines_returns_single_chunk_when_under_limit():
+    text = "a\nb\nc"
+    assert chunk_text_by_lines(text, limit=100) == [text]
+
+
+def test_chunk_text_by_lines_splits_at_line_boundaries():
+    lines = [f"line{i}" for i in range(10)]
+    text = "\n".join(lines)
+    # Each "lineN" is 5 chars; force a split after every 3 lines (3*5 + 2
+    # newlines = 17 chars fits, a 4th line would push it over).
+    chunks = chunk_text_by_lines(text, limit=17)
+
+    assert "\n".join(chunks).split("\n") == lines
+    assert all(len(chunk) <= 17 for chunk in chunks)
+    assert len(chunks) > 1
+
+
+def test_chunk_text_by_lines_keeps_an_overlong_single_line_whole():
+    long_line = "x" * 50
+    text = f"short\n{long_line}\nshort2"
+    chunks = chunk_text_by_lines(text, limit=10)
+    assert long_line in chunks
 
 
 @pytest.mark.asyncio

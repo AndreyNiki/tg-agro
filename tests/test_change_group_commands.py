@@ -277,7 +277,12 @@ async def test_change_request_reject_by_admin_keeps_member_in_place(conn):
     assert storage.get_group_change_request(conn, request_id).status == "rejected"
 
 
-from schedule_bot.change_group_commands import requests_command
+from schedule_bot.change_group_commands import (
+    REQUESTS_PAGE_SIZE,
+    requests_all_page_callback,
+    requests_command,
+    requests_group_page_callback,
+)
 
 
 @pytest.mark.asyncio
@@ -345,6 +350,98 @@ async def test_requests_command_rejects_plain_member(conn):
     await requests_command(update, context)
 
     assert "не староста" in update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_requests_command_paginates_when_more_than_page_size(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 555, group_b, joined_at="t")
+    storage.update_group_starosta(conn, group_b, 555)
+    request_count = REQUESTS_PAGE_SIZE + 3
+    for chat_id in range(1000, 1000 + request_count):
+        storage.create_group_change_request(conn, chat_id, group_a, group_b, "t")
+
+    update = make_message_update(555)
+    context = make_context(conn)
+    context.args = []
+
+    await requests_command(update, context)
+
+    # REQUESTS_PAGE_SIZE request messages + one "show more" message.
+    assert update.message.reply_text.await_count == REQUESTS_PAGE_SIZE + 1
+    last_call = update.message.reply_text.await_args_list[-1]
+    assert "Показаны заявки" in last_call.args[0]
+    more_keyboard = last_call.kwargs["reply_markup"]
+    more_callback_data = more_keyboard.inline_keyboard[0][0].callback_data
+    assert more_callback_data == f"reqpage:group:{group_b}:{REQUESTS_PAGE_SIZE}"
+
+
+@pytest.mark.asyncio
+async def test_requests_group_page_callback_sends_next_page(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 555, group_b, joined_at="t")
+    storage.update_group_starosta(conn, group_b, 555)
+    request_count = REQUESTS_PAGE_SIZE + 3
+    for chat_id in range(1000, 1000 + request_count):
+        storage.create_group_change_request(conn, chat_id, group_a, group_b, "t")
+
+    update = make_callback_update(555, f"reqpage:group:{group_b}:{REQUESTS_PAGE_SIZE}")
+    context = make_context(conn)
+
+    await requests_group_page_callback(update, context)
+
+    update.callback_query.answer.assert_awaited_once()
+    # 3 remaining requests, no further "show more" needed.
+    assert update.callback_query.message.reply_text.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_requests_group_page_callback_rejects_unauthorized_caller(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.upsert_member(conn, 555, group_b, joined_at="t")
+    storage.update_group_starosta(conn, group_b, 555)
+    storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+
+    update = make_callback_update(222, f"reqpage:group:{group_b}:0")
+    context = make_context(conn)
+
+    await requests_group_page_callback(update, context)
+
+    assert "Недостаточно прав" in update.callback_query.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_requests_all_page_callback_sends_next_page_for_admin(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    request_count = REQUESTS_PAGE_SIZE + 2
+    for chat_id in range(1000, 1000 + request_count):
+        storage.create_group_change_request(conn, chat_id, group_a, group_b, "t")
+
+    update = make_callback_update(ADMIN_CHAT_ID, f"reqpage:all:{REQUESTS_PAGE_SIZE}")
+    context = make_context(conn)
+
+    await requests_all_page_callback(update, context)
+
+    update.callback_query.answer.assert_awaited_once()
+    assert update.callback_query.message.reply_text.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_requests_all_page_callback_rejects_non_admin(conn):
+    group_a = _make_group(conn, "A")
+    group_b = _make_group(conn, "B")
+    storage.create_group_change_request(conn, 111, group_a, group_b, "t")
+
+    update = make_callback_update(222, "reqpage:all:0")
+    context = make_context(conn)
+
+    await requests_all_page_callback(update, context)
+
+    assert "Недостаточно прав" in update.callback_query.message.reply_text.call_args[0][0]
 
 
 @pytest.mark.asyncio

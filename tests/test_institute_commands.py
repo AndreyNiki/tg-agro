@@ -142,6 +142,31 @@ async def test_institute_links_command_lists_raw_labels_and_group_counts(conn):
 
 
 @pytest.mark.asyncio
+async def test_institute_links_command_splits_into_several_messages_when_catalog_is_large(conn):
+    from schedule_bot.telegram_utils import TELEGRAM_MESSAGE_LIMIT
+
+    institute_id = storage.create_institute(
+        conn, name="ИТ", catalog_url="u", check_interval_minutes=60, send_time="09:00",
+        tz_name="Europe/Moscow", catalog_refresh_interval_minutes=10080,
+    )
+    # Each line is long enough, and there are enough of them, that the
+    # joined text comfortably exceeds TELEGRAM_MESSAGE_LIMIT once.
+    for i in range(400):
+        storage.create_institute_link(
+            conn, institute_id=institute_id, pdf_url=f"{i}.pdf", group_names=[f"G{i}"],
+            raw_label=f"Группа-{i}", last_seen_at="t",
+        )
+    update = _update([str(institute_id)])
+    context = _context(conn, [str(institute_id)])
+
+    await institute_links_command(update, context)
+
+    assert update.message.reply_text.await_count > 1
+    for call in update.message.reply_text.await_args_list:
+        assert len(call.args[0]) <= TELEGRAM_MESSAGE_LIMIT
+
+
+@pytest.mark.asyncio
 async def test_add_institute_reports_zero_links_honestly_and_forwards_alert(conn, monkeypatch):
     """A 0-link scan must not be reported as a bare success, and the
     rescan's own admin alert must not be swallowed by a no-op lambda."""

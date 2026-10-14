@@ -17,8 +17,12 @@ from schedule_bot.bot import (
     schedule_command,
 )
 from schedule_bot.change_group_commands import (
+    REQUESTS_PAGE_SIZE,
     _build_all_requests_messages,
     _build_requests_messages,
+    _REQUESTS_ALL_PAGE_PREFIX,
+    _REQUESTS_GROUP_PAGE_PREFIX,
+    _send_requests_batch,
     build_info_decision_keyboard,
     change_group_command,
 )
@@ -26,7 +30,7 @@ from schedule_bot.classmates import classmates_command
 from schedule_bot.faq import faq_command
 from schedule_bot.group_links import refresh_institute_catalog
 from schedule_bot.group_commands import build_institute_picker_keyboard, subscribe_command, unsubscribe_command
-from schedule_bot.institute_commands import create_institute_and_scan, format_institute_links
+from schedule_bot.institute_commands import create_institute_and_scan, send_institute_links
 from schedule_bot.report import _apply_report
 from schedule_bot.starosta_commands import starosta_command, votes_command
 from schedule_bot.telegram_utils import parse_positive_int, safe_edit_message_text, send_with_retry
@@ -179,11 +183,9 @@ async def _handle_starosta_section(update, context, conn, chat_id: int, action: 
         return
     if action == "requests":
         entries = _build_requests_messages(conn, group)
-        if not entries:
-            await query.message.reply_text("Нет заявок на рассмотрении.")
-            return
-        for text, keyboard in entries:
-            await query.message.reply_text(text, reply_markup=keyboard)
+        await _send_requests_batch(
+            query.message.reply_text, entries, 0, f"{_REQUESTS_GROUP_PAGE_PREFIX}{group.id}:{REQUESTS_PAGE_SIZE}"
+        )
         return
     if action == "notify":
         context.user_data["pending_menu_action"] = _pending_action("notify", group_id=group.id)
@@ -325,11 +327,7 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
         return
     if action == "allrequests":
         entries = _build_all_requests_messages(conn)
-        if not entries:
-            await query.message.reply_text("Нет заявок на рассмотрении.")
-            return
-        for text, keyboard in entries:
-            await query.message.reply_text(text, reply_markup=keyboard)
+        await _send_requests_batch(query.message.reply_text, entries, 0, f"{_REQUESTS_ALL_PAGE_PREFIX}{REQUESTS_PAGE_SIZE}")
         return
 
 
@@ -362,11 +360,9 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
         return
     if action == "pickrequestsgroup":
         entries = _build_requests_messages(conn, group)
-        if not entries:
-            await query.message.reply_text("Нет заявок на рассмотрении.")
-            return
-        for text, keyboard in entries:
-            await query.message.reply_text(text, reply_markup=keyboard)
+        await _send_requests_batch(
+            query.message.reply_text, entries, 0, f"{_REQUESTS_GROUP_PAGE_PREFIX}{group.id}:{REQUESTS_PAGE_SIZE}"
+        )
         return
     if action == "setstarosta":
         context.user_data["pending_menu_action"] = _pending_action("set_starosta", group_id=group_id)
@@ -427,7 +423,7 @@ async def _handle_institute_scoped_pick(
         await query.message.reply_text("Отправьте новый интервал сканирования каталога в минутах:")
         return
     if action == "institutelinks":
-        await query.message.reply_text(format_institute_links(conn, institute_id))
+        await send_institute_links(query.message.reply_text, conn, institute_id)
         return
     if action == "refreshinstitutelinks":
         from schedule_bot.sync import catalog_lock_for
