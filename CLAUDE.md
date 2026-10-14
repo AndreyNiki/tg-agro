@@ -244,6 +244,36 @@ in try/except and continue to the next subscriber — one blocked/invalid
 chat_id must never prevent the rest of the subscribers from being
 notified. If you add a new broadcast loop, match this pattern.
 
+**Outbound throughput and liveness are handled process-wide, not
+per-loop.** `main.py`'s `build_application` wires PTB's `AIORateLimiter`
+into the `Application` builder (requires the `aiolimiter` dependency,
+installed via `python-telegram-bot[rate-limiter]` in
+`requirements.txt`) — every outgoing Bot API call from every
+job/handler shares the same limiter, so N institute links whose
+`link_daily_send_job`s fire at the same configured `send_time` can't
+collectively exceed Telegram's ceiling the way independently
+self-paced loops could. `scheduler.py`'s `link_check_job` and
+`institute_catalog_refresh_job` `IntervalTrigger`s also carry
+`jitter=POLL_JITTER_SECONDS` so one institute's links don't all poll
+the university's site in the same second every cycle. Separately,
+`main.py`'s `_global_error_handler` throttles admin alerts to one per
+`ADMIN_ALERT_COOLDOWN_SECONDS` window (reporting how many were
+suppressed and over how long), so a failure storm can't turn the
+admin-alert safety net into part of the storm itself — the per-user
+error reply stays unthrottled since that's already isolated per chat.
+
+**`scheduler.py`'s `heartbeat_job` is the Docker healthcheck's liveness
+signal**, not just a "the DB file exists" check. It writes a timestamp
+file next to `schedule.db` (same directory as `DB_PATH`) immediately at
+`build_scheduler` time and then every `HEARTBEAT_INTERVAL_SECONDS`;
+`Dockerfile`'s `HEALTHCHECK` fails if that file is missing or older
+than 180s. The recurring write additionally takes an `is_alive`
+callback — `build_application` wires it to
+`application.updater.running` — specifically because the event loop
+and `AsyncIOScheduler` can both stay healthy while Telegram polling
+itself has died; a heartbeat gated only on the loop/scheduler would
+never catch that failure mode.
+
 ## Testing conventions
 
 - `tests/fixtures/schedule_sample.pdf` is the real, currently-published
