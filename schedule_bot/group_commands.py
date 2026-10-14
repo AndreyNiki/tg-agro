@@ -103,7 +103,7 @@ async def institute_select_callback(update: Update, context: ContextTypes.DEFAUL
     if institute is None:
         await query.message.reply_text("Этот институт больше не существует.")
         return
-    await safe_edit_message_text(query, 
+    await safe_edit_message_text(query,
         f"Институт «{institute.name}». Выберите группу:",
         reply_markup=build_group_picker_keyboard(conn, institute_id),
     )
@@ -114,7 +114,7 @@ async def group_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     institute_id_str, page_str = query.data.removeprefix(PAGE_PREFIX).split(":")
     conn = context.bot_data["conn"]
-    await safe_edit_reply_markup(query, 
+    await safe_edit_reply_markup(query,
         reply_markup=build_group_picker_keyboard(conn, int(institute_id_str), int(page_str))
     )
 

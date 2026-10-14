@@ -731,3 +731,67 @@ def test_command_handlers_ignore_edited_messages(conn, config, monkeypatch):
             )
     finally:
         app.bot_data["_scheduler"].shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_edited_message_does_not_actually_dispatch_to_guarded_commands(conn, config, monkeypatch):
+    """test_command_handlers_ignore_edited_messages only checks the filter's
+    repr() substring. This proves it for real: a real Update carrying an
+    edited_message is run through application.process_update, and
+    alert_command/notify_command/report_command must never run — while
+    the same text arriving as a normal message must."""
+    from telegram import Bot, Update, User
+
+    _patch_week_formula(monkeypatch)
+
+    fake_bot_user = User(id=1, first_name="Test", is_bot=True, username="test_bot")
+
+    async def _fake_get_me(self, **_kwargs):
+        self._bot_user = fake_bot_user
+        return fake_bot_user
+
+    monkeypatch.setattr(Bot, "get_me", _fake_get_me)
+
+    mock_alert = AsyncMock()
+    mock_notify = AsyncMock()
+    mock_report = AsyncMock()
+    monkeypatch.setattr("main.alert_command", mock_alert)
+    monkeypatch.setattr("main.notify_command", mock_notify)
+    monkeypatch.setattr("main.report_command", mock_report)
+
+    app = build_application(config, conn)
+    try:
+        await app.initialize()
+
+        def _message_update(update_id: int, text: str, *, edited: bool) -> Update:
+            command = text.split()[0]
+            payload = {
+                "update_id": update_id,
+                ("edited_message" if edited else "message"): {
+                    "message_id": update_id,
+                    "date": 0,
+                    "chat": {"id": 999, "type": "private"},
+                    "from": {"id": 999, "is_bot": False, "first_name": "Admin"},
+                    "text": text,
+                    "entities": [{"offset": 0, "length": len(command), "type": "bot_command"}],
+                },
+            }
+            return Update.de_json(payload, app.bot)
+
+        async def _is_dispatched(command_handler_name: str, mock: AsyncMock, command_text: str) -> None:
+            mock.reset_mock()
+            edited_update = _message_update(1, command_text, edited=True)
+            await app.process_update(edited_update)
+            mock.assert_not_awaited()
+
+            mock.reset_mock()
+            real_update = _message_update(2, command_text, edited=False)
+            await app.process_update(real_update)
+            mock.assert_awaited_once()
+
+        await _is_dispatched("alert_command", mock_alert, "/alert hello")
+        await _is_dispatched("notify_command", mock_notify, "/notify hello")
+        await _is_dispatched("report_command", mock_report, "/report hello")
+    finally:
+        await app.shutdown()
+        app.bot_data["_scheduler"].shutdown(wait=False)

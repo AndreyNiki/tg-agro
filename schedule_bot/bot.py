@@ -208,13 +208,6 @@ def _is_valid_hh_mm(value: str) -> bool:
     return bool(_HH_MM_RE.match(value))
 
 
-def _is_valid_positive_int(value: str) -> bool:
-    try:
-        return int(value) > 0
-    except ValueError:
-        return False
-
-
 def _resolve_admin_group(conn, group_id_str: str):
     group_id = parse_positive_int(group_id_str)
     if group_id is None:

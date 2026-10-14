@@ -323,7 +323,7 @@ def test_get_open_election_returns_none_when_absent(conn):
 def test_get_open_election_finds_the_open_one(conn):
     group_id = _make_group(conn)
     election_id = storage.create_election(conn, group_id, "initial", 111, 111, "t")
-    storage.close_election(conn, election_id, "cancelled", "t2")
+    storage.close_election_if_open(conn, election_id, "cancelled", "t2")
     second_id = storage.create_election(conn, group_id, "change", 222, 333, "t3")
     open_election = storage.get_open_election(conn, group_id)
     assert open_election.id == second_id
@@ -337,10 +337,10 @@ def test_list_open_elections_is_scoped_by_group(conn):
     assert len(storage.list_open_elections(conn, group_a)) == 1
 
 
-def test_close_election_updates_status_and_decided_at(conn):
+def test_close_election_if_open_updates_status_and_decided_at(conn):
     group_id = _make_group(conn)
     election_id = storage.create_election(conn, group_id, "initial", 111, 111, "t")
-    storage.close_election(conn, election_id, "approved", "2026-10-08T01:00:00")
+    storage.close_election_if_open(conn, election_id, "approved", "2026-10-08T01:00:00")
     election = storage.get_election(conn, election_id)
     assert election.status == "approved"
     assert election.decided_at == "2026-10-08T01:00:00"

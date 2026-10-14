@@ -52,10 +52,10 @@ def fetch_url(url: str, *, timeout: float, referer: str | None = None):
     # which is wrong when the proxy can't reach the university's site. Set
     # DISABLE_SITE_PROXY=1 to make this session ignore them.
     disable_site_proxy = os.environ.get("DISABLE_SITE_PROXY", "").strip().lower() in ("1", "true", "yes")
-    session = curl_requests.Session(impersonate=_IMPERSONATE, trust_env=not disable_site_proxy)
-    headers = dict(BROWSER_HEADERS)
-    if referer:
-        session.get(referer, headers=headers, timeout=timeout)
-        time.sleep(random.uniform(0.8, 2.5))
-        headers = {**headers, "Referer": referer, "Sec-Fetch-Site": "same-origin"}
-    return session.get(url, headers=headers, timeout=timeout)
+    with curl_requests.Session(impersonate=_IMPERSONATE, trust_env=not disable_site_proxy) as session:
+        headers = dict(BROWSER_HEADERS)
+        if referer:
+            session.get(referer, headers=headers, timeout=timeout)
+            time.sleep(random.uniform(0.8, 2.5))
+            headers = {**headers, "Referer": referer, "Sec-Fetch-Site": "same-origin"}
+        return session.get(url, headers=headers, timeout=timeout)

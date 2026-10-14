@@ -735,11 +735,6 @@ def list_open_elections(conn: sqlite3.Connection, group_id: int) -> list[Electio
     return [ElectionRow(*row) for row in rows]
 
 
-def close_election(conn: sqlite3.Connection, election_id: int, status: str, decided_at: str) -> None:
-    conn.execute("UPDATE elections SET status = ?, decided_at = ? WHERE id = ?", (status, decided_at, election_id))
-    conn.commit()
-
-
 def close_election_if_open(conn: sqlite3.Connection, election_id: int, status: str, decided_at: str) -> bool:
     """Atomic version of close_election: only transitions the row if it
     is still 'open' at the moment of this UPDATE, and reports whether

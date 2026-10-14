@@ -306,12 +306,12 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
         await safe_edit_message_text(query, "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickgroup"))
         return
     if action == "starostas":
-        await safe_edit_message_text(query, 
+        await safe_edit_message_text(query,
             "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickstarostagroup")
         )
         return
     if action == "closedtoggle":
-        await safe_edit_message_text(query, 
+        await safe_edit_message_text(query,
             "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "toggleclosed")
         )
         return
@@ -319,7 +319,7 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
         await safe_edit_message_text(query, "Заявки:", reply_markup=_requests_submenu_keyboard())
         return
     if action == "requestsbygroup":
-        await safe_edit_message_text(query, 
+        await safe_edit_message_text(query,
             "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickrequestsgroup")
         )
         return
@@ -344,18 +344,18 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
         return
 
     if action == "pickgroup":
-        await safe_edit_message_text(query, 
+        await safe_edit_message_text(query,
             f"Настройки группы «{group.name}»:", reply_markup=_group_settings_submenu(group_id)
         )
         return
     if action == "pickstarostagroup":
-        await safe_edit_message_text(query, 
+        await safe_edit_message_text(query,
             f"Старосты группы «{group.name}»:", reply_markup=_starosta_pick_submenu(group_id)
         )
         return
     if action == "toggleclosed":
         storage.update_group_closed(conn, group.id, not group.is_closed)
-        await safe_edit_message_text(query, 
+        await safe_edit_message_text(query,
             f"Группа «{group.name}»: состояние обновлено.",
             reply_markup=_build_admin_group_picker(conn, "toggleclosed"),
         )
@@ -373,7 +373,7 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
         await query.message.reply_text("Отправьте chat_id нового старосты:")
         return
     if action == "removestarosta":
-        await safe_edit_message_text(query, 
+        await safe_edit_message_text(query,
             _apply_remove_starosta(conn, group),
             reply_markup=_starosta_pick_submenu(group_id),
         )
@@ -406,7 +406,7 @@ async def _handle_institute_scoped_pick(
         return
 
     if action == "pickinstitute":
-        await safe_edit_message_text(query, 
+        await safe_edit_message_text(query,
             f"Настройки института «{institute.name}»:", reply_markup=_institute_settings_submenu(institute_id)
         )
         return
@@ -458,8 +458,14 @@ async def pending_action_followup(update, context) -> None:
 
     started_at = pending.get("started_at")
     if started_at is not None:
-        age = datetime.now(timezone.utc) - datetime.fromisoformat(started_at)
-        if age.total_seconds() > PENDING_ACTION_TTL_SECONDS:
+        try:
+            parsed_started_at = datetime.fromisoformat(started_at)
+        except ValueError:
+            is_expired = True
+        else:
+            age = datetime.now(timezone.utc) - parsed_started_at
+            is_expired = age.total_seconds() > PENDING_ACTION_TTL_SECONDS
+        if is_expired:
             del context.user_data["pending_menu_action"]
             await update.message.reply_text(
                 "Время ожидания истекло, действие отменено. Откройте /menu заново, если оно ещё нужно."
@@ -627,7 +633,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await query.message.reply_text("Недостаточно прав.")
             return
         pick_action = section[: -len("page")]
-        await safe_edit_message_text(query, 
+        await safe_edit_message_text(query,
             admin_picker_prompts[section],
             reply_markup=_build_admin_group_picker(conn, pick_action, page=int(action)),
         )
