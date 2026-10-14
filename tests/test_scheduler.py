@@ -10,6 +10,7 @@ import pytest
 from schedule_bot import storage
 from schedule_bot.pdf_parser import DaySchedule, Lesson, Schedule, schedule_to_dict
 from schedule_bot.scheduler import (
+    POLL_JITTER_SECONDS,
     WeekFormulaHolder,
     build_scheduler,
     heartbeat_job,
@@ -321,6 +322,20 @@ def test_build_scheduler_binds_daily_trigger_to_institute_timezone(conn, shutdow
 
     job = scheduler.get_job(f"link_daily_send_{link_id}")
     assert str(job.trigger.timezone) == "Asia/Yekaterinburg"
+
+
+def test_build_scheduler_jitters_link_check_and_catalog_refresh_jobs(conn, shutdown_scheduler):
+    institute_id = _make_institute(conn)
+    link_id, _ = _make_link_and_group(conn, institute_id)
+    bot = MagicMock()
+    holder = WeekFormulaHolder(formula=WeekFormula(base_month=1, base_day=5, even_index_is_upper=True))
+
+    scheduler = shutdown_scheduler(build_scheduler(conn, _config(), bot, holder))
+
+    check_job = scheduler.get_job(f"link_check_{link_id}")
+    catalog_job = scheduler.get_job(f"institute_catalog_refresh_{institute_id}")
+    assert check_job.trigger.jitter == POLL_JITTER_SECONDS
+    assert catalog_job.trigger.jitter == POLL_JITTER_SECONDS
 
 
 def test_build_scheduler_gives_each_link_its_own_lock(conn, shutdown_scheduler):

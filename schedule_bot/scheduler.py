@@ -34,6 +34,10 @@ async def _notify(bot, chat_id: int, text: str) -> None:
 
 HEARTBEAT_INTERVAL_SECONDS = 60
 
+# Caps how far a check/catalog-refresh job can fire late versus its
+# nominal interval boundary, spreading out otherwise-simultaneous polls.
+POLL_JITTER_SECONDS = 60
+
 
 def heartbeat_job(heartbeat_path: str) -> None:
     """Touches a timestamp file so Dockerfile's HEALTHCHECK can tell a
@@ -299,7 +303,12 @@ def schedule_link_jobs(
     interval_minutes = _safe_interval_minutes(institute.check_interval_minutes, config.default_check_interval_minutes)
     scheduler.add_job(
         link_check_job,
-        IntervalTrigger(minutes=interval_minutes),
+        # jitter: every link of one institute is added within
+        # milliseconds of each other at startup/rescan, so without this
+        # they'd all poll the university's site in the same second on
+        # every cycle — a small burst/DoS pattern rather than organic
+        # traffic.
+        IntervalTrigger(minutes=interval_minutes, jitter=POLL_JITTER_SECONDS),
         args=[conn, config, bot, institute_link.id, lock, catalog_rescan_state, catalog_locks],
         id=check_id,
         replace_existing=True,
@@ -315,7 +324,7 @@ def schedule_institute_catalog_job(
     lock = catalog_lock_for(catalog_locks, institute.id) if catalog_locks is not None else None
     scheduler.add_job(
         institute_catalog_refresh_job,
-        IntervalTrigger(minutes=interval_minutes),
+        IntervalTrigger(minutes=interval_minutes, jitter=POLL_JITTER_SECONDS),
         args=[conn, config, bot, institute.id, reschedule_links, lock],
         id=f"institute_catalog_refresh_{institute.id}",
         replace_existing=True,

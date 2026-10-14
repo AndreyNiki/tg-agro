@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import os
+import time
 
 from telegram import BotCommand, BotCommandScopeDefault
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+from telegram.ext import AIORateLimiter, Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from schedule_bot import storage
 from schedule_bot.menu import menu_callback, menu_command, pending_action_followup
@@ -105,21 +106,49 @@ class _LiveWeekFormula:
         return self._holder.formula.compute(on_date)
 
 
+ADMIN_ALERT_COOLDOWN_SECONDS = 30
+
+
 async def _global_error_handler(update, context) -> None:
     logger.exception("main: unhandled exception while processing update %r", update, exc_info=context.error)
     config = context.application.bot_data.get("config")
     if config is None:
         return
     chat_id = update.effective_chat.id if getattr(update, "effective_chat", None) else "?"
-    try:
-        await send_with_retry(
-            lambda: context.application.bot.send_message(
-                chat_id=config.admin_chat_id,
-                text=f"Необработанная ошибка при обработке апдейта (chat_id={chat_id}): {context.error}",
-            )
+
+    # Under a failure storm (bad migration, DB lock, Telegram outage)
+    # affecting many updates at once, sending one admin message per
+    # failing update would itself start hitting RetryAfter and burn
+    # through send_with_retry's one-retry budget — the safety net
+    # becoming part of the storm it's supposed to report on. This
+    # cooldown collapses a burst into one message (plus a suppressed
+    # count), with no `await` between the check and the state update so
+    # two concurrent error handlers can't both decide to send.
+    throttle = context.application.bot_data.setdefault(
+        "_admin_alert_throttle", {"last_sent_at": 0.0, "suppressed": 0}
+    )
+    now = time.monotonic()
+    if now - throttle["last_sent_at"] < ADMIN_ALERT_COOLDOWN_SECONDS:
+        throttle["suppressed"] += 1
+    else:
+        suppressed = throttle["suppressed"]
+        throttle["last_sent_at"] = now
+        throttle["suppressed"] = 0
+        suffix = (
+            f"\n\n(и ещё {suppressed} ошиб{'ка' if suppressed == 1 else 'ок'} подавлено за последние "
+            f"{ADMIN_ALERT_COOLDOWN_SECONDS}с)"
+            if suppressed
+            else ""
         )
-    except Exception:
-        logger.exception("main: failed to notify admin about unhandled exception")
+        try:
+            await send_with_retry(
+                lambda: context.application.bot.send_message(
+                    chat_id=config.admin_chat_id,
+                    text=f"Необработанная ошибка при обработке апдейта (chat_id={chat_id}): {context.error}{suffix}",
+                )
+            )
+        except Exception:
+            logger.exception("main: failed to notify admin about unhandled exception")
 
     effective_message = getattr(update, "effective_message", None)
     if effective_message is not None:
@@ -192,6 +221,12 @@ def build_application(config: Config, conn) -> Application:
         .token(config.telegram_token)
         .post_init(_post_init)
         .concurrent_updates(True)
+        # Throttles every outgoing Bot API call process-wide (not just
+        # within one job's own loop), so N institute links/subscriber
+        # loops firing at once can no longer collectively exceed
+        # Telegram's ceiling the way independent per-loop pacing
+        # (SEND_PACING_SECONDS) couldn't prevent on its own.
+        .rate_limiter(AIORateLimiter())
         .build()
     )
     application.add_error_handler(_global_error_handler)

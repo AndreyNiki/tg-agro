@@ -117,6 +117,18 @@ def test_build_application_registers_all_expected_handlers(conn, config, monkeyp
     assert "set_check_interval" not in command_names
 
 
+def test_build_application_installs_a_process_wide_rate_limiter(conn, config, monkeypatch):
+    from telegram.ext import AIORateLimiter
+
+    _patch_week_formula(monkeypatch)
+
+    application = build_application(config, conn)
+    try:
+        assert isinstance(application.bot._rate_limiter, AIORateLimiter)
+    finally:
+        application.bot_data["_scheduler"].shutdown(wait=False)
+
+
 def test_build_application_registers_missing_institute_and_group_callbacks(conn, config, monkeypatch):
     from schedule_bot.group_commands import group_request_start_callback, institute_request_start_callback
 
@@ -710,6 +722,49 @@ async def test_global_error_handler_notifies_admin_and_logs(conn, config, monkey
         _, kwargs = app.bot.send_message.call_args
         assert kwargs["chat_id"] == 999
         assert "boom" in kwargs["text"] or "ValueError" in kwargs["text"]
+    finally:
+        app.bot_data["_scheduler"].shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_global_error_handler_throttles_admin_alerts_under_a_failure_storm(conn, config, monkeypatch):
+    from telegram.ext import ContextTypes
+
+    _patch_week_formula(monkeypatch)
+    app = build_application(config, conn)
+    try:
+        monkeypatch.setattr(type(app.bot), "send_message", AsyncMock())
+        context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+        context.bot = app.bot
+        context.application = app
+        context.error = ValueError("boom")
+        update = MagicMock()
+        update.effective_chat.id = 555
+        update.effective_message = None
+
+        handlers = list(app.error_handlers)
+        handler = handlers[0]
+
+        # First failure in the burst reaches the admin immediately.
+        await handler(update, context)
+        app.bot.send_message.assert_awaited_once()
+        _, kwargs = app.bot.send_message.call_args
+        assert "подавлено" not in kwargs["text"]
+        app.bot.send_message.reset_mock()
+
+        # The next 4, still inside the cooldown window, must be suppressed.
+        for _ in range(4):
+            await handler(update, context)
+        app.bot.send_message.assert_not_awaited()
+
+        throttle = app.bot_data["_admin_alert_throttle"]
+        throttle["last_sent_at"] = 0.0  # simulate the cooldown having elapsed
+
+        await handler(update, context)
+
+        app.bot.send_message.assert_awaited_once()
+        _, kwargs = app.bot.send_message.call_args
+        assert "4" in kwargs["text"]  # the 4 suppressed in between get reported
     finally:
         app.bot_data["_scheduler"].shutdown(wait=False)
 
