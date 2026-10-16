@@ -155,6 +155,7 @@ async def sync_institute_link(
     fetches: there'd be nothing to apply the result to.
     """
     if institute_link.is_stale:
+        logger.info("sync: institute_link_id=%s is stale, skipping", institute_link.id)
         return []
 
     groups = storage.list_groups_for_link(conn, institute_link.id)
@@ -162,9 +163,17 @@ async def sync_institute_link(
         g for g in groups if storage.list_group_members(conn, g.id, subscribed_only=False)
     ]
     if not active_groups:
+        logger.info(
+            "sync: institute_link_id=%s has no groups with members (checked %s group(s): %s), skipping fetch",
+            institute_link.id, len(groups), [g.name for g in groups],
+        )
         return []
 
     group_names = [g.name for g in active_groups]
+    logger.info(
+        "sync: institute_link_id=%s syncing %s active group(s): %s",
+        institute_link.id, len(active_groups), group_names,
+    )
     pdf_bytes, schedules, error = await asyncio.to_thread(
         _fetch_and_parse_blocking, institute_link.pdf_url, group_names
     )
@@ -224,6 +233,10 @@ async def sync_institute_link(
             new_schedule = schedules.get(group.name)
             if new_schedule is None:
                 storage.set_group_last_sync_failed_at(conn, group.id, datetime.now(timezone.utc).isoformat())
+                logger.warning(
+                    "sync: group %r (id=%s) column not found in parsed PDF %r",
+                    group.name, group.id, institute_link.pdf_url,
+                )
                 results.append(SyncResult(group_id=group.id, status="error"))
                 continue
 
@@ -284,4 +297,8 @@ async def sync_institute_link(
                 logger.exception("sync: failed to record last_sync_failed_at for group %r (id=%s)", group.name, group.id)
             results.append(SyncResult(group_id=group.id, status="error"))
 
+    logger.info(
+        "sync: institute_link_id=%s finished: %s",
+        institute_link.id, [(r.group_id, r.status) for r in results],
+    )
     return results

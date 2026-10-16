@@ -5,8 +5,10 @@ import pytest
 
 from schedule_bot import storage
 from schedule_bot.change_group_commands import (
+    build_change_group_search_result,
     change_group_command,
     change_group_confirm_callback,
+    change_group_institute_select_callback,
     change_group_page_callback,
     change_group_select_callback,
     change_request_approve_callback,
@@ -74,7 +76,7 @@ def make_context(conn):
 
 
 @pytest.mark.asyncio
-async def test_change_group_command_shows_picker_excluding_current_group(conn):
+async def test_change_group_command_shows_institute_picker(conn):
     group_a = _make_group(conn, "A")
     _make_group(conn, "B")
     storage.upsert_member(conn, 111, group_a, joined_at="t")
@@ -85,7 +87,31 @@ async def test_change_group_command_shows_picker_excluding_current_group(conn):
 
     _, kwargs = update.message.reply_text.call_args
     texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
-    assert texts == ["ИТ-B / B"]  # institute-prefixed label, current group excluded
+    assert texts == ["ИТ-A", "ИТ-B"]
+
+
+@pytest.mark.asyncio
+async def test_institute_select_callback_shows_group_picker_excluding_current_group(conn):
+    group_a = _make_group(conn, "A")
+    institute_a = storage.get_group(conn, group_a).institute_id
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_a, pdf_url="https://example.com/A2.pdf",
+        group_names=["A2"], raw_label="A2", last_seen_at="t",
+    )
+    storage.create_group(conn, institute_id=institute_a, institute_link_id=link_id, name="A2")  # same institute as A, a valid switch target
+    storage.upsert_member(conn, 111, group_a, joined_at="t")
+    update = make_callback_update(111, f"chggrp:inst:{institute_a}")
+    update.callback_query.edit_message_text = AsyncMock()
+    context = make_context(conn)
+
+    await change_group_institute_select_callback(update, context)
+
+    update.callback_query.edit_message_text.assert_awaited_once()
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert "A2" in texts
+    assert "A" not in texts  # current group excluded
+    assert "🔍 Поиск по названию" in texts
 
 
 @pytest.mark.asyncio
@@ -576,18 +602,23 @@ async def test_change_group_picker_hides_not_found_groups(conn):
     """is_verified == -1 ("не найдена в PDF") must be hidden from THIS
     picker too, not only from the subscribe-flow one."""
     group_a = _make_group(conn, "A")
-    _make_group(conn, "B")
-    _make_group(conn, "Bad", is_verified=-1)
+    institute_a = storage.get_group(conn, group_a).institute_id
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_a, pdf_url="https://example.com/Bad.pdf",
+        group_names=["Bad"], raw_label="Bad", last_seen_at="t",
+    )
+    bad_group_id = storage.create_group(conn, institute_id=institute_a, institute_link_id=link_id, name="Bad")
+    storage.update_group_is_verified(conn, bad_group_id, -1)
     storage.upsert_member(conn, 111, group_a, joined_at="t")
-    update = make_message_update(111)
+    update = make_callback_update(111, f"chggrp:inst:{institute_a}")
+    update.callback_query.edit_message_text = AsyncMock()
     context = make_context(conn)
 
-    await change_group_command(update, context)
+    await change_group_institute_select_callback(update, context)
 
-    _, kwargs = update.message.reply_text.call_args
+    _, kwargs = update.callback_query.edit_message_text.call_args
     texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
     assert not any("Bad" in text for text in texts)
-    assert any("B" in text for text in texts)
 
 
 @pytest.mark.asyncio
@@ -733,9 +764,55 @@ def testbuild_all_requests_messages_truncates_an_overlong_request_text(conn):
 
 @pytest.mark.asyncio
 async def test_change_group_page_callback_tolerates_excluded_chat(conn):
+    institute_a = storage.get_group(conn, _make_group(conn, "A")).institute_id
     context = make_context(conn)
-    update = make_callback_update(99999, "chggrp:page:1")  # 99999 has no member row
+    update = make_callback_update(99999, f"chggrp:page:{institute_a}:1")  # 99999 has no member row
 
     await change_group_page_callback(update, context)
 
     update.callback_query.message.reply_text.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_change_group_search_start_callback_sets_pending_action(conn):
+    institute_a = storage.get_group(conn, _make_group(conn, "A")).institute_id
+    update = make_callback_update(111, f"chggrp:search:{institute_a}")
+    context = make_context(conn)
+    context.user_data = {}
+
+    from schedule_bot.change_group_commands import change_group_search_start_callback
+
+    await change_group_search_start_callback(update, context)
+
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "change_group_search"
+    assert pending["institute_id"] == institute_a
+    update.callback_query.message.reply_text.assert_awaited_once()
+
+
+def test_build_change_group_search_result_filters_by_substring(conn):
+    group_a = _make_group(conn, "A")
+    institute_a = storage.get_group(conn, group_a).institute_id
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_a, pdf_url="https://example.com/C.pdf",
+        group_names=["C"], raw_label="C", last_seen_at="t",
+    )
+    storage.create_group(conn, institute_id=institute_a, institute_link_id=link_id, name="C")
+
+    text, keyboard = build_change_group_search_result(conn, institute_a, group_a, "c")
+
+    assert keyboard is not None
+    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "C" in texts
+    assert "A" not in texts  # excluded current group never matches
+    assert "Найдено" in text
+
+
+def test_build_change_group_search_result_no_matches(conn):
+    group_a = _make_group(conn, "A")
+    institute_a = storage.get_group(conn, group_a).institute_id
+
+    text, keyboard = build_change_group_search_result(conn, institute_a, group_a, "zzz")
+
+    assert keyboard is None
+    assert "не найдено" in text

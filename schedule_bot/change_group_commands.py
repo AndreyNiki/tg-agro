@@ -7,19 +7,37 @@ from telegram.ext import ContextTypes
 from schedule_bot import elections, storage
 from schedule_bot.bot import _resolve_admin_group, is_admin, sync_visible_commands
 from schedule_bot.group_commands import (
-    GROUPS_PER_PAGE,
     _rollback_membership,
     validate_and_sync_group_on_first_subscribe,
 )
 from schedule_bot.join_requests import notify_approvers
-from schedule_bot.telegram_utils import reply, safe_edit_reply_markup, send_with_retry
+from schedule_bot.telegram_utils import reply, safe_edit_message_text, safe_edit_reply_markup, send_with_retry
 
 logger = logging.getLogger(__name__)
 
+_INSTITUTE_SELECT_PREFIX = "chggrp:inst:"
+_INSTITUTE_PAGE_PREFIX = "chggrp:instpage:"
 _SELECT_PREFIX = "chggrp:select:"
-_PAGE_PREFIX = "chggrp:page:"
+_PAGE_PREFIX = "chggrp:page:"  # chggrp:page:<institute_id>:<page>
+_SEARCH_PREFIX = "chggrp:search:"
+_TO_INSTITUTES_CALLBACK_DATA = "chggrp:toinstitutes"
 _CONFIRM_PREFIX = "chgconfirm:"
 _ABORT_CALLBACK_DATA = "chgabort"
+
+INSTITUTE_SELECT_CALLBACK_PATTERN = r"^chggrp:inst:\d+$"
+INSTITUTE_PAGE_CALLBACK_PATTERN = r"^chggrp:instpage:\d+$"
+GROUP_PAGE_CALLBACK_PATTERN = r"^chggrp:page:\d+:\d+$"
+SEARCH_CALLBACK_PATTERN = r"^chggrp:search:\d+$"
+
+# How many institutes/groups to list per keyboard page — matches the
+# first-subscribe picker's page size so both flows feel consistent.
+INSTITUTES_PER_PAGE = 8
+GROUPS_PER_PAGE = 8
+
+# Search has no pagination of its own (YAGNI — a typed query is expected to
+# narrow the list a lot); this just caps a pathologically broad query (e.g.
+# a single common letter) from flooding the chat with buttons.
+SEARCH_RESULTS_LIMIT = 20
 
 # How many pending-request messages to send per batch before showing a
 # "show more" button, so a pile-up of requests can't flood a chat with
@@ -31,44 +49,77 @@ REQUESTS_GROUP_PAGE_CALLBACK_PATTERN = r"^reqpage:group:\d+:\d+$"
 REQUESTS_ALL_PAGE_CALLBACK_PATTERN = r"^reqpage:all:\d+$"
 
 
-def _group_button_label(conn, group, institute_names: dict) -> str:
-    """This picker is deliberately flat/cross-institute (a user may move
-    to any group in the system), so the institute name is prefixed to
-    disambiguate same-named groups of two different institutes — a
-    two-step institute->group picker here would be a UX redesign beyond
-    the scope of this fix."""
-    if group.institute_id not in institute_names:
-        institute = storage.get_institute(conn, group.institute_id)
-        institute_names[group.institute_id] = institute.name if institute is not None else "?"
-    return f"{institute_names[group.institute_id]} / {group.name}"
-
-
-def build_change_group_keyboard(conn, exclude_group_id: int, page: int = 0) -> InlineKeyboardMarkup:
+def _candidate_groups_for_institute(conn, institute_id: int, exclude_group_id: int):
     # is_verified == -1 means "name not found in the PDF" and MUST stay
     # hidden from every picker (global constraint (e)) — not just the
     # subscribe-flow one.
-    candidates = [
-        g for g in storage.list_all_groups(conn)
-        if g.id != exclude_group_id and g.is_verified != -1
+    return [
+        g for g in storage.list_groups(conn, institute_id, limit=1_000_000, offset=0)
+        if g.id != exclude_group_id
     ]
+
+
+def build_change_institute_keyboard(conn, page: int = 0) -> InlineKeyboardMarkup:
+    offset = page * INSTITUTES_PER_PAGE
+    all_institutes = storage.list_institutes(conn)
+    institutes = all_institutes[offset : offset + INSTITUTES_PER_PAGE]
+
+    rows = [
+        [InlineKeyboardButton(i.name, callback_data=f"{_INSTITUTE_SELECT_PREFIX}{i.id}")]
+        for i in institutes
+    ]
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("« Назад", callback_data=f"{_INSTITUTE_PAGE_PREFIX}{page - 1}"))
+    if offset + INSTITUTES_PER_PAGE < len(all_institutes):
+        nav_row.append(InlineKeyboardButton("Вперёд »", callback_data=f"{_INSTITUTE_PAGE_PREFIX}{page + 1}"))
+    if nav_row:
+        rows.append(nav_row)
+    return InlineKeyboardMarkup(rows)
+
+
+def build_change_group_keyboard(conn, institute_id: int, exclude_group_id: int, page: int = 0) -> InlineKeyboardMarkup:
+    candidates = _candidate_groups_for_institute(conn, institute_id, exclude_group_id)
     offset = page * GROUPS_PER_PAGE
     page_groups = candidates[offset : offset + GROUPS_PER_PAGE]
 
-    institute_names: dict = {}
     rows = [
-        [InlineKeyboardButton(_group_button_label(conn, g, institute_names), callback_data=f"{_SELECT_PREFIX}{g.id}")]
+        [InlineKeyboardButton(g.name, callback_data=f"{_SELECT_PREFIX}{g.id}")]
         for g in page_groups
     ]
 
     nav_row = []
     if page > 0:
-        nav_row.append(InlineKeyboardButton("« Назад", callback_data=f"{_PAGE_PREFIX}{page - 1}"))
+        nav_row.append(InlineKeyboardButton("« Назад", callback_data=f"{_PAGE_PREFIX}{institute_id}:{page - 1}"))
     if offset + GROUPS_PER_PAGE < len(candidates):
-        nav_row.append(InlineKeyboardButton("Вперёд »", callback_data=f"{_PAGE_PREFIX}{page + 1}"))
+        nav_row.append(InlineKeyboardButton("Вперёд »", callback_data=f"{_PAGE_PREFIX}{institute_id}:{page + 1}"))
     if nav_row:
         rows.append(nav_row)
 
+    rows.append([InlineKeyboardButton("🔍 Поиск по названию", callback_data=f"{_SEARCH_PREFIX}{institute_id}")])
+    rows.append([InlineKeyboardButton("◀️ К институтам", callback_data=_TO_INSTITUTES_CALLBACK_DATA)])
     return InlineKeyboardMarkup(rows)
+
+
+def build_change_group_search_result(
+    conn, institute_id: int, exclude_group_id: int, query_text: str
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Filters the institute's candidate groups by a case-insensitive
+    substring match. Returns (message_text, keyboard) — keyboard is None
+    when there are no matches, so the caller doesn't show an empty
+    keyboard."""
+    needle = query_text.strip().lower()
+    matches = [g for g in _candidate_groups_for_institute(conn, institute_id, exclude_group_id) if needle in g.name.lower()]
+    if not needle or not matches:
+        return "Совпадений не найдено. Попробуйте другой запрос.", None
+
+    shown = matches[:SEARCH_RESULTS_LIMIT]
+    rows = [[InlineKeyboardButton(g.name, callback_data=f"{_SELECT_PREFIX}{g.id}")] for g in shown]
+    rows.append([InlineKeyboardButton("◀️ К институтам", callback_data=_TO_INSTITUTES_CALLBACK_DATA)])
+    text = f"Найдено групп: {len(matches)}." if len(matches) <= SEARCH_RESULTS_LIMIT else (
+        f"Показаны первые {SEARCH_RESULTS_LIMIT} из {len(matches)} найденных групп, уточните запрос."
+    )
+    return text, InlineKeyboardMarkup(rows)
 
 
 async def change_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -81,20 +132,65 @@ async def change_group_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if storage.get_pending_request_for_chat(conn, chat_id) is not None:
         await reply(update, "У вас уже есть заявка на рассмотрении.")
         return
-    keyboard = build_change_group_keyboard(conn, member.group_id)
-    await reply(update, "Выберите новую группу:", reply_markup=keyboard)
+    await reply(update, "Выберите институт:", reply_markup=build_change_institute_keyboard(conn))
+
+
+async def change_group_institute_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.removeprefix(_INSTITUTE_PAGE_PREFIX))
+    conn = context.bot_data["conn"]
+    await safe_edit_reply_markup(query, reply_markup=build_change_institute_keyboard(conn, page))
+
+
+async def change_group_institute_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    institute_id = int(query.data.removeprefix(_INSTITUTE_SELECT_PREFIX))
+    conn = context.bot_data["conn"]
+    institute = storage.get_institute(conn, institute_id)
+    if institute is None:
+        await query.message.reply_text("Этот институт больше не существует.")
+        return
+    member = storage.get_member(conn, update.effective_chat.id)
+    if member is None:
+        await query.message.reply_text("Вы больше не в какой-либо группе — используйте /start.")
+        return
+    await safe_edit_message_text(query,
+        f"Институт «{institute.name}». Выберите новую группу:",
+        reply_markup=build_change_group_keyboard(conn, institute_id, member.group_id),
+    )
 
 
 async def change_group_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    page = int(query.data.removeprefix(_PAGE_PREFIX))
+    institute_id_str, page_str = query.data.removeprefix(_PAGE_PREFIX).split(":")
     conn = context.bot_data["conn"]
     member = storage.get_member(conn, update.effective_chat.id)
     if member is None:
         await query.message.reply_text("Вы больше не в какой-либо группе — используйте /start.")
         return
-    await safe_edit_reply_markup(query, reply_markup=build_change_group_keyboard(conn, member.group_id, page))
+    await safe_edit_reply_markup(query,
+        reply_markup=build_change_group_keyboard(conn, int(institute_id_str), member.group_id, int(page_str))
+    )
+
+
+async def change_group_search_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from schedule_bot.menu import _pending_action
+
+    query = update.callback_query
+    await query.answer()
+    institute_id = int(query.data.removeprefix(_SEARCH_PREFIX))
+    context.user_data["pending_menu_action"] = _pending_action("change_group_search", institute_id=institute_id)
+    await query.message.reply_text("Отправьте часть названия группы:")
+
+
+async def change_group_to_institutes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    conn = context.bot_data["conn"]
+    await query.message.reply_text("Выберите институт:", reply_markup=build_change_institute_keyboard(conn))
 
 
 async def change_group_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

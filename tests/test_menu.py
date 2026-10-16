@@ -40,7 +40,7 @@ def _button_texts(keyboard):
     return [b.text for row in keyboard.inline_keyboard for b in row]
 
 
-def test_root_keyboard_plain_member_sees_schedule_group_starosta_not_admin(conn):
+def test_root_keyboard_plain_member_sees_schedule_and_group_not_admin(conn):
     group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
 
@@ -49,14 +49,14 @@ def test_root_keyboard_plain_member_sees_schedule_group_starosta_not_admin(conn)
 
     assert any("Расписание" in t for t in texts)
     assert any("Группа" in t for t in texts)
-    assert any("Староста" in t for t in texts)
+    assert not any("Старост" in t for t in texts)
     assert not any("Админ" in t for t in texts)
 
 
-def test_root_keyboard_no_group_hides_schedule_group_and_starosta(conn):
+def test_root_keyboard_no_group_hides_schedule_and_group(conn):
     keyboard = build_root_keyboard(conn, 111, ADMIN_CHAT_ID)
     texts = _button_texts(keyboard)
-    assert not any(t in ("📅 Расписание", "👥 Группа", "👑 Староста") for t in texts)
+    assert not any(t in ("📅 Расписание", "👥 Группа") for t in texts)
     # Task 10 adds FAQ/Report unconditionally, so the keyboard isn't empty anymore —
     # this test only asserts the group-gated sections are absent.
 
@@ -220,12 +220,58 @@ async def test_menu_callback_group_changegroup_calls_change_group_command(conn):
 
 
 @pytest.mark.asyncio
-async def test_menu_callback_starosta_root_delegates_to_starosta_command_when_not_starosta(conn):
+async def test_menu_callback_group_root_shows_nominate_button_when_no_starosta(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    update = make_callback_update(111, "menu:group:root")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any("Я староста" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_group_root_shows_change_button_when_starosta_exists(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    storage.upsert_member(conn, 222, group_id, joined_at="t")
+    storage.update_group_starosta(conn, group_id, 222)
+    update = make_callback_update(111, "menu:group:root")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any("Сменить старосту" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_group_starosta_shows_confirmation_with_rules(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    update = make_callback_update(111, "menu:group:starosta")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    args, kwargs = update.callback_query.edit_message_text.call_args
+    assert "голосование" in args[0]
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any("Подтвердить" in t for t in texts)
+    assert any("Отмена" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_group_starostaconfirm_delegates_to_starosta_command(conn):
     group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.upsert_member(conn, 222, group_id, joined_at="t")
     storage.upsert_member(conn, 333, group_id, joined_at="t")
-    update = make_callback_update(111, "menu:starosta:root")
+    update = make_callback_update(111, "menu:group:starostaconfirm")
     update.callback_query.message = MagicMock()
     update.callback_query.message.reply_text = AsyncMock()
     context = make_context(conn)
@@ -236,11 +282,25 @@ async def test_menu_callback_starosta_root_delegates_to_starosta_command_when_no
 
 
 @pytest.mark.asyncio
-async def test_menu_callback_starosta_root_shows_privileges_when_caller_is_starosta(conn):
+async def test_menu_callback_group_starostaabort_returns_to_group_section(conn):
+    group_id = _make_group(conn)
+    storage.upsert_member(conn, 111, group_id, joined_at="t")
+    update = make_callback_update(111, "menu:group:starostaabort")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert any("Одногруппники" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_group_starostapanel_shows_privileges_when_caller_is_starosta(conn):
     group_id = _make_group(conn)
     storage.upsert_member(conn, 111, group_id, joined_at="t")
     storage.update_group_starosta(conn, group_id, 111)
-    update = make_callback_update(111, "menu:starosta:root")
+    update = make_callback_update(111, "menu:group:starostapanel")
     context = make_context(conn)
 
     await menu_callback(update, context)
@@ -357,8 +417,10 @@ async def test_menu_callback_admin_alert_prompts_for_text(conn):
 
 
 @pytest.mark.asyncio
-async def test_menu_callback_admin_groupsettings_shows_group_picker(conn):
-    _make_group(conn, "A")
+async def test_menu_callback_admin_groupsettings_shows_institute_then_group_picker(conn):
+    group_id = _make_group(conn, "A")
+    institute_id = storage.get_group(conn, group_id).institute_id
+    institute_name = storage.get_institute(conn, institute_id).name
     update = make_callback_update(ADMIN_CHAT_ID, "menu:admin:groupsettings")
     context = make_context(conn)
 
@@ -366,7 +428,14 @@ async def test_menu_callback_admin_groupsettings_shows_group_picker(conn):
 
     _, kwargs = update.callback_query.edit_message_text.call_args
     texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
-    assert "A" in texts
+    assert institute_name in texts
+
+    update2 = make_callback_update(ADMIN_CHAT_ID, f"menu:pickgroupinst:{institute_id}")
+    await menu_callback(update2, context)
+
+    _, kwargs2 = update2.callback_query.edit_message_text.call_args
+    texts2 = [b.text for row in kwargs2["reply_markup"].inline_keyboard for b in row]
+    assert "A" in texts2
 
 
 @pytest.mark.asyncio
@@ -383,8 +452,10 @@ async def test_menu_callback_admin_requests_shows_submenu(conn):
 
 
 @pytest.mark.asyncio
-async def test_menu_callback_admin_requestsbygroup_shows_group_picker(conn):
-    _make_group(conn, "A")
+async def test_menu_callback_admin_requestsbygroup_shows_institute_then_group_picker(conn):
+    group_id = _make_group(conn, "A")
+    institute_id = storage.get_group(conn, group_id).institute_id
+    institute_name = storage.get_institute(conn, institute_id).name
     update = make_callback_update(ADMIN_CHAT_ID, "menu:admin:requestsbygroup")
     context = make_context(conn)
 
@@ -392,7 +463,14 @@ async def test_menu_callback_admin_requestsbygroup_shows_group_picker(conn):
 
     _, kwargs = update.callback_query.edit_message_text.call_args
     texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
-    assert "A" in texts
+    assert institute_name in texts
+
+    update2 = make_callback_update(ADMIN_CHAT_ID, f"menu:pickrequestsgroupinst:{institute_id}")
+    await menu_callback(update2, context)
+
+    _, kwargs2 = update2.callback_query.edit_message_text.call_args
+    texts2 = [b.text for row in kwargs2["reply_markup"].inline_keyboard for b in row]
+    assert "A" in texts2
 
 
 @pytest.mark.asyncio
@@ -669,17 +747,28 @@ async def test_menu_callback_clears_stale_pending_action_on_schedule_root(conn):
 # --- Important: admin group-picker pagination ---
 
 
+def _make_sibling_group(conn, institute_id, name):
+    link_id = storage.create_institute_link(
+        conn, institute_id=institute_id, pdf_url=f"https://example.com/{name}.pdf",
+        group_names=[name], raw_label=name, last_seen_at="t",
+    )
+    return storage.create_group(conn, institute_id=institute_id, institute_link_id=link_id, name=name)
+
+
 @pytest.mark.asyncio
 async def test_menu_callback_pickgrouppage_rerenders_second_page(conn):
-    for i in range(9):
-        _make_group(conn, f"Group-{i}")
-    update = make_callback_update(ADMIN_CHAT_ID, "menu:pickgrouppage:1")
+    institute_id = storage.get_group(conn, _make_group(conn, "Group-0")).institute_id
+    for i in range(1, 9):
+        _make_sibling_group(conn, institute_id, f"Group-{i}")
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:pickgrouppage:{institute_id}:1")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.edit_reply_markup = AsyncMock()
     context = make_context(conn)
 
     await menu_callback(update, context)
 
-    update.callback_query.edit_message_text.assert_awaited_once()
-    _, kwargs = update.callback_query.edit_message_text.call_args
+    update.callback_query.message.edit_reply_markup.assert_awaited_once()
+    _, kwargs = update.callback_query.message.edit_reply_markup.call_args
     texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
     assert "Group-8" in texts
 
@@ -697,6 +786,53 @@ async def test_menu_callback_toggleclosedpage_rejects_non_admin(conn):
 
     update.callback_query.message.reply_text.assert_awaited_once()
     update.callback_query.edit_message_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_pickgroupsearch_sets_pending_action_then_filters(conn):
+    institute_id = storage.get_group(conn, _make_group(conn, "Alpha")).institute_id
+    _make_sibling_group(conn, institute_id, "Beta")
+    update = make_callback_update(ADMIN_CHAT_ID, f"menu:pickgroupsearch:{institute_id}")
+    update.callback_query.message = MagicMock()
+    update.callback_query.message.reply_text = AsyncMock()
+    context = make_context(conn)
+    context.user_data = {}
+
+    await menu_callback(update, context)
+
+    pending = context.user_data["pending_menu_action"]
+    assert pending["action"] == "admin_group_search"
+    assert pending["pick_action"] == "pickgroup"
+    assert pending["institute_id"] == institute_id
+
+    from schedule_bot.menu import pending_action_followup
+
+    text_update = MagicMock()
+    text_update.effective_chat.id = ADMIN_CHAT_ID
+    text_update.message.text = "alp"
+    text_update.message.reply_text = AsyncMock()
+
+    await pending_action_followup(text_update, context)
+
+    _, kwargs = text_update.message.reply_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert "Alpha" in texts
+    assert "Beta" not in texts
+
+
+@pytest.mark.asyncio
+async def test_menu_callback_pickgrouptoinst_goes_back_to_institute_list(conn):
+    group_id = _make_group(conn, "A")
+    institute_id = storage.get_group(conn, group_id).institute_id
+    institute_name = storage.get_institute(conn, institute_id).name
+    update = make_callback_update(ADMIN_CHAT_ID, "menu:pickgrouptoinst:_")
+    context = make_context(conn)
+
+    await menu_callback(update, context)
+
+    _, kwargs = update.callback_query.edit_message_text.call_args
+    texts = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert institute_name in texts
 
 
 # --- Important: admin dead-end fixes ---

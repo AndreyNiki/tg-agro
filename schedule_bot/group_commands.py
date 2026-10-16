@@ -209,7 +209,23 @@ async def validate_and_sync_group_on_first_subscribe(conn, group, pdf_cache_dir:
         await notify_admin(f"Группа «{group.name}» не найдена в PDF по ссылке института — is_verified=-1, скрыта из пикера.")
         return False
 
-    await sync_institute_link_fn(institute_link.id)
+    logger.info(
+        "group_commands: group %r (id=%s) validated, triggering immediate first sync for institute_link_id=%s",
+        group.name, group.id, institute_link.id,
+    )
+    try:
+        results = await sync_institute_link_fn(institute_link.id)
+    except Exception:
+        logger.exception(
+            "group_commands: immediate first sync failed for institute_link_id=%s after validating group %r (id=%s) "
+            "— /schedule will stay empty until the next scheduled check",
+            institute_link.id, group.name, group.id,
+        )
+        raise
+    logger.info(
+        "group_commands: immediate first sync for institute_link_id=%s finished: %s",
+        institute_link.id, [(r.group_id, r.status) for r in results],
+    )
     return True
 
 

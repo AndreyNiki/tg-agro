@@ -35,13 +35,21 @@ from schedule_bot.classmates import (
 from schedule_bot.faq import faq_command
 from schedule_bot.report import report_command
 from schedule_bot.change_group_commands import (
+    GROUP_PAGE_CALLBACK_PATTERN,
+    INSTITUTE_PAGE_CALLBACK_PATTERN as CHANGE_GROUP_INSTITUTE_PAGE_CALLBACK_PATTERN,
+    INSTITUTE_SELECT_CALLBACK_PATTERN as CHANGE_GROUP_INSTITUTE_SELECT_CALLBACK_PATTERN,
     REQUESTS_ALL_PAGE_CALLBACK_PATTERN,
     REQUESTS_GROUP_PAGE_CALLBACK_PATTERN,
+    SEARCH_CALLBACK_PATTERN,
     change_group_abort_callback,
     change_group_command,
     change_group_confirm_callback,
+    change_group_institute_page_callback,
+    change_group_institute_select_callback,
     change_group_page_callback,
+    change_group_search_start_callback,
     change_group_select_callback,
+    change_group_to_institutes_callback,
     change_request_approve_callback,
     change_request_reject_callback,
     requests_all_page_callback,
@@ -367,7 +375,11 @@ def build_application(config: Config, conn) -> Application:
     application.add_handler(CallbackQueryHandler(election_approve_callback, pattern=r"^election:approve:\d+$"))
     application.add_handler(CallbackQueryHandler(election_reject_callback, pattern=r"^election:reject:\d+$"))
 
-    application.add_handler(CallbackQueryHandler(change_group_page_callback, pattern=r"^chggrp:page:\d+$"))
+    application.add_handler(CallbackQueryHandler(change_group_institute_page_callback, pattern=CHANGE_GROUP_INSTITUTE_PAGE_CALLBACK_PATTERN))
+    application.add_handler(CallbackQueryHandler(change_group_institute_select_callback, pattern=CHANGE_GROUP_INSTITUTE_SELECT_CALLBACK_PATTERN))
+    application.add_handler(CallbackQueryHandler(change_group_page_callback, pattern=GROUP_PAGE_CALLBACK_PATTERN))
+    application.add_handler(CallbackQueryHandler(change_group_search_start_callback, pattern=SEARCH_CALLBACK_PATTERN))
+    application.add_handler(CallbackQueryHandler(change_group_to_institutes_callback, pattern=r"^chggrp:toinstitutes$"))
     application.add_handler(CallbackQueryHandler(change_group_select_callback, pattern=r"^chggrp:select:\d+$"))
     application.add_handler(CallbackQueryHandler(change_group_abort_callback, pattern=r"^chgabort$"))
     application.add_handler(CallbackQueryHandler(change_group_confirm_callback, pattern=r"^chgconfirm:\d+$"))

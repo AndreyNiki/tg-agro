@@ -115,6 +115,44 @@ def test_render_day_image_returns_none_when_group_col_bounds_missing():
     assert render_day_image(FIXTURE_PATH, schedule, "Понедельник") is None
 
 
+def test_crop_pixmap_stitches_non_adjacent_columns_without_corrupting_pixel_data(monkeypatch):
+    """Regression test: get_pixmap's result carries the clip rect's own
+    device-space offset as its origin, not (0, 0). Pixmap.copy()'s bbox is
+    interpreted in that shared device space rather than being translated,
+    so copying a piece straight into a (0, 0)-based canvas at a nonzero
+    offset silently copies nothing (or the wrong region) and leaves that
+    part of the canvas as noise — exactly what shipped and produced
+    illegible "мясо" screenshots for any day whose time/group columns
+    aren't adjacent. Byte-size/width assertions (the other tests here)
+    can't catch this; only inspecting actual pixel values can."""
+    import fitz as _fitz
+    from schedule_bot.screenshot import _crop_pixmap
+
+    red = _fitz.Pixmap(_fitz.csRGB, (0, 0, 10, 6), False)
+    red.set_rect(red.irect, (255, 0, 0))
+    blue = _fitz.Pixmap(_fitz.csRGB, (0, 0, 20, 6), False)
+    blue.set_rect(blue.irect, (0, 0, 255))
+
+    # get_pixmap results are never at origin (0, 0) in practice — simulate
+    # that by placing each fake piece at an arbitrary nonzero device offset.
+    red.set_origin(137, 42)
+    blue.set_origin(900, 42)
+
+    calls = iter([red, blue])
+
+    class FakePage:
+        def get_pixmap(self, matrix, clip):
+            return next(calls)
+
+    stitched = _crop_pixmap(FakePage(), y0=0.0, y1=1.0, x_ranges=[(0.0, 1.0), (1.0, 2.0)], zoom=1.0, padding=0.0)
+
+    assert (stitched.width, stitched.height) == (30, 6)
+    assert stitched.pixel(0, 0) == (255, 0, 0)
+    assert stitched.pixel(9, 5) == (255, 0, 0)
+    assert stitched.pixel(10, 0) == (0, 0, 255)
+    assert stitched.pixel(29, 5) == (0, 0, 255)
+
+
 def test_render_day_image_header_crop_x_range_matches_body_for_merged_cell_day(monkeypatch):
     """A day whose target-group lesson is shared/merged across columns (per
     Task 9's aggregation) has a wide group_col_x1 reaching the table's right

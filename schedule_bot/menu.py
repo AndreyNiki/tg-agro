@@ -20,6 +20,7 @@ from schedule_bot.change_group_commands import (
     REQUESTS_ALL_PAGE_PREFIX,
     REQUESTS_GROUP_PAGE_PREFIX,
     build_all_requests_messages,
+    build_change_group_search_result,
     build_info_decision_keyboard,
     build_requests_messages,
     change_group_command,
@@ -33,7 +34,7 @@ from schedule_bot.group_commands import build_institute_picker_keyboard, subscri
 from schedule_bot.institute_commands import create_institute_and_scan, send_institute_links
 from schedule_bot.report import _apply_report
 from schedule_bot.starosta_commands import starosta_command, votes_command
-from schedule_bot.telegram_utils import parse_positive_int, safe_edit_message_text, send_with_retry
+from schedule_bot.telegram_utils import parse_positive_int, safe_edit_message_text, safe_edit_reply_markup, send_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,6 @@ def build_root_keyboard(conn, chat_id: int, admin_chat_id: int) -> InlineKeyboar
     if member is not None:
         rows.append([InlineKeyboardButton("📅 Расписание", callback_data="menu:schedule:root")])
         rows.append([InlineKeyboardButton("👥 Группа", callback_data="menu:group:root")])
-        rows.append([InlineKeyboardButton("👑 Староста", callback_data="menu:starosta:root")])
     else:
         rows.append([InlineKeyboardButton("🎓 Выбрать институт и группу", callback_data="menu:start:pick")])
     if chat_id == admin_chat_id:
@@ -100,15 +100,46 @@ def _schedule_section_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _group_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+def _group_starosta_button(conn, chat_id: int) -> InlineKeyboardButton | None:
+    member = storage.get_member(conn, chat_id)
+    if member is None:
+        return None
+    group = storage.get_group(conn, member.group_id)
+    if group.starosta_chat_id == chat_id:
+        return InlineKeyboardButton("👑 Привилегии старосты", callback_data="menu:group:starostapanel")
+    if group.starosta_chat_id is None:
+        return InlineKeyboardButton("🙋 Я староста", callback_data="menu:group:starosta")
+    return InlineKeyboardButton("🔁 Сменить старосту", callback_data="menu:group:starosta")
+
+
+def _group_section_keyboard(conn, chat_id: int) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("📋 Одногруппники", callback_data="menu:group:classmates")]]
+    starosta_button = _group_starosta_button(conn, chat_id)
+    if starosta_button is not None:
+        rows.append([starosta_button])
+    rows.append([InlineKeyboardButton("🔄 Сменить группу", callback_data="menu:group:changegroup")])
+    rows.append([InlineKeyboardButton("🗳 Открытые голосования", callback_data="menu:group:votes")])
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data=ROOT_CALLBACK_DATA)])
+    return InlineKeyboardMarkup(rows)
+
+
+_STAROSTA_ELECTION_RULES_TEXT = (
+    "Это запустит голосование среди участников группы.\n\n"
+    "Правила:\n"
+    "— нужно минимум 3 участника в группе\n"
+    "— нужно 2 «Одобрить» от любых закреплённых за группой участников\n"
+    "— смену старосты можно начинать не чаще раза в 14 дней\n\n"
+    "Запустить голосование?"
+)
+
+_STAROSTA_CONFIRM_KEYBOARD = InlineKeyboardMarkup(
+    [
         [
-            [InlineKeyboardButton("📋 Одногруппники", callback_data="menu:group:classmates")],
-            [InlineKeyboardButton("🔄 Сменить группу", callback_data="menu:group:changegroup")],
-            [InlineKeyboardButton("🗳 Открытые голосования", callback_data="menu:group:votes")],
-            [InlineKeyboardButton("◀️ Назад", callback_data=ROOT_CALLBACK_DATA)],
+            InlineKeyboardButton("✅ Подтвердить", callback_data="menu:group:starostaconfirm"),
+            InlineKeyboardButton("✖️ Отмена", callback_data="menu:group:starostaabort"),
         ]
-    )
+    ]
+)
 
 
 async def _handle_schedule_section(update, context, conn, chat_id: int, action: str) -> None:
@@ -134,7 +165,7 @@ async def _handle_schedule_section(update, context, conn, chat_id: int, action: 
 async def _handle_group_section(update, context, conn, chat_id: int, action: str) -> None:
     query = update.callback_query
     if action == "root":
-        await safe_edit_message_text(query, "Группа:", reply_markup=_group_section_keyboard())
+        await safe_edit_message_text(query, "Группа:", reply_markup=_group_section_keyboard(conn, chat_id))
         return
     if action == "classmates":
         await classmates_command(update, context)
@@ -144,6 +175,18 @@ async def _handle_group_section(update, context, conn, chat_id: int, action: str
         return
     if action == "votes":
         await votes_command(update, context)
+        return
+    if action == "starostapanel":
+        await _handle_starosta_section(update, context, conn, chat_id, "root")
+        return
+    if action == "starosta":
+        await safe_edit_message_text(query, _STAROSTA_ELECTION_RULES_TEXT, reply_markup=_STAROSTA_CONFIRM_KEYBOARD)
+        return
+    if action == "starostaconfirm":
+        await starosta_command(update, context)
+        return
+    if action == "starostaabort":
+        await safe_edit_message_text(query, "Группа:", reply_markup=_group_section_keyboard(conn, chat_id))
         return
 
 
@@ -155,7 +198,7 @@ def _starosta_privileges_keyboard(group) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(closed_label, callback_data="menu:starosta:toggleclosed")],
             [InlineKeyboardButton("📢 Оповестить группу", callback_data="menu:starosta:notify")],
             [InlineKeyboardButton("📥 Заявки", callback_data="menu:starosta:requests")],
-            [InlineKeyboardButton("◀️ Назад", callback_data=ROOT_CALLBACK_DATA)],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu:group:root")],
         ]
     )
 
@@ -196,6 +239,17 @@ async def _handle_starosta_section(update, context, conn, chat_id: int, action: 
 
 
 GROUPS_PER_MENU_PAGE = 8
+INSTITUTES_PER_MENU_PAGE = 8
+
+# The 4 admin flows that pick "some group" out of the whole system
+# (settings/starosta/closed-toggle/requests-by-group) all share the same
+# institute -> group (+ search) navigation, keyed by this verb — mirrors
+# change_group_commands.py's subscriber-facing picker so both feel the same.
+ADMIN_GROUP_PICK_ACTIONS = {"pickgroup", "pickstarostagroup", "toggleclosed", "pickrequestsgroup"}
+
+# A query typed into one of the 4 pickers' search prompts has no pagination
+# of its own (YAGNI) — this just caps a pathologically broad query.
+ADMIN_GROUP_SEARCH_RESULTS_LIMIT = 20
 
 
 def _admin_root_keyboard() -> InlineKeyboardMarkup:
@@ -212,27 +266,116 @@ def _admin_root_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _build_admin_group_picker(conn, pick_action: str, page: int = 0) -> InlineKeyboardMarkup:
-    # This picker is deliberately cross-institute (admin group settings/
-    # starosta/closed-toggle/requests apply per-group, not per-institute),
-    # unlike group_commands.py's build_group_picker_keyboard which is
-    # institute-scoped for the subscriber-facing flow. storage.list_groups/
-    # count_groups now require an institute_id, so we use the unpaginated
-    # list_all_groups and paginate in Python instead.
-    all_groups = storage.list_all_groups(conn)
-    total = len(all_groups)
-    offset = page * GROUPS_PER_MENU_PAGE
-    groups = all_groups[offset : offset + GROUPS_PER_MENU_PAGE]
-    rows = [[InlineKeyboardButton(g.name, callback_data=f"menu:{pick_action}:{g.id}")] for g in groups]
+def _build_admin_institute_picker(conn, pick_action: str, page: int = 0) -> InlineKeyboardMarkup:
+    offset = page * INSTITUTES_PER_MENU_PAGE
+    all_institutes = storage.list_institutes(conn)
+    institutes = all_institutes[offset : offset + INSTITUTES_PER_MENU_PAGE]
+    rows = [[InlineKeyboardButton(i.name, callback_data=f"menu:{pick_action}inst:{i.id}")] for i in institutes]
     nav_row = []
     if page > 0:
-        nav_row.append(InlineKeyboardButton("« Назад", callback_data=f"menu:{pick_action}page:{page - 1}"))
-    if offset + GROUPS_PER_MENU_PAGE < total:
-        nav_row.append(InlineKeyboardButton("Вперёд »", callback_data=f"menu:{pick_action}page:{page + 1}"))
+        nav_row.append(InlineKeyboardButton("« Назад", callback_data=f"menu:{pick_action}instpage:{page - 1}"))
+    if offset + INSTITUTES_PER_MENU_PAGE < len(all_institutes):
+        nav_row.append(InlineKeyboardButton("Вперёд »", callback_data=f"menu:{pick_action}instpage:{page + 1}"))
     if nav_row:
         rows.append(nav_row)
     rows.append([InlineKeyboardButton("◀️ Назад", callback_data="menu:admin:root")])
     return InlineKeyboardMarkup(rows)
+
+
+def _admin_group_candidates(conn, institute_id: int):
+    # include_unverified=True: admin-facing pickers must stay able to reach
+    # even an is_verified == -1 ("not found in the PDF") group — unlike the
+    # subscriber-facing change_group picker, which hides those — because an
+    # admin troubleshooting a bad group is exactly who needs to find it.
+    return storage.list_groups(conn, institute_id, limit=1_000_000, offset=0, include_unverified=True)
+
+
+def _build_admin_group_picker(conn, pick_action: str, institute_id: int, page: int = 0) -> InlineKeyboardMarkup:
+    groups = _admin_group_candidates(conn, institute_id)
+    offset = page * GROUPS_PER_MENU_PAGE
+    page_groups = groups[offset : offset + GROUPS_PER_MENU_PAGE]
+    rows = [[InlineKeyboardButton(g.name, callback_data=f"menu:{pick_action}:{g.id}")] for g in page_groups]
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("« Назад", callback_data=f"menu:{pick_action}page:{institute_id}:{page - 1}"))
+    if offset + GROUPS_PER_MENU_PAGE < len(groups):
+        nav_row.append(InlineKeyboardButton("Вперёд »", callback_data=f"menu:{pick_action}page:{institute_id}:{page + 1}"))
+    if nav_row:
+        rows.append(nav_row)
+    rows.append([InlineKeyboardButton("🔍 Поиск по названию", callback_data=f"menu:{pick_action}search:{institute_id}")])
+    rows.append([InlineKeyboardButton("◀️ К институтам", callback_data=f"menu:{pick_action}toinst:_")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_admin_group_search_result(
+    conn, pick_action: str, institute_id: int, query_text: str
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    needle = query_text.strip().lower()
+    matches = [g for g in _admin_group_candidates(conn, institute_id) if needle in g.name.lower()]
+    if not needle or not matches:
+        return "Совпадений не найдено. Попробуйте другой запрос.", None
+
+    shown = matches[:ADMIN_GROUP_SEARCH_RESULTS_LIMIT]
+    rows = [[InlineKeyboardButton(g.name, callback_data=f"menu:{pick_action}:{g.id}")] for g in shown]
+    rows.append([InlineKeyboardButton("◀️ К институтам", callback_data=f"menu:{pick_action}toinst:_")])
+    text = (
+        f"Найдено групп: {len(matches)}."
+        if len(matches) <= ADMIN_GROUP_SEARCH_RESULTS_LIMIT
+        else f"Показаны первые {ADMIN_GROUP_SEARCH_RESULTS_LIMIT} из {len(matches)} найденных групп, уточните запрос."
+    )
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _match_admin_group_pick_section(section: str) -> tuple[str, str] | None:
+    """Recognizes the generic institute/group/search navigation callbacks
+    shared by all ADMIN_GROUP_PICK_ACTIONS verbs — e.g. section
+    "pickgroupinst" -> ("pickgroup", "inst"). Returns None for the final
+    "<pick_action>:<group_id>" selection (handled separately by
+    _handle_group_scoped_pick) and for anything unrelated."""
+    for pick_action in ADMIN_GROUP_PICK_ACTIONS:
+        for suffix in ("instpage", "inst", "page", "search", "toinst"):
+            if section == f"{pick_action}{suffix}":
+                return pick_action, suffix
+    return None
+
+
+async def _handle_admin_group_pick_navigation(
+    update, context, conn, chat_id: int, admin_chat_id: int, pick_action: str, suffix: str, action: str
+) -> None:
+    query = update.callback_query
+    if chat_id != admin_chat_id:
+        await query.message.reply_text("Недостаточно прав.")
+        return
+
+    if suffix == "instpage":
+        await safe_edit_reply_markup(query, reply_markup=_build_admin_institute_picker(conn, pick_action, int(action)))
+        return
+    if suffix == "inst":
+        institute_id = int(action)
+        institute = storage.get_institute(conn, institute_id)
+        if institute is None:
+            await query.message.reply_text("Этот институт больше не существует.")
+            return
+        await safe_edit_message_text(query,
+            f"Институт «{institute.name}». Выберите группу:",
+            reply_markup=_build_admin_group_picker(conn, pick_action, institute_id),
+        )
+        return
+    if suffix == "page":
+        institute_id_str, page_str = action.split(":")
+        await safe_edit_reply_markup(query,
+            reply_markup=_build_admin_group_picker(conn, pick_action, int(institute_id_str), int(page_str)),
+        )
+        return
+    if suffix == "search":
+        context.user_data["pending_menu_action"] = _pending_action(
+            "admin_group_search", pick_action=pick_action, institute_id=int(action)
+        )
+        await query.message.reply_text("Отправьте часть названия группы:")
+        return
+    if suffix == "toinst":
+        await safe_edit_message_text(query, "Выберите институт:", reply_markup=_build_admin_institute_picker(conn, pick_action))
+        return
 
 
 def _group_settings_submenu(group_id: int) -> InlineKeyboardMarkup:
@@ -307,16 +450,18 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
         await query.message.reply_text("Отправьте название нового института:")
         return
     if action == "groupsettings":
-        await safe_edit_message_text(query, "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickgroup"))
+        await safe_edit_message_text(query,
+            "Выберите институт:", reply_markup=_build_admin_institute_picker(conn, "pickgroup")
+        )
         return
     if action == "starostas":
         await safe_edit_message_text(query,
-            "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickstarostagroup")
+            "Выберите институт:", reply_markup=_build_admin_institute_picker(conn, "pickstarostagroup")
         )
         return
     if action == "closedtoggle":
         await safe_edit_message_text(query,
-            "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "toggleclosed")
+            "Выберите институт:", reply_markup=_build_admin_institute_picker(conn, "toggleclosed")
         )
         return
     if action == "requests":
@@ -324,7 +469,7 @@ async def _handle_admin_section(update, context, conn, chat_id: int, admin_chat_
         return
     if action == "requestsbygroup":
         await safe_edit_message_text(query,
-            "Выберите группу:", reply_markup=_build_admin_group_picker(conn, "pickrequestsgroup")
+            "Выберите институт:", reply_markup=_build_admin_institute_picker(conn, "pickrequestsgroup")
         )
         return
     if action == "allrequests":
@@ -357,7 +502,7 @@ async def _handle_group_scoped_pick(update, context, conn, chat_id: int, admin_c
         storage.update_group_closed(conn, group.id, not group.is_closed)
         await safe_edit_message_text(query,
             f"Группа «{group.name}»: состояние обновлено.",
-            reply_markup=_build_admin_group_picker(conn, "toggleclosed"),
+            reply_markup=_build_admin_group_picker(conn, "toggleclosed", group.institute_id),
         )
         return
     if action == "pickrequestsgroup":
@@ -569,6 +714,16 @@ async def pending_action_followup(update, context) -> None:
             await update.message.reply_text(
                 f"Интервал сканирования каталога института «{institute.name}» обновлён: {minutes} мин."
             )
+        elif action == "change_group_search":
+            member = storage.get_member(conn, update.effective_chat.id)
+            if member is None:
+                await update.message.reply_text("Вы больше не в какой-либо группе — используйте /start.")
+                return
+            text, keyboard = build_change_group_search_result(conn, institute.id, member.group_id, value)
+            await update.message.reply_text(text, reply_markup=keyboard)
+        elif action == "admin_group_search":
+            text, keyboard = _build_admin_group_search_result(conn, pending["pick_action"], institute.id, value)
+            await update.message.reply_text(text, reply_markup=keyboard)
         return
 
     group = storage.get_group(conn, pending["group_id"])
@@ -618,21 +773,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _handle_institute_scoped_pick(update, context, conn, chat_id, admin_chat_id, section, int(action))
         return
 
-    admin_picker_prompts = {
-        "pickgrouppage": "Выберите группу:",
-        "pickstarostagrouppage": "Выберите группу:",
-        "toggleclosedpage": "Выберите группу:",
-        "pickrequestsgrouppage": "Выберите группу:",
-    }
-    if section in admin_picker_prompts:
-        if chat_id != admin_chat_id:
-            await query.message.reply_text("Недостаточно прав.")
-            return
-        pick_action = section[: -len("page")]
-        await safe_edit_message_text(query,
-            admin_picker_prompts[section],
-            reply_markup=_build_admin_group_picker(conn, pick_action, page=int(action)),
-        )
+    admin_group_pick_match = _match_admin_group_pick_section(section)
+    if admin_group_pick_match is not None:
+        pick_action, suffix = admin_group_pick_match
+        await _handle_admin_group_pick_navigation(update, context, conn, chat_id, admin_chat_id, pick_action, suffix, action)
         return
 
     if section == "root":

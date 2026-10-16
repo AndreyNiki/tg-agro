@@ -147,8 +147,8 @@ async def run_legacy_migration_if_configured(
     await sync_institute_link_fn(group.institute_link_id)
 
     storage.set_setting(conn, _DONE_SETTING_KEY, datetime.now(timezone.utc).isoformat())
-    noun = pluralize_russian(len(chat_ids), "участник", "участника", "участников")
+    noun = pluralize_russian(len(backed_up), "участник", "участника", "участников")
     await notify_admin(
-        f"Миграция легаси-пользователей выполнена: {len(chat_ids)} {noun} переключено в группу "
-        f"«{group.name}» института «{institute.name}»."
+        f"Миграция легаси-пользователей выполнена: {len(chat_ids)} из {len(backed_up)} {noun} "
+        f"переключено в группу «{group.name}» института «{institute.name}»."
     )
