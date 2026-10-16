@@ -1,11 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <module type="WEB_MODULE" version="4">
-  <component name="Go" enabled="true" />
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$/.claude/worktrees/feature+schedule-bot" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.claude/worktrees/starosta-role" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.worktrees/institutes-shared-schedules" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.worktrees/menu-ui" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.claude/worktrees/feature+schedule-bot/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.claude/worktrees/classmates-list/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.claude/worktrees/menu-ui/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.claude/worktrees/starosta-privileges/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.claude/worktrees/starosta-role/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.worktrees/feat/institute-forms-and-legacy-migration/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.worktrees/institutes-shared-schedules/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.worktrees/menu-ui/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
