@@ -12,6 +12,53 @@ def _needs_institute_schema_rebuild(conn: sqlite3.Connection) -> bool:
     return "institute_id" not in columns
 
 
+def _needs_legacy_schedule_versions_rebuild(conn: sqlite3.Connection) -> bool:
+    # A database that never advanced past the very first (pre-"groups")
+    # schema has a `schedule_versions` keyed by `group_name`, not
+    # `group_id` — and no `groups` table at all, so
+    # _needs_institute_schema_rebuild above mistakes it for a fresh
+    # install and skips its rebuild entirely, leaving this ancient table
+    # in place to break every schedule_versions query at runtime.
+    info = conn.execute("PRAGMA table_info(schedule_versions)").fetchall()
+    if not info:
+        return False  # table doesn't exist yet; CREATE TABLE IF NOT EXISTS below handles it
+    columns = {row[1] for row in info}
+    return "group_id" not in columns
+
+
+def _rebuild_legacy_schedule_versions(conn: sqlite3.Connection) -> None:
+    # groups/members/institutes may already be correctly populated (e.g.
+    # a user already re-subscribed through the new /start on this same
+    # broken deploy) — only the ancient schedule_versions/subscribers
+    # pair gets dropped here, not groups/members.
+    _backup_legacy_subscriber_chat_ids(conn)
+    conn.executescript(
+        """
+        DROP TABLE IF EXISTS schedule_versions;
+        DROP TABLE IF EXISTS subscribers;
+        """
+    )
+    conn.commit()
+
+
+def _backup_legacy_subscriber_chat_ids(conn: sqlite3.Connection) -> None:
+    info = conn.execute("PRAGMA table_info(subscribers)").fetchall()
+    if not info:
+        return  # no subscribers table existed yet in the old schema — nothing to back up
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS legacy_members_backup (
+            chat_id INTEGER PRIMARY KEY,
+            subscribed INTEGER NOT NULL DEFAULT 1,
+            joined_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    _migrate_legacy_members_backup_add_subscribed_and_joined_at(conn)
+    conn.execute("INSERT OR IGNORE INTO legacy_members_backup (chat_id, joined_at) SELECT chat_id, joined_at FROM subscribers")
+    conn.commit()
+
+
 def _backup_legacy_member_chat_ids(conn: sqlite3.Connection) -> None:
     info = conn.execute("PRAGMA table_info(members)").fetchall()
     if not info:
@@ -118,6 +165,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
     if _needs_institute_schema_rebuild(conn):
         _rebuild_groups_members_schedule_versions(conn)
+    elif _needs_legacy_schedule_versions_rebuild(conn):
+        _rebuild_legacy_schedule_versions(conn)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS institutes (
